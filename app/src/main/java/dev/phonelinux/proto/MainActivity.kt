@@ -197,6 +197,7 @@ private fun DistroCard(d: Distro, vm: SpikeViewModel, onPrimary: () -> Unit) {
     }
 }
 
+@OptIn(androidx.compose.ui.test.ExperimentalTestApi::class)
 @Composable
 private fun TerminalScreen(vm: SpikeViewModel, onBack: () -> Unit) {
     BackHandler { onBack() }

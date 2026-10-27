@@ -65,5 +65,33 @@ class DesktopClientTest {
         Shot.save("07-desktop-client")
 
         client.destroy()
+
+        // Desktop shell phase: real wm + panel + file manager, the
+        // computer-like desktop the user asked for.
+        if (!GuestDesktop.hasDesktopShell(rootfs)) {
+            val add = GuestDesktop.provisionDesktopShell(appCtx, rootfs)
+            assertTrue("apk add desktop shell failed (exit ${add.exitCode}): ${(add.stdout + add.stderr).takeLast(600)}", add.exitCode == 0)
+        }
+        assertTrue("desktop shell missing after provisioning", GuestDesktop.hasDesktopShell(rootfs))
+
+        val session = GuestDesktop.launchDesktopSession(appCtx, rootfs)
+        Thread.sleep(25_000)
+        val wmAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep openbox")
+        val panelAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep lxpanel")
+        val fmAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep pcmanfm")
+        val deskLog = try { device.executeShellCommand("run-as dev.phonelinux.proto tail -c 1500 files/guest-desktop.log 2>&1") } catch (t: Throwable) { "" }
+        assertTrue("openbox not running. Desktop log:
+$deskLog", wmAlive)
+        assertTrue("lxpanel not running. Desktop log:
+$deskLog", panelAlive)
+        assertTrue("pcmanfm not running. Desktop log:
+$deskLog", fmAlive)
+        assertTrue("desktop session exited early. Desktop log:
+$deskLog", session.isAlive)
+
+        Shot.dismissSystemDialogs(device)
+        Shot.save("08-desktop-shell")
+
+        session.destroy()
     }
 }
