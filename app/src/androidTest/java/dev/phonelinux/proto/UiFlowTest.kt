@@ -27,10 +27,10 @@ class UiFlowTest {
         val dir = "/data/local/tmp/phonelinux-shots"
         device.executeShellCommand("mkdir -p $dir")
         val path = "$dir/$name.png"
-        device.executeShellCommand("screencap -p '$path'")
-        val probe = device.executeShellCommand("test -s '$path' && echo SHOT_OK").trim()
-        android.util.Log.i("PHONELINUX_SHOT", "$name -> $path probe=$probe")
-        if (probe != "SHOT_OK") throw AssertionError("screenshot $name not captured at $path")
+        val diag = device.executeShellCommand("screencap -p $path; echo RC=\$?; ls -la $dir").trim()
+        android.util.Log.i("PHONELINUX_SHOT", "$name -> $path diag=$diag")
+        val probe = device.executeShellCommand("test -s $path && echo SHOT_OK").trim()
+        if (probe != "SHOT_OK") throw AssertionError("screenshot $name not captured at $path; diag: $diag")
     }
 
     @Test
