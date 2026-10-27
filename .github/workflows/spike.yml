@@ -57,9 +57,13 @@ jobs:
           arch: x86_64
           profile: pixel_6
           script: |
+            adb -s emulator-5554 logcat -G 16M || true
+            adb -s emulator-5554 logcat -c || true
             ./gradlew connectedDebugAndroidTest --info 2>&1 | tee /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
             grep -q "BUILD SUCCESSFUL" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
+            adb -s emulator-5554 logcat -d > /tmp/shotlog.txt || true
             mkdir -p screenshots
+            python3 .github/scripts/extract_shots.py /tmp/shotlog.txt screenshots || true
             python3 .github/scripts/extract_shots.py /tmp/instr.log screenshots || true
             find screenshots -type f | sort || true
             if [ -f /tmp/PHONELINUX_TESTS_FAILED ]; then exit 1; fi
