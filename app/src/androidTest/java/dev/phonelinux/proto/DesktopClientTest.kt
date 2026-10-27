@@ -23,7 +23,7 @@ import java.io.File
 class DesktopClientTest {
 
     @Test
-    fun guestXclockDrawsThroughEmbeddedServer() = runBlocking {
+    fun guestXclockDrawsThroughEmbeddedServer(): Unit = runBlocking {
         val appCtx = ApplicationProvider.getApplicationContext<Context>()
         val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
         val installer = DistroInstaller(appCtx)
