@@ -108,7 +108,9 @@ class DesktopClientTest {
         // pre-spawn under proot on this emulator (executed evidence, CI run
         // a4e6e3f), so the session script ladders xterm -> st -> fallbacks.
         var termAlive = false
-        val xtDeadline = System.currentTimeMillis() + 60_000
+        // 120s covers the in-guest DIAGNOSTIC gcc compile (ctty probe) ahead
+        // of the ladder; trim once the probe comes back out.
+        val xtDeadline = System.currentTimeMillis() + 120_000
         while (System.currentTimeMillis() < xtDeadline) {
             if (GuestDesktop.guestOk(appCtx, rootfs, "pgrep -x xterm || pgrep -x st")) { termAlive = true; break }
             Thread.sleep(3_000)

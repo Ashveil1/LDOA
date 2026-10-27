@@ -69,7 +69,10 @@ object GuestDesktop {
         "openbox", "jwm", "icewm", "fluxbox",
         "tint2", "pcmanfm", "xterm", "xsetroot", "fontconfig",
         "font-dejavu", "font-misc-misc", "hicolor-icon-theme",
-        "util-linux", "st")
+        "util-linux", "st",
+        // DIAGNOSTIC: in-guest C toolchain for the ctty probe below; drop
+        // once the terminal child-spawn root cause is pinned.
+        "gcc", "musl-dev")
 
     // tint2's own config generation corrupts its path under proot
     // ("/root/.config/tint2/t/nt2rc") and produces a 2px panel - ship a
@@ -167,6 +170,68 @@ object GuestDesktop {
               echo "PTY-PROBE-SKIP (no script applet)"
             fi
             rm -f /root/xchild.proof
+            # Syscall-level probe: replicates st's ctty recipe (setsid +
+            # explicit TIOCSCTTY on pre-opened slave) and script's recipe
+            # (setsid + open slave WITHOUT O_NOCTTY = auto-ctty). Results go
+            # to a file: after dup2 the child's stdout is the unread pty.
+            cat > /root/cttyprobe.c <<'CEOF'
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/ioctl.h>
+#include <sys/wait.h>
+static void res(const char *m) {
+    FILE *f = fopen("/root/ctty-probe.res", "a");
+    if (f) { fprintf(f, "%s\n", m); fclose(f); }
+}
+int main(void) {
+    char buf[256];
+    int m = posix_openpt(O_RDWR | O_NOCTTY);
+    if (m < 0) { snprintf(buf, sizeof buf, "PROBE posix_openpt: %s", strerror(errno)); res(buf); return 1; }
+    if (grantpt(m) < 0) { snprintf(buf, sizeof buf, "PROBE grantpt: %s", strerror(errno)); res(buf); }
+    if (unlockpt(m) < 0) { snprintf(buf, sizeof buf, "PROBE unlockpt: %s", strerror(errno)); res(buf); }
+    char *pn = ptsname(m);
+    snprintf(buf, sizeof buf, "PROBE ptsname=%s", pn ? pn : "(null)"); res(buf);
+    int s = open(pn, O_RDWR | O_NOCTTY);
+    if (s < 0) { snprintf(buf, sizeof buf, "PROBE open slave: %s", strerror(errno)); res(buf); return 1; }
+    /* Child A: st's recipe */
+    if (fork() == 0) {
+        close(m);
+        if (setsid() < 0) { snprintf(buf, sizeof buf, "PROBE-A setsid: %s", strerror(errno)); res(buf); _exit(2); }
+        dup2(s, 0); dup2(s, 1); dup2(s, 2);
+        if (ioctl(0, TIOCSCTTY, 0) < 0) { snprintf(buf, sizeof buf, "PROBE-A TIOCSCTTY: %s", strerror(errno)); res(buf); _exit(3); }
+        snprintf(buf, sizeof buf, "PROBE-A ctty OK (%s)", ttyname(0)); res(buf);
+        _exit(0);
+    }
+    int st1; wait(&st1);
+    snprintf(buf, sizeof buf, "PROBE-A child exit=%d", WIFEXITED(st1) ? WEXITSTATUS(st1) : -1); res(buf);
+    /* Child B: script's recipe - re-open slave without O_NOCTTY (auto-ctty) */
+    if (fork() == 0) {
+        if (setsid() < 0) { snprintf(buf, sizeof buf, "PROBE-B setsid: %s", strerror(errno)); res(buf); _exit(2); }
+        int s2 = open(pn, O_RDWR); /* no O_NOCTTY: should become ctty */
+        if (s2 < 0) { snprintf(buf, sizeof buf, "PROBE-B open slave: %s", strerror(errno)); res(buf); _exit(3); }
+        int t = open("/dev/tty", O_RDWR);
+        snprintf(buf, sizeof buf, "PROBE-B /dev/tty open: %s", t < 0 ? strerror(errno) : "OK");
+        res(buf);
+        _exit(0);
+    }
+    int st2; wait(&st2);
+    snprintf(buf, sizeof buf, "PROBE-B child exit=%d", WIFEXITED(st2) ? WEXITSTATUS(st2) : -1); res(buf);
+    return 0;
+}
+CEOF
+            rm -f /root/ctty-probe.res
+            if command -v gcc >/dev/null 2>&1; then
+              gcc -O1 -o /root/cttyprobe /root/cttyprobe.c 2>&1
+              /root/cttyprobe
+              echo "ctty-probe exit=${'$'}?"
+              cat /root/ctty-probe.res 2>/dev/null
+            else
+              echo "CTTY-PROBE-SKIP (no gcc)"
+            fi
             # Non-interactive pty commands work (probe above) but terminal
             # children - INTERACTIVE shells - exit instantly (st: child
             # exited status 1; xterm: silent exit 0). Feed script a fixed
