@@ -104,6 +104,9 @@ class UiFlowTest {
         // a short window flakes between "not arrived" and "rendered".
         val outDeadline = System.currentTimeMillis() + 90_000
         while (System.currentTimeMillis() < outDeadline) {
+            // Stacked system dialogs (launcher ANR etc) hide the whole app
+            // tree: foreground pkg flips to "android" and every find fails.
+            Shot.dismissSystemDialogs(device)
             val n = device.findObject(By.textContains("job control"))
             if (n != null && n.text != null && n.text.contains("TERM-OK")) { out = n; break }
             Thread.sleep(1_000)
@@ -135,6 +138,29 @@ class UiFlowTest {
         Thread.sleep(1_500)
         shot(device, "04b-terminal-output-rendered")
 
+        // 4b. A second command must also run and render (repeat use).
+        runCommand(device, "echo SECOND-OK", "SECOND-OK")
+
+        // 4c. Long output: seq overflows the viewport, forcing real scroll.
+        runCommand(device, "seq 1 60 && echo SEQ-END-MARKER", "SEQ-END-MARKER")
+        Thread.sleep(1_000)
+        shot(device, "04c-long-output-bottom") // auto-scroll pinned to bottom
+        // Scrollback proof is PIXEL-level: the whole scrollback lives in one
+        // semantics node, so only an inspected frame shows the viewport moved.
+        val outBox = device.wait(Until.findObject(By.desc("terminal-output")), 10_000)
+        assertNotNull("terminal-output node for scroll", outBox)
+        val b = outBox.visibleBounds
+        device.swipe(b.centerX(), b.top + b.height() / 4, b.centerX(), b.bottom - b.height() / 8, 20)
+        device.waitForIdle(1_000)
+        // Re-open the IME over the scrolled view: layout repair must hold
+        // with long content and a moved viewport, not just a fresh screen.
+        val fieldAgain = device.wait(Until.findObject(By.clazz("android.widget.EditText")), 5_000)
+        fieldAgain?.click()
+        Thread.sleep(1_500)
+        shot(device, "04d-long-output-scrolled-ime")
+        device.pressBack()
+        device.waitForIdle(1_000)
+
         // 5. orientation: landscape must keep the terminal usable
         device.setOrientationLandscape()
         device.waitForIdle(3_000)
@@ -143,5 +169,45 @@ class UiFlowTest {
         shot(device, "05-landscape")
         device.setOrientationNatural()
         device.waitForIdle(2_000)
+    }
+
+    /** Type-and-run one command through the real UI, asserting the input
+     *  behavior (text lands, field clears after send) and that its output
+     *  renders in the terminal-output node. */
+    private fun runCommand(device: UiDevice, cmd: String, needle: String) {
+        val field = device.wait(Until.findObject(By.clazz("android.widget.EditText")), 10_000)
+        assertNotNull("terminal editable field for: " + cmd, field)
+        field.click()
+        device.waitForIdle(500)
+        field.setText(cmd)
+        val typeDeadline = System.currentTimeMillis() + 8_000
+        while (System.currentTimeMillis() < typeDeadline) {
+            val t = field.text
+            if (t != null && t.contains(needle.take(6))) break
+            Thread.sleep(300)
+        }
+        val send = device.wait(Until.findObject(By.desc("terminal-send")), 5_000)
+        assertNotNull("send button for: " + cmd, send)
+        val enableDeadline = System.currentTimeMillis() + 5_000
+        while (System.currentTimeMillis() < enableDeadline && !send.isEnabled) Thread.sleep(300)
+        assertTrue("send button never enabled for: " + cmd, send.isEnabled)
+        send.click()
+        // Input behavior: Run must clear the field.
+        val clearDeadline = System.currentTimeMillis() + 5_000
+        var cleared = false
+        while (System.currentTimeMillis() < clearDeadline) {
+            if (field.text.isNullOrEmpty()) { cleared = true; break }
+            Thread.sleep(300)
+        }
+        assertTrue("input field not cleared after Run", cleared)
+        val deadline = System.currentTimeMillis() + 90_000
+        var ok = false
+        while (System.currentTimeMillis() < deadline) {
+            Shot.dismissSystemDialogs(device)
+            val n = device.findObject(By.desc("terminal-output"))
+            if (n != null && n.text != null && n.text.contains(needle)) { ok = true; break }
+            Thread.sleep(1_000)
+        }
+        assertTrue("output for '" + cmd + "' never contained '" + needle + "'", ok)
     }
 }

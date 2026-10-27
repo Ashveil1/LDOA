@@ -155,7 +155,27 @@ object GuestDesktop {
             if [ "${'$'}WM" = "openbox" ]; then tint2 & fi
             # -fa: Alpine xterm's default bitmap font "fixed" needs
             # font-misc-misc; Xft font avoids the dependency either way.
+            # Liveness-checked with a bitmap-font retry: a silent xterm
+            # death once slipped past probes (nothing in the log), so the
+            # script itself now records what happened.
             xterm -fa "DejaVu Sans Mono" -fs 12 -geometry 100x30+120+120 &
+            XTERMPID=${'$'}!
+            sleep 8
+            if kill -0 ${'$'}XTERMPID 2>/dev/null; then
+              echo "xterm-ok mode=xft pid=${'$'}XTERMPID"
+            else
+              wait ${'$'}XTERMPID; XEXIT=${'$'}?
+              echo "xterm xft mode died (exit=${'$'}XEXIT), retrying bitmap font"
+              xterm -fn fixed -geometry 100x30+120+120 &
+              XTERMPID=${'$'}!
+              sleep 6
+              if kill -0 ${'$'}XTERMPID 2>/dev/null; then
+                echo "xterm-ok mode=bitmap pid=${'$'}XTERMPID"
+              else
+                wait ${'$'}XTERMPID
+                echo "XTERM DEAD both modes (exit=${'$'}?)"
+              fi
+            fi
             wait
             """.trimIndent() + "\n")
         val nd = ctx.applicationInfo.nativeLibraryDir

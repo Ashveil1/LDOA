@@ -59,6 +59,10 @@ jobs:
           script: |
             adb -s emulator-5554 logcat -G 16M || true
             adb -s emulator-5554 logcat -c || true
+            # Background-app ANR dialogs (Pixel Launcher chokes under our
+            # install/proot load) cover the app and flake UI tests; user
+            # builds never show these. Foreground (our app) ANRs still show.
+            adb -s emulator-5554 shell settings put global anr_show_background 0 || true
             ./gradlew connectedDebugAndroidTest --info 2>&1 | tee /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
             grep -q "BUILD SUCCESSFUL" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
             adb -s emulator-5554 logcat -d > /tmp/shotlog.txt || true

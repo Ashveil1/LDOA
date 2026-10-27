@@ -103,7 +103,14 @@ class DesktopClientTest {
             "pgrep -x openbox || pgrep -x jwm || pgrep -x icewm || pgrep -x fluxbox")
         val panelAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep tint2")
         val fmAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep pcmanfm")
-        val xtermAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep xterm")
+        // xterm may still be starting (Xft/fontconfig under proot is slow)
+        // or may need the session script's bitmap-font retry: poll it.
+        var xtermAlive = false
+        val xtDeadline = System.currentTimeMillis() + 45_000
+        while (System.currentTimeMillis() < xtDeadline) {
+            if (GuestDesktop.guestOk(appCtx, rootfs, "pgrep xterm")) { xtermAlive = true; break }
+            Thread.sleep(3_000)
+        }
         val deskLogRaw = try { device.executeShellCommand("run-as dev.phonelinux.proto tail -c 4000 files/guest-desktop.log 2>&1") } catch (t: Throwable) { "" }
         val deskLog = deskLogRaw.map { c -> if (c.code in 32..126 || c == '\n') c else '?' }.joinToString("")
         if (!wmAlive) {
