@@ -11,7 +11,7 @@ object Shot {
     fun save(name: String) {
         val instr = InstrumentationRegistry.getInstrumentation()
         val appCtx = instr.targetContext
-        val bmp: Bitmap? = instr.uiAutomation.takeScreenshot()
+        val bmp: Bitmap = instr.uiAutomation.takeScreenshot()
             ?: throw AssertionError("UiAutomation.takeScreenshot returned null for $name")
         val dir = File(appCtx.filesDir, "shots").apply { mkdirs() }
         val f = File(dir, "$name.png")
