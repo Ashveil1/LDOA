@@ -21,7 +21,7 @@ import java.io.File
 class UiFlowTest {
 
     private fun shot(device: UiDevice, name: String) {
-        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val ctx = InstrumentationRegistry.getInstrumentation().context // test pkg dir: writable + adb-pullable
         val dir = File(ctx.getExternalFilesDir(null), "shots").apply { mkdirs() }
         val f = File(dir, "$name.png")
         val ok = device.takeScreenshot(f)

@@ -9,10 +9,14 @@
 - The vendored tree pulls its own ~17 pinned C submodules (xorg xserver,
   pixman, libx11, libepoxy, xkbcomp, libtirpc, bzip2, ...); each carries its
   own license (predominantly MIT/X11-style) in its submodule directory.
-- Modifications: none to vendored sources. Integration-only changes in this
-  repo: settings.gradle.kts module mapping, app manifest strips the library's
-  LAUNCHER intent-filter (single launcher icon), CI installs NDK 29.0.14206865
-  (required by lorie/version.gradle) and bison.
+- Modifications to vendored sources: exactly one compatibility line, recorded
+  here and in git history - lorie/build.gradle host-app detection uses
+  `it.dependencyProject.path` instead of `it.path` (ProjectDependency.getPath
+  exists only in Gradle 9; this repo builds with Gradle 8.9 / AGP 8.5.2).
+  Integration-only changes in this repo: settings.gradle.kts module mapping,
+  app manifest strips the library's LAUNCHER intent-filter (single launcher
+  icon), CI installs NDK 29.0.14206865 (required by lorie/version.gradle)
+  and bison.
 
 ## proot (binary, install/runtime phase)
 - Source: https://github.com/termux/proot (Termux apt build 5.1.107.101)

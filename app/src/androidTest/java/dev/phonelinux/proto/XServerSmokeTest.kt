@@ -1,6 +1,7 @@
 package dev.phonelinux.proto
 
 import android.content.Context
+import android.content.Intent
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -17,42 +18,49 @@ import java.io.File
  *     (extractNativeLibs=false) - failure would abort before listen
  *  3. the X server creates its listening socket at $TMPDIR/.X11-unix/X0
  *
- * The desktop activity is then launched and screenshotted for human/agent
- * inspection (artifact), not asserted.
+ * The socket lives in the app's internal files dir, so existence is probed
+ * via `run-as` through the shell (debuggable build), not a direct File call.
+ * The desktop activity is then launched and screenshotted for inspection
+ * (artifact), not asserted.
  */
 @RunWith(AndroidJUnit4::class)
 class XServerSmokeTest {
 
+    private fun shell(device: UiDevice, cmd: String): String =
+        device.executeShellCommand(cmd)
+
     @Test
     fun xServerSpawnsAndListens() {
-        val ctx = ApplicationProvider.getApplicationContext<Context>()
-        XServer.start(ctx)
+        val appCtx = ApplicationProvider.getApplicationContext<Context>()
+        val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+        XServer.start(appCtx)
 
-        val sock = File(XServer.socketDir(ctx), "X0")
+        val sock = File(XServer.socketDir(appCtx), "X0").absolutePath
         val deadline = System.currentTimeMillis() + 60_000
         var ok = false
+        var listing = ""
         while (System.currentTimeMillis() < deadline) {
-            if (sock.exists()) { ok = true; break }
-            Thread.sleep(500)
+            listing = try { shell(device, "run-as dev.phonelinux.proto ls $sock 2>&1") } catch (t: Throwable) { "shell failed: $t" }
+            if (listing.trim() == sock) { ok = true; break }
+            Thread.sleep(1_000)
         }
-        val logFile = File(ctx.filesDir, "xserver.log")
-        val log = if (logFile.exists()) logFile.readText().takeLast(4000) else "(no log)"
-        assertTrue("X socket never appeared at $sock. Server log tail:\n$log", ok)
+        val logTail = try { shell(device, "run-as dev.phonelinux.proto tail -c 3000 files/xserver.log 2>&1") } catch (t: Throwable) { "(log unreadable: $t)" }
+        assertTrue("X socket never appeared at $sock.\nls said: $listing\nServer log tail:\n$logTail", ok)
 
         // Best-effort: open the desktop activity and screenshot what renders.
         try {
-            val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
-            ctx.startActivity(
-                android.content.Intent(ctx, com.termux.x11.MainActivity::class.java)
-                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            appCtx.startActivity(
+                Intent(appCtx, com.termux.x11.MainActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             )
             Thread.sleep(8_000)
-            val shots = File(ctx.getExternalFilesDir(null), "shots").apply { mkdirs() }
+            val testCtx = InstrumentationRegistry.getInstrumentation().context
+            val shots = File(testCtx.getExternalFilesDir(null), "shots").apply { mkdirs() }
             val out = File(shots, "06-desktop-activity.png")
-            device.takeScreenshot(out)
-            android.util.Log.i("PhoneLinuxShot", "PHONELINUX_SHOT saved=${out.exists()} path=${out.absolutePath}")
+            val saved = device.takeScreenshot(out)
+            android.util.Log.i("PHONELINUX_SHOT", "06-desktop-activity -> ${out.absolutePath} ok=$saved exists=${out.exists()} size=${out.length()}")
         } catch (t: Throwable) {
-            android.util.Log.e("PhoneLinuxShot", "desktop screenshot attempt failed", t)
+            android.util.Log.e("PHONELINUX_SHOT", "desktop screenshot attempt failed", t)
         }
     }
 }
