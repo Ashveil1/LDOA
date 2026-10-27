@@ -46,7 +46,8 @@ object GuestDesktop {
             "LD_LIBRARY_PATH" to nd,
             "HOME" to "/root",
             "DISPLAY" to ":0",
-            "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "PROOT_TMP_DIR" to Proot.prootTmpDir(ctx).absolutePath
         ))
         pb.redirectErrorStream(true)
         pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))
@@ -101,7 +102,8 @@ object GuestDesktop {
             "LD_LIBRARY_PATH" to nd,
             "HOME" to "/root",
             "DISPLAY" to ":0",
-            "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "PROOT_TMP_DIR" to Proot.prootTmpDir(ctx).absolutePath
         ))
         pb.redirectErrorStream(true)
         pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))

@@ -47,6 +47,12 @@ object Proot {
 
     private fun prootPath(ctx: Context) = File(nativeDir(ctx), "libproot.so").absolutePath
 
+    /** The Termux-built proot has a baked temp dir under com.termux that does
+     *  not exist for us; without PROOT_TMP_DIR temp-file creation fails and
+     *  guest processes (openbox) die mid-syscall. */
+    fun prootTmpDir(ctx: Context): File =
+        File(ctx.cacheDir, "proot-tmp").apply { mkdirs() }
+
     private fun exec(ctx: Context, argv: List<String>, extraEnv: Map<String, String> = emptyMap()): Result {
         val nd = nativeDir(ctx)
         val env = mutableMapOf(
@@ -55,7 +61,8 @@ object Proot {
             "LD_LIBRARY_PATH" to nd,
             "HOME" to "/root",
             "TERM" to "xterm-256color",
-            "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "PROOT_TMP_DIR" to prootTmpDir(ctx).absolutePath
         )
         env.putAll(extraEnv)
         val start = System.nanoTime()
