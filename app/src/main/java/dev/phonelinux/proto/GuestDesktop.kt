@@ -78,15 +78,21 @@ object GuestDesktop {
     // ("/root/.config/tint2/t/nt2rc") and produces a 2px panel - ship a
     // known-good config instead: 48px bottom taskbar, launcher (xterm,
     // pcmanfm), task list, clock.
+    // DIAGNOSTIC RED PANEL: xwininfo proves the tint2 window is mapped
+    // (1080x48+0+1964 on a 1080x2012 screen) but its framebuffer zone reads
+    // pure black in screenshots. An unmissable opaque red separates
+    // "panel not rendering" from "panel dark-on-black"; revert to the dark
+    // color once visibility is proven. All backgrounds made opaque: no
+    // compositor runs under lorie, so any alpha < 100 cannot blend.
     private val TINT2RC = """
         rounded = 0
         border_width = 1
-        background_color = #1B1E28 100
+        background_color = #BF616A 100
         border_color = #3B4252 100
         rounded = 4
         border_width = 0
-        background_color = #2E3440 60
-        border_color = #000000 0
+        background_color = #2E3440 100
+        border_color = #000000 100
         panel_monitor = all
         panel_position = bottom center horizontal
         panel_size = 100% 48

@@ -136,7 +136,7 @@ class DesktopClientTest {
         // Geometry evidence for the panel/icons visibility question: the
         // full X window tree and screen size, timed with the 08 shot.
         val winTree = GuestDesktop.guestShell(appCtx, rootfs,
-            "export DISPLAY=:0; xwininfo -root -tree 2>&1 | head -c 2400; echo; xdpyinfo 2>/dev/null | grep dimensions",
+            "export DISPLAY=:0; xwininfo -root -tree 2>&1 | head -c 4000; echo; xdpyinfo 2>/dev/null | grep dimensions",
             listOf(XServer.socketDir(appCtx).absolutePath to "/tmp/.X11-unix"))
         android.util.Log.i("PHONEDIAG", "x window tree: " + winTree.replace("\n", "|"))
         Shot.dismissSystemDialogs(device)
