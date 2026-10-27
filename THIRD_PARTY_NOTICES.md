@@ -17,7 +17,18 @@
   this repo builds with Gradle 8.9 / AGP 8.7.3); (b) vendored
   compileSdkVersion 34 -> 35 (their current androidx set requires 35; the
   androidx.lifecycle group is separately pinned to 2.8.7 in the root
-  build.gradle.kts because 2.11.0 demands AGP 9.1 / compileSdk 37).
+  build.gradle.kts because 2.11.0 demands AGP 9.1 / compileSdk 37);
+  (c) lorie/.../CmdEntryPoint.java initEntryPoint preloads libXlorie.so from
+  the XSERVER_LIB env var when set - the upstream classloader-resource load
+  only works with extractNativeLibs=false, and this app must keep
+  extractNativeLibs=true (CI-verified: filesDir exec is blocked at
+  targetSdk 34, error=13; nativeLibraryDir execution is the verified path).
+
+## xkeyboard-config (runtime payload, downloaded on-device)
+- Source: https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64/xkeyboard-config-2.43-r0.apk
+- Pinned: version 2.43-r0, SHA-256 cab4611f7b37fecd2fc9e160585f6fb6c8e9f0fab2da3df6c516649247406db7, verified at provision time
+- Purpose: XKB_CONFIG_ROOT keymap data required by the embedded X server
+- License: MIT (per Alpine APKINDEX)
   Integration-only changes in this repo: settings.gradle.kts module mapping,
   app manifest strips the library's LAUNCHER intent-filter (single launcher
   icon), CI installs NDK 29.0.14206865 (required by lorie/version.gradle)

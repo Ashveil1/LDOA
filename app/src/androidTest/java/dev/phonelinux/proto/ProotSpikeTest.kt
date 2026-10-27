@@ -11,7 +11,7 @@ import org.junit.runner.RunWith
 
 /**
  * Spike: proves the risk-#1 packaging question -
- * proot shipped via assets (extracted to private dir) can launch and exec guest binaries
+ * proot shipped via jniLibs can launch and exec guest binaries
  * under modern targetSdk (34) with no root.
  */
 @RunWith(AndroidJUnit4::class)

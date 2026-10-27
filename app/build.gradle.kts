@@ -29,6 +29,14 @@ android {
 
     buildFeatures { compose = true }
 
+    packaging {
+        // extractNativeLibs=true requires legacy (uncompressed) packaging so our
+        // renamed executables land as real files in nativeLibraryDir with exec bit.
+        // EXECUTION-CRITICAL: CI proved filesDir extraction is blocked by W^X
+        // (error=13) at targetSdk 34; nativeLibraryDir is the only verified path.
+        jniLibs { useLegacyPackaging = true }
+    }
+
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

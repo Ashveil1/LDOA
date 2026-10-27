@@ -1,63 +1,38 @@
 package dev.phonelinux.proto
 
 import android.content.Context
-import android.os.Build
 import android.util.Log
 import java.io.File
 
 /**
- * Runs the Termux-built proot binary shipped under assets/proot/<abi>/.
- *
- * The payload is extracted to filesDir/proot/<abi>/ on first use and chmod'd
- * executable (the Termux delivery model: apps may exec their own private
- * files, CI-verified on API 34). Assets delivery (instead of jniLibs
- * lib*.so + extractNativeLibs) keeps modern APK packaging, which the
- * vendored :lorie X server requires to dlopen libXlorie from inside the APK.
+ * Runs the Termux-built proot binary shipped inside this APK's jniLibs
+ * (renamed to lib*.so so Android extracts it to nativeLibraryDir, which is
+ * executable even with targetSdk 29+). SPIKE: validates guest exec under
+ * modern targetSdk.
  */
 object Proot {
     private const val TAG = "PhoneLinuxSpike"
-    private const val PAYLOAD_VERSION = "5.1.107.101-termux1"
-
-    private val FILES = listOf("proot", "proot-loader", "proot-loader32", "libtalloc.so", "libandroid-shmem.so")
 
     data class Result(val exitCode: Int, val stdout: String, val stderr: String, val wallMs: Long)
 
-    private fun abi(): String = Build.SUPPORTED_ABIS.first { it == "arm64-v8a" || it == "x86_64" }
+    private fun nativeDir(ctx: Context): String = ctx.applicationInfo.nativeLibraryDir
 
-    fun binDir(ctx: Context): File = File(ctx.filesDir, "proot/${abi()}")
-
-    /** Idempotent extract of the proot payload to private storage with exec bits. */
-    @Synchronized
-    fun ensureExtracted(ctx: Context): File {
-        val dir = binDir(ctx)
-        val marker = File(dir, ".version")
-        if (!marker.isFile || marker.readText().trim() != PAYLOAD_VERSION || !FILES.all { File(dir, it).canExecute() }) {
-            dir.mkdirs()
-            for (name in FILES) {
-                ctx.assets.open("proot/${abi()}/$name").use { input ->
-                    File(dir, name).outputStream().use { input.copyTo(it) }
-                }
-                if (!File(dir, name).setExecutable(true, true)) error("chmod failed for $name")
-            }
-            marker.writeText(PAYLOAD_VERSION + "\n")
-            Log.i(TAG, "proot payload extracted to $dir")
-        }
-        return dir
+    fun binariesPresent(ctx: Context): Boolean {
+        val nd = File(nativeDir(ctx))
+        return listOf("libproot.so", "libproot_loader.so", "libtalloc.so", "libandroid-shmem.so")
+            .all { File(nd, it).canExecute() || File(nd, it).exists() }
     }
-
-    fun binariesPresent(ctx: Context): Boolean =
-        FILES.all { File(ensureExtracted(ctx), it).canExecute() }
 
     fun selfTest(ctx: Context): Result = runHost(ctx, listOf("--version"))
 
     /** Run a proot command on the host side (no rootfs). */
     fun runHost(ctx: Context, args: List<String>): Result =
-        exec(ctx, listOf(File(ensureExtracted(ctx), "proot").absolutePath) + args)
+        exec(ctx, listOf(prootPath(ctx)) + args)
 
     /** Run a command inside the installed guest rootfs. */
     fun runGuest(ctx: Context, rootfs: File, guestCmd: List<String>, extraBinds: List<Pair<String, String>> = emptyList(), extraEnv: Map<String, String> = emptyMap()): Result {
         val args = buildList {
-            add(File(ensureExtracted(ctx), "proot").absolutePath)
+            add(prootPath(ctx))
             add("--link2symlink")
             add("-r"); add(rootfs.absolutePath)
             add("-b"); add("/dev")
@@ -70,12 +45,14 @@ object Proot {
         return exec(ctx, args, extraEnv)
     }
 
+    private fun prootPath(ctx: Context) = File(nativeDir(ctx), "libproot.so").absolutePath
+
     private fun exec(ctx: Context, argv: List<String>, extraEnv: Map<String, String> = emptyMap()): Result {
-        val dir = ensureExtracted(ctx)
+        val nd = nativeDir(ctx)
         val env = mutableMapOf(
-            "PROOT_LOADER" to File(dir, "proot-loader").absolutePath,
-            "PROOT_LOADER_32" to File(dir, "proot-loader32").absolutePath,
-            "LD_LIBRARY_PATH" to dir.absolutePath,
+            "PROOT_LOADER" to File(nd, "libproot_loader.so").absolutePath,
+            "PROOT_LOADER_32" to File(nd, "libproot_loader32.so").absolutePath,
+            "LD_LIBRARY_PATH" to nd,
             "HOME" to "/root",
             "TERM" to "xterm-256color",
             "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

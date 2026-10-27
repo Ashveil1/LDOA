@@ -4,6 +4,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <application
         android:label="Phone Linux (proto)"
+        android:extractNativeLibs="true"
         android:theme="@style/Theme.PhoneLinux"
         android:allowBackup="false">
         <activity

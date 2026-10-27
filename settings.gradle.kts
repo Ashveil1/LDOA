@@ -29,6 +29,20 @@ run {
         check(patched in f.readText()) { "lorie Gradle 8.9 compat patch failed to apply" }
     }
 }
+// Vendored patch (c): CmdEntryPoint.initEntryPoint loads libXlorie via a
+// classloader resource URL, which only works with extractNativeLibs=false.
+// We must keep extractNativeLibs=true (W^X blocks filesDir exec at
+// targetSdk 34, CI-verified error=13), so add an XSERVER_LIB env preload.
+run {
+    val f = File(rootDir, "third_party/termux-x11/lorie/src/main/java/com/termux/x11/CmdEntryPoint.java")
+    if (f.exists()) {
+        val orig = "        ctx = createContext();\n"
+        val patched = "        ctx = createContext();\n\n        String xserverLib = System.getenv(\"XSERVER_LIB\");\n        if (xserverLib != null && !xserverLib.isEmpty()) { System.load(xserverLib); return; }\n"
+        val text = f.readText()
+        if (orig in text && "XSERVER_LIB" !in text) f.writeText(text.replace(orig, patched, ignoreCase = false))
+        check("XSERVER_LIB" in f.readText()) { "CmdEntryPoint XSERVER_LIB preload patch failed to apply" }
+    }
+}
 // Vendored modules compile at SDK 34, but their current androidx deps
 // (transition 1.6.0, compose-ui 1.11.0) require compileSdk 35. Bump the
 // vendored compileSdkVersion the same way; targetSdk/minSdk untouched.

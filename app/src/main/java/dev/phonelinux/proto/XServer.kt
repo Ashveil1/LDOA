@@ -3,21 +3,28 @@ package dev.phonelinux.proto
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import java.io.File
+import kotlin.concurrent.thread
 
 /**
  * Starts the vendored termux-x11 X server in a separate process via
  * app_process + com.termux.x11.CmdEntryPoint, then opens its MainActivity.
  *
- * Socket topology (vendored source, cmdentrypoint.cpp): the server listens
- * on $TMPDIR/.X11-unix/X0. We set TMPDIR to our private files dir so guests
- * reach the same socket through a proot bind:
- *   proot -b <files>/usr/tmp/.X11-unix:/tmp/.X11-unix ... with DISPLAY=:0
+ * Verified topology (vendored source + CI):
+ * - The server needs XKB_CONFIG_ROOT with real keymap data (XkbData).
+ * - libXlorie.so is preloaded via the XSERVER_LIB env hook (vendored patch
+ *   c): under extractNativeLibs=true the classloader-resource path upstream
+ *   uses would resolve to a compressed in-APK entry that cannot be dlopened.
+ * - Socket: $TMPDIR/.X11-unix/X0; guests reach it through a proot bind.
  */
 object XServer {
     private const val TAG = "PhoneLinuxX"
     private var process: Process? = null
+    @Volatile var preparing = false
+        private set
 
     fun tmpDir(ctx: Context): File = File(ctx.filesDir, "usr/tmp")
     fun socketDir(ctx: Context): File = File(tmpDir(ctx), ".X11-unix")
@@ -25,19 +32,37 @@ object XServer {
     @Synchronized
     fun start(ctx: Context) {
         if (process?.isAlive == true) return
+        XkbData.ensure(ctx)
         socketDir(ctx).mkdirs()
+        val lib = File(ctx.applicationInfo.nativeLibraryDir, "libXlorie.so")
+        check(lib.isFile) { "libXlorie.so missing from nativeLibraryDir" }
         val log = File(ctx.filesDir, "xserver.log")
         val pb = ProcessBuilder("/system/bin/app_process", "/", "com.termux.x11.CmdEntryPoint", ":0")
-        pb.environment()["CLASSPATH"] = ctx.applicationInfo.sourceDir
-        pb.environment()["TMPDIR"] = tmpDir(ctx).absolutePath
+        val env = pb.environment()
+        env["CLASSPATH"] = ctx.applicationInfo.sourceDir
+        env["TMPDIR"] = tmpDir(ctx).absolutePath
+        env["XKB_CONFIG_ROOT"] = XkbData.root(ctx).absolutePath
+        env["XSERVER_LIB"] = lib.absolutePath
+        env["LD_LIBRARY_PATH"] = ctx.applicationInfo.nativeLibraryDir
         pb.redirectErrorStream(true)
         pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))
         process = pb.start()
-        Log.i(TAG, "X server spawned; TMPDIR=${tmpDir(ctx).absolutePath}; log=$log")
+        Log.i(TAG, "X server spawned; log=$log")
     }
 
     fun openDesktop(activity: Activity) {
-        start(activity.applicationContext)
-        activity.startActivity(Intent(activity, com.termux.x11.MainActivity::class.java))
+        if (preparing) return
+        preparing = true
+        thread(name = "xserver-start") {
+            try {
+                start(activity.applicationContext)
+            } catch (t: Throwable) {
+                Log.e(TAG, "X server start failed", t)
+            }
+            Handler(Looper.getMainLooper()).post {
+                preparing = false
+                activity.startActivity(Intent(activity, com.termux.x11.MainActivity::class.java))
+            }
+        }
     }
 }
