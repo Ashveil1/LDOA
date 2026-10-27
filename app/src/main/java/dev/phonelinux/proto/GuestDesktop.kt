@@ -68,7 +68,8 @@ object GuestDesktop {
     private val DESKTOP_PACKAGES = listOf(
         "openbox", "jwm", "icewm", "fluxbox",
         "tint2", "pcmanfm", "xterm", "xsetroot", "fontconfig",
-        "font-dejavu", "font-misc-misc", "hicolor-icon-theme")
+        "font-dejavu", "font-misc-misc", "hicolor-icon-theme",
+        "util-linux")
 
     // tint2's own config generation corrupts its path under proot
     // ("/root/.config/tint2/t/nt2rc") and produces a 2px panel - ship a
@@ -165,6 +166,7 @@ object GuestDesktop {
             else
               echo "PTY-PROBE-SKIP (no script applet)"
             fi
+            rm -f /root/xchild.proof
             launch_xterm() {
               M=${'$'}1; shift
               xterm "${'$'}@" &
@@ -175,11 +177,16 @@ object GuestDesktop {
               fi
               wait ${'$'}XTERMPID; echo "xterm died mode=${'$'}M exit=${'$'}?"; return 1
             }
-            launch_xterm xft -fa "DejaVu Sans Mono" -fs 12 -geometry 100x30+120+120 ||
-            launch_xterm bitmap -fn fixed -geometry 100x30+120+120 ||
-            launch_xterm keepalive -fa "DejaVu Sans Mono" -fs 12 -geometry 100x30+120+120 \
+            launch_xterm xft -ut -fa "DejaVu Sans Mono" -fs 12 -geometry 100x30+120+120 ||
+            launch_xterm bitmap -ut -fn fixed -geometry 100x30+120+120 ||
+            launch_xterm keepalive -ut -fa "DejaVu Sans Mono" -fs 12 -geometry 100x30+120+120 \
               -e /bin/sh -c "echo XTERM-CHILD-RAN > /root/xchild.proof; sleep 600" ||
             echo "XTERM DEAD all modes"
+            if [ -f /root/xchild.proof ]; then
+              echo "XCHILD-PROOF-PRESENT (xterm exec'd its child, then died)"
+            else
+              echo "XCHILD-PROOF-ABSENT (xterm died before spawning - pty alloc path)"
+            fi
             wait
             """.trimIndent() + "\n")
         val nd = ctx.applicationInfo.nativeLibraryDir
