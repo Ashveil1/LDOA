@@ -156,13 +156,21 @@ class DistroInstaller(private val ctx: Context) {
         return md.digest().joinToString("") { "%02x".format(it) }
     }
 
-    private fun extractTarGz(tgz: File, dest: File) {
+    internal fun extractTarGz(tgz: File, dest: File) {
         TarArchiveInputStream(GZIPInputStream(BufferedInputStream(tgz.inputStream()))).use { tar ->
             var e: TarArchiveEntry? = tar.nextTarEntry
+            // canonical root WITH trailing separator, so a sibling like
+            // /x/staging-evil never matches a /x/staging prefix check.
+            // canonicalPath also resolves already-extracted symlink parents,
+            // so a later entry writing THROUGH a hostile symlink lands outside
+            // and is blocked below. Single-writer, app-private staging: no TOCTOU
+            // window from other processes.
             val canonDest = dest.canonicalPath + File.separator
             while (e != null) {
                 val out = File(dest, e.name)
-                if (!out.canonicalPath.startsWith(canonDest)) { e = tar.nextTarEntry; continue } // traversal guard
+                fun blocked(reason: String): Nothing =
+                    throw SecurityException("archive entry blocked ($reason): ${e.name}")
+                if (!out.canonicalPath.startsWith(canonDest)) blocked("path escapes root")
                 // Absolute symlink targets (e.g. -> /bin/busybox) are safe: proot remaps /
                 // to this rootfs, and extraction never dereferences them on the host.
                 // Relative targets must not escape dest via .. traversal.
@@ -170,7 +178,7 @@ class DistroInstaller(private val ctx: Context) {
                     val ln = e.linkName
                     if (!java.io.File(ln).isAbsolute) {
                         val resolved = runCatching { File(out.parentFile, ln).canonicalPath }.getOrNull()
-                        if (resolved == null || !resolved.startsWith(canonDest)) { e = tar.nextTarEntry; continue }
+                        if (resolved == null || !resolved.startsWith(canonDest)) blocked("link target escapes root")
                     }
                 }
                 when {
