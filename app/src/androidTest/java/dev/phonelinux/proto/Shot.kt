@@ -17,15 +17,20 @@ object Shot {
     private const val CHUNK = 3000
 
     /** Dismiss one-time SYSTEM dialogs so screenshots and clicks reach the
-     *  app. Scoped tightly: an ANR dialog is only answered ("Wait", never
-     *  "Close app") when its title names a package/label that is NOT ours -
-     *  e.g. the emulator's Pixel Launcher ANR-ing under install load. Our own
-     *  ANR ("dev.phonelinux.proto" / "Phone Linux") is never dismissed: that
-     *  would mask a real hang. Crash dialogs have no "Wait" button, so they
-     *  are never touched either. The POST_NOTIFICATIONS prompt ("Allow") is
-     *  the app's own startup request; answering it is test setup. Every
-     *  dismissal is logged to logcat (PHONEDIAG) BEFORE the click, so the
-     *  evidence survives in the CI shotlog. Loops since dialogs can stack. */
+     *  app. Allowlist only: an ANR dialog is answered ("Wait", never "Close
+     *  app") ONLY when its title names a package/label we have OBSERVED
+     *  ANR-ing as emulator noise - currently just the Pixel Launcher, seen
+     *  in logcat as "Application Not Responding:
+     *  com.google.android.apps.nexuslauncher" while our app was foreground.
+     *  Any other ANR (our own app, third party, anything unverified) is left
+     *  on screen so the test fails on it instead of masking a real hang.
+     *  Crash dialogs have no "Wait" button and are never touched. The
+     *  POST_NOTIFICATIONS prompt ("Allow") is the app's own startup request;
+     *  answering it is test setup. Every dismissal is logged to logcat
+     *  (PHONEDIAG) BEFORE the click, so evidence survives in the CI shotlog.
+     *  Loops since dialogs can stack. */
+    private val OBSERVED_SYSTEM_ANRS = listOf(
+        "com.google.android.apps.nexuslauncher", "Pixel Launcher")
     fun dismissSystemDialogs(device: androidx.test.uiautomator.UiDevice) {
         repeat(6) {
             var clicked = false
@@ -33,12 +38,13 @@ object Shot {
                 ?: device.wait(androidx.test.uiautomator.Until.findObject(androidx.test.uiautomator.By.textContains("isn't responding")), 400)
             if (anrTitle != null) {
                 val title = anrTitle.text ?: ""
-                if (title.contains("dev.phonelinux.proto") || title.contains("Phone Linux")) {
-                    android.util.Log.i("PHONEDIAG", "OWN-APP ANR dialog left untouched: " + title)
-                    return // let the test fail on the real hang
+                if (OBSERVED_SYSTEM_ANRS.any { title.contains(it) }) {
+                    android.util.Log.i("PHONEDIAG", "dismissing allowlisted system ANR dialog: " + title)
+                    device.wait(androidx.test.uiautomator.Until.findObject(androidx.test.uiautomator.By.text("Wait")), 400)?.let { it.click(); clicked = true }
+                } else {
+                    android.util.Log.i("PHONEDIAG", "ANR dialog NOT auto-dismissed (not on observed-system allowlist): " + title)
+                    return // unknown or own-app ANR stays visible; test fails on it
                 }
-                android.util.Log.i("PHONEDIAG", "dismissing non-app ANR dialog: " + title)
-                device.wait(androidx.test.uiautomator.Until.findObject(androidx.test.uiautomator.By.text("Wait")), 400)?.let { it.click(); clicked = true }
             }
             val allow = device.wait(androidx.test.uiautomator.Until.findObject(androidx.test.uiautomator.By.text("Allow")), 400)
             if (allow != null) {
