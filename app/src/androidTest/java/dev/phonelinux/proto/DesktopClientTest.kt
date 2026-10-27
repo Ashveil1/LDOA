@@ -103,6 +103,7 @@ class DesktopClientTest {
             "pgrep -x openbox || pgrep -x jwm || pgrep -x icewm || pgrep -x fluxbox")
         val panelAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep tint2")
         val fmAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep pcmanfm")
+        val xtermAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep xterm")
         val deskLogRaw = try { device.executeShellCommand("run-as dev.phonelinux.proto tail -c 4000 files/guest-desktop.log 2>&1") } catch (t: Throwable) { "" }
         val deskLog = deskLogRaw.map { c -> if (c.code in 32..126 || c == '\n') c else '?' }.joinToString("")
         if (!wmAlive) {
@@ -113,8 +114,12 @@ class DesktopClientTest {
         val chosenWm = Regex("chosen-wm=(\\w+)").find(deskLog)?.groupValues?.get(1) ?: "(none in log)"
         android.util.Log.i("PHONEDIAG", "desktop log tail: " + deskLog.takeLast(1200).replace("\n", "|"))
         android.util.Log.i("PHONEDIAG", "chosen window manager: " + chosenWm)
-        assertTrue("tint2 not running (wm=" + chosenWm + "). Desktop log:\n$deskLog", panelAlive)
+        // tint2 only runs when the chain fell back to openbox; other WMs
+        // (jwm/icewm/fluxbox) draw their own tray, already covered by wmAlive.
+        assertTrue("tint2 not running (wm=" + chosenWm + "). Desktop log:\n$deskLog",
+            chosenWm != "openbox" || panelAlive)
         assertTrue("pcmanfm not running. Desktop log:\n$deskLog", fmAlive)
+        assertTrue("xterm not running (no decorated window). Desktop log:\n$deskLog", xtermAlive)
         assertTrue("desktop session exited early. Desktop log:\n$deskLog", session.isAlive)
 
         Shot.dismissSystemDialogs(device)
