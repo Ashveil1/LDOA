@@ -109,7 +109,7 @@ class DesktopClientTest {
             throw AssertionError("no window manager survived." +
                 "\ndesktop log:\n$deskLog")
         }
-        val chosenWm = Regex("chosen-wm=(\w+)").find(deskLog)?.groupValues?.get(1) ?: "(none in log)"
+        val chosenWm = Regex("chosen-wm=(\\w+)").find(deskLog)?.groupValues?.get(1) ?: "(none in log)"
         android.util.Log.i("PHONEDIAG", "chosen window manager: " + chosenWm)
         assertTrue("tint2 not running (wm=" + chosenWm + "). Desktop log:\n$deskLog", panelAlive)
         assertTrue("pcmanfm not running. Desktop log:\n$deskLog", fmAlive)
