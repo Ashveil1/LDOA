@@ -19,6 +19,12 @@ import java.io.File
  */
 @RunWith(AndroidJUnit4::class)
 class UiFlowTest {
+    companion object {
+        /** Assertion messages land in result XML; control bytes (ESC etc from
+         *  shell/proot output) are invalid XML chars - strip them. */
+        fun sanitize(s: String): String =
+            s.map { c -> if (c.code in 32..126 || c == '\n') c else '?' }.joinToString("")
+    }
 
     private fun shot(device: UiDevice, name: String) = Shot.save(name)
 
@@ -94,7 +100,9 @@ class UiFlowTest {
         Thread.sleep(8_000)
         shot(device, "04-terminal-output") // pixel evidence regardless of semantics
         var out: androidx.test.uiautomator.UiObject2? = null
-        val outDeadline = System.currentTimeMillis() + 25_000
+        // Guest output latency under proot on the emulator measured 8-40s;
+        // a short window flakes between "not arrived" and "rendered".
+        val outDeadline = System.currentTimeMillis() + 90_000
         while (System.currentTimeMillis() < outDeadline) {
             val n = device.findObject(By.textContains("job control"))
             if (n != null && n.text != null && n.text.contains("TERM-OK")) { out = n; break }
@@ -106,7 +114,7 @@ class UiFlowTest {
                 .filter { it.text != null || it.contentDescription != null }
                 .joinToString("\n") { n -> "desc=${n.contentDescription} text=${n.text?.takeLast(100)}" }
                 .takeLast(1800)
-            throw AssertionError("guest output visible in terminal FAILED; nodes:\n" + dump)
+            throw AssertionError("guest output visible in terminal FAILED; nodes:\n" + sanitize(dump))
         }
         assertNotNull("guest output visible in terminal", out)
         // Ground truth at the assert moment: semantics text vs session log vs

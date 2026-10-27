@@ -103,7 +103,8 @@ class DesktopClientTest {
             "pgrep -x openbox || pgrep -x jwm || pgrep -x icewm || pgrep -x fluxbox")
         val panelAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep tint2")
         val fmAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep pcmanfm")
-        val deskLog = try { device.executeShellCommand("run-as dev.phonelinux.proto tail -c 4000 files/guest-desktop.log 2>&1") } catch (t: Throwable) { "" }
+        val deskLogRaw = try { device.executeShellCommand("run-as dev.phonelinux.proto tail -c 4000 files/guest-desktop.log 2>&1") } catch (t: Throwable) { "" }
+        val deskLog = deskLogRaw.map { c -> if (c.code in 32..126 || c == '\n') c else '?' }.joinToString("")
         if (!wmAlive) {
             // Run openbox standalone to capture its actual startup error.
             throw AssertionError("no window manager survived." +
