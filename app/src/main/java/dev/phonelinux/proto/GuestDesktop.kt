@@ -17,7 +17,7 @@ object GuestDesktop {
 
     /** apk add the minimal X client. Network in guest via rootfs resolv.conf. */
     fun provisionXclock(ctx: Context, rootfs: File): Proot.Result =
-        Proot.runGuest(ctx, rootfs, listOf("apk", "add", "--no-cache", "xclock"))
+        Proot.runGuest(ctx, rootfs, listOf("apk", "add", "--no-cache", "--arch", "aarch64", "xclock"))
 
     fun hasXclock(rootfs: File): Boolean = File(rootfs, "usr/bin/xclock").isFile
 
@@ -55,7 +55,7 @@ object GuestDesktop {
         "openbox", "lxpanel", "pcmanfm", "font-dejavu", "hicolor-icon-theme")
 
     fun provisionDesktopShell(ctx: Context, rootfs: File): Proot.Result =
-        Proot.runGuest(ctx, rootfs, listOf("apk", "add", "--no-cache") + DESKTOP_PACKAGES)
+        Proot.runGuest(ctx, rootfs, listOf("apk", "add", "--no-cache", "--arch", "aarch64") + DESKTOP_PACKAGES)
 
     fun hasDesktopShell(rootfs: File): Boolean =
         File(rootfs, "usr/bin/openbox").isFile &&
