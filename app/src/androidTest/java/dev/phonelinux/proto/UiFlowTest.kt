@@ -52,15 +52,20 @@ class UiFlowTest {
         }
         shot(device, "02-installed")
 
-        // 3. open terminal
-        device.findObject(By.desc("open-terminal")).click()
-        assertNotNull("terminal input", device.wait(Until.hasObject(By.desc("terminal-input")), 20_000))
+        // 3. open terminal (take the object returned by wait: no hasObject/findObject race)
+        val openBtn = device.wait(Until.findObject(By.desc("open-terminal")), 20_000)
+        assertNotNull("open-terminal clickable", openBtn)
+        openBtn.click()
+        val termInput = device.wait(Until.findObject(By.desc("terminal-input")), 20_000)
+        assertNotNull("terminal input", termInput)
         device.wait(Until.hasObject(By.text("live")), 20_000)
         shot(device, "03-terminal")
 
         // 4. run a real guest command through the UI
-        device.findObject(By.desc("terminal-input")).text = "uname -a && echo TERM-OK"
-        device.findObject(By.desc("terminal-send")).click()
+        termInput.text = "uname -a && echo TERM-OK"
+        val sendBtn = device.wait(Until.findObject(By.desc("terminal-send")), 10_000)
+        assertNotNull("send button", sendBtn)
+        sendBtn.click()
         assertNotNull("guest output visible in terminal",
             device.wait(Until.hasObject(By.textContains("TERM-OK")), 30_000))
         shot(device, "04-terminal-output")
