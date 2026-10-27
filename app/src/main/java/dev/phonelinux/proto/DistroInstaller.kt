@@ -102,6 +102,9 @@ class DistroInstaller(private val ctx: Context) {
                 root.deleteRecursively() // never leave a half-extracted rootfs
                 throw t
             }
+            // guest DNS (Android has no /etc/resolv.conf to inherit)
+            File(root, "etc").mkdirs()
+            File(root, "etc/resolv.conf").writeText("nameserver 1.1.1.1\nnameserver 8.8.8.8\n")
             File(root, ".install-complete").writeText("${d.url}\n${d.sha256}\n")
             onState(InstallState.Installed)
             Log.i(TAG, "installed ${d.id} -> $root")

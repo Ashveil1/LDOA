@@ -54,8 +54,18 @@ object XServer {
         if (preparing) return
         preparing = true
         thread(name = "xserver-start") {
+            val ctx = activity.applicationContext
             try {
-                start(activity.applicationContext)
+                start(ctx)
+                // experimental: prove guest GUI life with xclock until the
+                // XFCE session profile lands
+                val installer = DistroInstaller(ctx)
+                val distro = Distros.ALPINE
+                if (installer.isInstalled(distro)) {
+                    val rootfs = installer.rootfsDir(distro)
+                    if (!GuestDesktop.hasXclock(rootfs)) GuestDesktop.provisionXclock(ctx, rootfs)
+                    if (GuestDesktop.hasXclock(rootfs)) GuestDesktop.launchXclock(ctx, rootfs)
+                }
             } catch (t: Throwable) {
                 Log.e(TAG, "X server start failed", t)
             }
