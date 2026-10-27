@@ -80,14 +80,10 @@ class DesktopClientTest {
         val panelAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep lxpanel")
         val fmAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep pcmanfm")
         val deskLog = try { device.executeShellCommand("run-as dev.phonelinux.proto tail -c 1500 files/guest-desktop.log 2>&1") } catch (t: Throwable) { "" }
-        assertTrue("openbox not running. Desktop log:
-$deskLog", wmAlive)
-        assertTrue("lxpanel not running. Desktop log:
-$deskLog", panelAlive)
-        assertTrue("pcmanfm not running. Desktop log:
-$deskLog", fmAlive)
-        assertTrue("desktop session exited early. Desktop log:
-$deskLog", session.isAlive)
+        assertTrue("openbox not running. Desktop log:\n$deskLog", wmAlive)
+        assertTrue("lxpanel not running. Desktop log:\n$deskLog", panelAlive)
+        assertTrue("pcmanfm not running. Desktop log:\n$deskLog", fmAlive)
+        assertTrue("desktop session exited early. Desktop log:\n$deskLog", session.isAlive)
 
         Shot.dismissSystemDialogs(device)
         Shot.save("08-desktop-shell")
