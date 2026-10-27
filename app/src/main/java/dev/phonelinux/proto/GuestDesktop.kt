@@ -69,7 +69,7 @@ object GuestDesktop {
         "openbox", "jwm", "icewm", "fluxbox",
         "tint2", "pcmanfm", "xterm", "xsetroot", "fontconfig",
         "font-dejavu", "font-misc-misc", "hicolor-icon-theme",
-        "util-linux")
+        "util-linux", "st")
 
     // tint2's own config generation corrupts its path under proot
     // ("/root/.config/tint2/t/nt2rc") and produces a 2px panel - ship a
@@ -167,21 +167,28 @@ object GuestDesktop {
               echo "PTY-PROBE-SKIP (no script applet)"
             fi
             rm -f /root/xchild.proof
-            launch_xterm() {
-              M=${'$'}1; shift
-              xterm "${'$'}@" &
-              XTERMPID=${'$'}!
+            # Executed evidence (CI run a4e6e3f): guest ptys WORK (util-linux
+            # script probe OK) but xterm dies pre-spawn in every mode, silent
+            # exit=0 - xterm's own pty acquisition path is proot-incompatible
+            # here. st allocates its pty with the minimal posix_openpt path
+            # (same calls the working script probe uses), no Xt init, no utmp.
+            launch_term() {
+              M=${'$'}1; BIN=${'$'}2; shift 2
+              command -v ${'$'}BIN >/dev/null 2>&1 || { echo "term-skip mode=${'$'}M (no ${'$'}BIN)"; return 1; }
+              ${'$'}BIN "${'$'}@" &
+              TPID=${'$'}!
               sleep 8
-              if kill -0 ${'$'}XTERMPID 2>/dev/null; then
-                echo "xterm-ok mode=${'$'}M pid=${'$'}XTERMPID"; return 0
+              if kill -0 ${'$'}TPID 2>/dev/null; then
+                echo "term-ok mode=${'$'}M bin=${'$'}BIN pid=${'$'}TPID"; return 0
               fi
-              wait ${'$'}XTERMPID; echo "xterm died mode=${'$'}M exit=${'$'}?"; return 1
+              wait ${'$'}TPID; echo "term died mode=${'$'}M bin=${'$'}BIN exit=${'$'}?"; return 1
             }
-            launch_xterm xft -ut -fa "DejaVu Sans Mono" -fs 12 -geometry 100x30+120+120 ||
-            launch_xterm bitmap -ut -fn fixed -geometry 100x30+120+120 ||
-            launch_xterm keepalive -ut -fa "DejaVu Sans Mono" -fs 12 -geometry 100x30+120+120 \
+            launch_term xterm-xft xterm -ut -fa "DejaVu Sans Mono" -fs 12 -geometry 100x30+120+120 ||
+            launch_term st st -f "DejaVu Sans Mono:size=12" -g 100x30+120+120 ||
+            launch_term xterm-bitmap xterm -ut -fn fixed -geometry 100x30+120+120 ||
+            launch_term xterm-keepalive xterm -ut -fa "DejaVu Sans Mono" -fs 12 -geometry 100x30+120+120 \
               -e /bin/sh -c "echo XTERM-CHILD-RAN > /root/xchild.proof; sleep 600" ||
-            echo "XTERM DEAD all modes"
+            echo "NO TERMINAL SURVIVED"
             if [ -f /root/xchild.proof ]; then
               echo "XCHILD-PROOF-PRESENT (xterm exec'd its child, then died)"
             else

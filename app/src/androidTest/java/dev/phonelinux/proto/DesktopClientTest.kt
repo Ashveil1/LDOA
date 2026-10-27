@@ -103,12 +103,13 @@ class DesktopClientTest {
             "pgrep -x openbox || pgrep -x jwm || pgrep -x icewm || pgrep -x fluxbox")
         val panelAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep tint2")
         val fmAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep pcmanfm")
-        // xterm may still be starting (Xft/fontconfig under proot is slow)
-        // or may need the session script's bitmap-font retry: poll it.
-        var xtermAlive = false
-        val xtDeadline = System.currentTimeMillis() + 45_000
+        // A real terminal window on the desktop: xterm's pty setup dies
+        // pre-spawn under proot on this emulator (executed evidence, CI run
+        // a4e6e3f), so the session script ladders xterm -> st -> fallbacks.
+        var termAlive = false
+        val xtDeadline = System.currentTimeMillis() + 60_000
         while (System.currentTimeMillis() < xtDeadline) {
-            if (GuestDesktop.guestOk(appCtx, rootfs, "pgrep xterm")) { xtermAlive = true; break }
+            if (GuestDesktop.guestOk(appCtx, rootfs, "pgrep -x xterm || pgrep -x st")) { termAlive = true; break }
             Thread.sleep(3_000)
         }
         val deskLogRaw = try { device.executeShellCommand("run-as dev.phonelinux.proto tail -c 4000 files/guest-desktop.log 2>&1") } catch (t: Throwable) { "" }
@@ -126,7 +127,7 @@ class DesktopClientTest {
         assertTrue("tint2 not running (wm=" + chosenWm + "). Desktop log:\n$deskLog",
             chosenWm != "openbox" || panelAlive)
         assertTrue("pcmanfm not running. Desktop log:\n$deskLog", fmAlive)
-        assertTrue("xterm not running (no decorated window). Desktop log:\n$deskLog", xtermAlive)
+        assertTrue("no terminal window (xterm/st) survived. Desktop log:\n$deskLog", termAlive)
         assertTrue("desktop session exited early. Desktop log:\n$deskLog", session.isAlive)
 
         Shot.dismissSystemDialogs(device)
