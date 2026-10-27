@@ -242,25 +242,7 @@ class DesktopClientTest {
             stBefore != null && stAfter != null &&
                 (Math.abs(stAfter.first - stBefore.first) > 50 || Math.abs(stAfter.second - stBefore.second) > 50))
 
-        // 3. Keyboard input INTO the X terminal: focus st with a tap in
-        // its client area, inject a shell command through the Android
-        // input pipeline, verify an X side effect (a second xclock maps).
-        // The Compose-terminal UiFlow does not cover X input at all.
-        val clocksBefore = xwin("xwininfo -root -tree | grep -c XClock").trim().toIntOrNull() ?: -1
-        device.click(stBody.first, stBody.second)
-        Thread.sleep(800)
-        android.util.Log.i("PHONEDIAG", "st focus window: " + xwin("xdotool getactivewindow getwindowname"))
-        device.executeShellCommand("input text 'xclock%s&'")
-        Thread.sleep(500)
-        device.pressEnter()
-        Thread.sleep(3_000)
-        Shot.save("11-st-typed-xclock")
-        val clocksAfter = xwin("xwininfo -root -tree | grep -c XClock").trim().toIntOrNull() ?: -1
-        android.util.Log.i("PHONEDIAG", "st typed xclock: XClock count before=" + clocksBefore + " after=" + clocksAfter)
-        assertTrue("typed command did not run in the X terminal (XClock count before=" + clocksBefore + " after=" + clocksAfter + ")",
-            clocksBefore >= 0 && clocksAfter > clocksBefore)
-
-        // 4. Launch from the JWM menu: open the root menu, tap its first
+        // 3. Launch from the JWM menu: open the root menu, tap its first
         // item ("Terminal", pixel-verified in the 09 shot), expect a
         // second st client to map. The menu is an override-redirect
         // popup: the LAST top-level child of the root window.
@@ -275,13 +257,13 @@ class DesktopClientTest {
         val itemDev = devFor(g0[3].toInt() + g0[1].toInt() / 2.0, g0[4].toInt() + 14.0)
         device.click(itemDev.first, itemDev.second)
         Thread.sleep(4_000)
-        Shot.save("12-menu-launched-terminal")
+        Shot.save("11-menu-launched-terminal")
         val stCountAfter = xwin("xwininfo -root -tree | grep -c st-256color").trim().toIntOrNull() ?: -1
         android.util.Log.i("PHONEDIAG", "menu-launch: st count before=" + stCountBefore + " after=" + stCountAfter + " itemTap dev=" + itemDev)
         assertTrue("menu Terminal item did not launch a new st (count before=" + stCountBefore + " after=" + stCountAfter + ")",
             stCountAfter > stCountBefore)
 
-        // 5. Resize st by dragging the jwm frame's bottom-right corner
+        // 4. Resize st by dragging the jwm frame's bottom-right corner
         // (frame = client + 4px borders / 27px title) and verify the
         // geometry changed.
         fun stGeom(): IntArray? {
@@ -302,7 +284,7 @@ class DesktopClientTest {
             gResized != null &&
                 (Math.abs(gResized[2] - gr[2]) > 40 || Math.abs(gResized[3] - gr[3]) > 40))
 
-        // 6. Offscreen recovery: drag st right until its controls leave
+        // 5. Offscreen recovery: drag st right until its controls leave
         // the screen, then drag it back by the still-visible title strip
         // and verify the right edge (controls) is back onscreen.
         val gHome = stGeom()!!
@@ -318,25 +300,45 @@ class DesktopClientTest {
         device.swipe(tb2.first, tb2.second, tb2.first + (20 - go[0]), tb2.second, 40)
         Thread.sleep(2_000)
         val gBack = stGeom()
-        Shot.save("13-st-recovered")
+        Shot.save("12-st-recovered")
         android.util.Log.i("PHONEDIAG", "recovery drag: off=" + go.toList() + " back=" + gBack?.toList())
         assertTrue("st controls not recovered onscreen (off=" + go.toList() + " back=" + gBack?.toList() + ")",
             gBack != null && gBack[0] + gBack[2] + 8 <= 1080)
 
-        // 7. White-stripe experiment: the band inside st exists only
+        // 6. White-stripe experiment: the band inside st exists only
         // after the calibration taps (absent pre-interaction, run
         // 29cb928 shot 08) and tracks the window -> st content, most
         // likely a text selection from the tap press/release pairs.
         // xrefresh clears damage artifacts; a single click in st clears
-        // a selection. Shots 14/15 discriminate.
+        // a selection. Shots 13/14 discriminate.
         xwin("xrefresh")
         Thread.sleep(1_000)
-        Shot.save("14-stripe-after-xrefresh")
+        Shot.save("13-stripe-after-xrefresh")
         val gEnd = stGeom()!!
         val center = devFor(gEnd[0] + gEnd[2] / 2.0, gEnd[1] + gEnd[3] / 2.0)
         device.click(center.first, center.second)
         Thread.sleep(1_000)
-        Shot.save("15-stripe-after-click")
+        Shot.save("14-stripe-after-click")
+
+        // 7. Keyboard input INTO the X terminal: focus st with a tap in
+        // its client area, inject a shell command through the Android
+        // input pipeline, verify an X side effect (a second xclock maps).
+        // The Compose-terminal UiFlow does not cover X input at all.
+        // LAST: the IME this opens letterboxes the X viewport, which
+        // invalidates the calibrated affine map for any later tap.
+        val clocksBefore = xwin("xwininfo -root -tree | grep -c XClock").trim().toIntOrNull() ?: -1
+        device.click(stBody.first, stBody.second)
+        Thread.sleep(800)
+        android.util.Log.i("PHONEDIAG", "st focus window: " + xwin("xdotool getactivewindow getwindowname"))
+        device.executeShellCommand("input text xclock%s&")
+        Thread.sleep(500)
+        device.pressEnter()
+        Thread.sleep(3_000)
+        Shot.save("15-st-typed-xclock")
+        val clocksAfter = xwin("xwininfo -root -tree | grep -c XClock").trim().toIntOrNull() ?: -1
+        android.util.Log.i("PHONEDIAG", "st typed xclock: XClock count before=" + clocksBefore + " after=" + clocksAfter)
+        assertTrue("typed command did not run in the X terminal (XClock count before=" + clocksBefore + " after=" + clocksAfter + ")",
+            clocksBefore >= 0 && clocksAfter > clocksBefore)
 
         } // jwm-only interaction phase
 
