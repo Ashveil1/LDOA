@@ -59,9 +59,7 @@ jobs:
           script: |
             ./gradlew connectedDebugAndroidTest --info || touch /tmp/PHONELINUX_TESTS_FAILED
             mkdir -p screenshots
-            adb -s emulator-5554 root || true
-            adb -s emulator-5554 pull /data/data/dev.phonelinux.proto/files/shots screenshots/ || true
-            adb -s emulator-5554 pull /data/data/dev.phonelinux.proto.test/files/shots screenshots/ || true
+            adb -s emulator-5554 pull /data/local/tmp/phonelinux-shots screenshots/ || true
             find screenshots -name "*.png" | sort || true
             if [ -f /tmp/PHONELINUX_TESTS_FAILED ]; then exit 1; fi
       - uses: actions/upload-artifact@v4

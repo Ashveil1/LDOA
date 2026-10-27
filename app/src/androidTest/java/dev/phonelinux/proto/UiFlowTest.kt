@@ -47,7 +47,9 @@ class UiFlowTest {
         shot(device, "02-installed")
 
         // 3. open terminal (take the object returned by wait: no hasObject/findObject race)
-        val openBtn = device.wait(Until.findObject(By.desc("open-terminal")), 20_000)
+        // After install the card recomposes several times while state settles;
+        // a short findObject window can lose the button mid-recomposition.
+        val openBtn = device.wait(Until.findObject(By.desc("open-terminal")), 120_000)
         assertNotNull("open-terminal clickable", openBtn)
         openBtn.click()
         val termInput = device.wait(Until.findObject(By.desc("terminal-input")), 20_000)
