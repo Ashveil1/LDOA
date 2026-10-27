@@ -150,11 +150,20 @@ class DesktopClientTest {
 
         // ---- Interaction phase: real taps/drags through the Xlorie touch
         // pipeline, geometry-verified via xwininfo and pixel-inspected from
-        // the screenshots. Direct-touch mode (touchMode=3) makes injected
-        // device coordinates land on the matching X coordinates; default
-        // trackpad mode is relative and untestable. 1 X px = 1 device px at
-        // scale 1.0; the picture centers vertically in the view (offset
-        // measured ~128 device px on this emulator).
+        // the screenshots. jwm-gated: targets are jwm-specific (tray
+        // coordinates, title-bar layout); the openbox fallback skips.
+        if (chosenWm != "jwm") {
+            android.util.Log.i("PHONEDIAG", "interaction phase skipped (wm=" + chosenWm + ", needs jwm)")
+        } else {
+        // Direct-touch mode (touchMode=3) maps injected device coordinates
+        // linearly onto X coordinates; default trackpad mode is relative and
+        // untestable. The affine map (scale + offset) is not known a priori
+        // (run a6abbd6: a tap aimed with a hand-estimated offset missed the
+        // tray entirely), so CALIBRATE: two taps at points inside the st
+        // client area (harmless for any plausible map), reading the X
+        // pointer position after each via xdotool. Identical reads would
+        // mean the pref did not take effect (trackpad clicks land wherever
+        // the pointer already was).
         appCtx.getSharedPreferences(appCtx.packageName + "_preferences", Context.MODE_PRIVATE)
             .edit().putString("touchMode", "3").commit()
         Thread.sleep(1_500)
@@ -164,39 +173,70 @@ class DesktopClientTest {
             "export DISPLAY=:0; " + query, xBinds)
         fun topCount(): Int = xwin("xwininfo -root -children | grep -c '^ *0x'")
             .trim().toIntOrNull() ?: -1
+        fun pointerPos(): Pair<Int, Int>? {
+            val out = xwin("xdotool getmouselocation --shell 2>/dev/null")
+            val x = Regex("^X=(\\d+)", RegexOption.MULTILINE).find(out)?.groupValues?.get(1)?.toIntOrNull()
+            val y = Regex("^Y=(\\d+)", RegexOption.MULTILINE).find(out)?.groupValues?.get(1)?.toIntOrNull()
+            return if (x != null && y != null) Pair(x, y) else null
+        }
+
+        android.util.Log.i("PHONEDIAG", "pointer at start: " + pointerPos())
+        device.click(540, 800)
+        Thread.sleep(1_000)
+        val tapA = pointerPos()
+        device.click(400, 750)
+        Thread.sleep(1_000)
+        val tapB = pointerPos()
+        android.util.Log.i("PHONEDIAG", "calibration tapA(540,800)->" + tapA + " tapB(400,750)->" + tapB)
+        assertTrue("direct-touch pref not in effect or pointer unreadable (tapA=" + tapA + " tapB=" + tapB + ")",
+            tapA != null && tapB != null &&
+                Math.abs(tapA.first - tapB.first) > 20 && Math.abs(tapA.second - tapB.second) > 10)
+
+        // device -> X: X = sX*dx + oX, Y = sY*dy + oY
+        val sX = (tapA.first - tapB.first) / 140.0
+        val sY = (tapA.second - tapB.second) / 50.0
+        val oX = tapA.first - sX * 540
+        val oY = tapA.second - sY * 800
+        android.util.Log.i("PHONEDIAG", "calibrated map sX=" + sX + " oX=" + oX + " sY=" + sY + " oY=" + oY)
+        fun devFor(x: Double, y: Double) = Pair(((x - oX) / sX).toInt(), ((y - oY) / sY).toInt())
 
         // 1. Tap the JWM menu button (tray = 1080x34+0+1978, button at the
-        // left end). jwm menus are override-redirect popups: a new top-level
-        // window appears while the menu is open.
+        // left end ~X(20,1995)). jwm menus are override-redirect popups: a
+        // new top-level window appears while the menu is open.
+        val menuBtn = devFor(20.0, 1995.0)
         val menuBefore = topCount()
-        device.click(20, 2105)
+        device.click(menuBtn.first, menuBtn.second)
         Thread.sleep(2_000)
         Shot.save("09-jwm-menu-tapped")
         val menuAfter = topCount()
-        android.util.Log.i("PHONEDIAG", "jwm-menu top-level windows before=" + menuBefore + " after=" + menuAfter)
-        assertTrue("JWM menu did not open after tapping the menu button (top-level windows before=" +
-            menuBefore + " after=" + menuAfter + ")", menuAfter > menuBefore)
+        android.util.Log.i("PHONEDIAG", "jwm-menu tap dev=" + menuBtn + " windows before=" + menuBefore + " after=" + menuAfter)
+        assertTrue("JWM menu did not open after tapping the menu button (dev=" + menuBtn +
+            " windows before=" + menuBefore + " after=" + menuAfter + ")", menuAfter > menuBefore)
         // Dismiss by focusing the st client area (NOT empty desktop: jwm
         // binds root-window clicks to the same menu).
-        device.click(500, 800)
+        val stBody = devFor(500.0, 700.0)
+        device.click(stBody.first, stBody.second)
         Thread.sleep(1_000)
 
         // 2. Drag the st window by its jwm title bar (frame 1012x605+40+420,
-        // title bar ~27px at the frame top) and verify the geometry moved.
+        // title bar ~27px at the frame top -> X(546,433)) and verify the
+        // geometry moved.
         fun stPos(): Pair<Int, Int>? {
             val out = xwin("xwininfo -name script -stats | grep 'Absolute upper-left' | awk '{print ${'$'}NF}'")
             val n = out.lines().mapNotNull { it.trim().toIntOrNull() }
             return if (n.size >= 2) Pair(n[0], n[1]) else null
         }
         val stBefore = stPos()
-        device.swipe(546, 561, 746, 761, 40)
+        val dragFrom = devFor(546.0, 433.0)
+        device.swipe(dragFrom.first, dragFrom.second, dragFrom.first + 200, dragFrom.second + 200, 40)
         Thread.sleep(2_000)
         Shot.save("10-st-dragged")
         val stAfter = stPos()
-        android.util.Log.i("PHONEDIAG", "st drag before=" + stBefore + " after=" + stAfter)
+        android.util.Log.i("PHONEDIAG", "st drag from dev=" + dragFrom + " before=" + stBefore + " after=" + stAfter)
         assertTrue("st window did not move on title-bar drag (before=" + stBefore + " after=" + stAfter + ")",
             stBefore != null && stAfter != null &&
                 (Math.abs(stAfter.first - stBefore.first) > 50 || Math.abs(stAfter.second - stBefore.second) > 50))
+        } // jwm-only interaction phase
 
         } finally {
             // Leave a lighter system for later tests even when an assertion

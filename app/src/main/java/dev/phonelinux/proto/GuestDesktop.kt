@@ -73,7 +73,10 @@ object GuestDesktop {
         "util-linux", "st",
         // DIAGNOSTIC: dump the X window tree + screen size at screenshot
         // time to pin where tint2's panel actually landed.
-        "xwininfo", "xdpyinfo")
+        "xwininfo", "xdpyinfo",
+        // Interaction calibration: read the X pointer position after
+        // injected taps (Alpine v3.21 community, both arches).
+        "xdotool")
 
     // tint2's own config generation corrupts its path under proot
     // ("/root/.config/tint2/t/nt2rc") and produces a 2px panel - ship a
