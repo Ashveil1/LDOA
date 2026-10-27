@@ -242,17 +242,24 @@ class DesktopClientTest {
             stBefore != null && stAfter != null &&
                 (Math.abs(stAfter.first - stBefore.first) > 50 || Math.abs(stAfter.second - stBefore.second) > 50))
 
-        // 3. Launch from the JWM menu: open the root menu, tap its first
-        // item ("Terminal", pixel-verified in the 09 shot), expect a
-        // second st client to map. The menu is an override-redirect
-        // popup: the LAST top-level child of the root window.
+        // 3. Launch from the JWM menu: open the root menu, identify the
+        // popup by DIFFING top-level window ids (the JWM 1x1 support
+        // window sorts last in the tree - position heuristics picked it
+        // instead of the popup in run ca72793's predecessor), tap its
+        // first item ("Terminal", pixel-verified in the 09 shot),
+        // expect a second st client to map.
+        fun topIds(): List<String> = xwin("xwininfo -root -children").lines()
+            .filter { it.trimStart().startsWith("0x") }
         val stCountBefore = xwin("xwininfo -root -tree | grep -c st-256color").trim().toIntOrNull() ?: -1
+        val beforeIds = topIds().map { it.trimStart().substringBefore(' ') }.toSet()
         device.click(menuBtn.first, menuBtn.second)
         Thread.sleep(2_000)
-        val popup = xwin("xwininfo -root -tree").lines().lastOrNull { it.startsWith("     0x") }
-        val gm = Regex("(\\d+)x(\\d+)\\+(-?\\d+)\\+(-?\\d+)").find(popup ?: "")
-        android.util.Log.i("PHONEDIAG", "menu popup line: " + popup)
-        assertTrue("JWM menu popup not found in window tree (last top-level=" + popup + ")", gm != null)
+        val newLines = topIds().filter { it.trimStart().substringBefore(' ') !in beforeIds }
+        android.util.Log.i("PHONEDIAG", "menu new top-levels: " + newLines)
+        assertTrue("JWM menu popup did not appear on second menu-button tap (new top-levels=" + newLines + ")",
+            newLines.size == 1)
+        val gm = Regex("(\\d+)x(\\d+)\\+(-?\\d+)\\+(-?\\d+)").find(newLines[0])
+        assertTrue("menu popup geometry unparsable: " + newLines[0], gm != null)
         val g0 = gm!!.groupValues
         val itemDev = devFor(g0[3].toInt() + g0[1].toInt() / 2.0, g0[4].toInt() + 14.0)
         device.click(itemDev.first, itemDev.second)
