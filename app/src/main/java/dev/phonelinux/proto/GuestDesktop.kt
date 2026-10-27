@@ -60,11 +60,12 @@ object GuestDesktop {
      *  icons (pcmanfm), fonts so GUI text actually renders. lxpanel is gone
      *  from Alpine v3.21 (gtk2 purge); tint2 is the maintained light panel.
      *  No --arch flag: /etc/apk/arch (pinned to the rootfs' own arch) governs. */
-    // Four candidate WMs: openbox SEGFAULTS (signal 11) under proot on the
-    // x86_64 emulator (tint2 and pcmanfm run fine), and which WM survives may
-    // differ on ARM phones - so the session script tries them in order and
-    // keeps the first one that stays alive. All four exist in Alpine v3.21
-    // community for both x86_64 and aarch64 (verified against the live index).
+    // WM history: openbox "SIGSEGV'd" on the x86_64 emulator until the
+    // getpwuid/passwd fix - its crash was the same missing-passwd-entry
+    // failure as st's (hypothesis, consistent with two post-fix runs). Which
+    // WM survives may still differ on ARM phones, so the session script
+    // tries them in order and keeps the first one that stays alive. All
+    // four exist in Alpine v3.21 community for x86_64 and aarch64.
     private val DESKTOP_PACKAGES = listOf(
         "openbox", "jwm", "icewm", "fluxbox",
         "tint2", "pcmanfm", "xterm", "xsetroot", "fontconfig",
@@ -78,16 +79,15 @@ object GuestDesktop {
     // ("/root/.config/tint2/t/nt2rc") and produces a 2px panel - ship a
     // known-good config instead: 48px bottom taskbar, launcher (xterm,
     // pcmanfm), task list, clock.
-    // DIAGNOSTIC RED PANEL: xwininfo proves the tint2 window is mapped
-    // (1080x48+0+1964 on a 1080x2012 screen) but its framebuffer zone reads
-    // pure black in screenshots. An unmissable opaque red separates
-    // "panel not rendering" from "panel dark-on-black"; revert to the dark
-    // color once visibility is proven. All backgrounds made opaque: no
-    // compositor runs under lorie, so any alpha < 100 cannot blend.
+    // Red-panel probe verdict (run ddf034e): tint2's window is mapped
+    // (xwininfo: 1080x48+0+1964) yet ZERO red pixels reach the framebuffer -
+    // the panel does not render at all under openbox, so tint2 is now the
+    // openbox-fallback panel only (jwm's built-in tray is primary). All
+    // backgrounds stay opaque: no compositor runs, alpha cannot blend.
     private val TINT2RC = """
         rounded = 0
         border_width = 1
-        background_color = #BF616A 100
+        background_color = #1B1E28 100
         border_color = #3B4252 100
         rounded = 4
         border_width = 0
@@ -158,8 +158,12 @@ object GuestDesktop {
             if ! awk -F: '${'$'}3 == g {f=1} END {exit !f}' g="${'$'}GID_NOW" /etc/group; then
               echo "plinux:x:${'$'}GID_NOW:" >> /etc/group
             fi
+            # jwm first: its built-in tray rendered in the jwm-era CI runs,
+            # while openbox's tint2 panel is mapped (xwininfo) but never
+            # reaches the framebuffer (red-panel probe, run ddf034e) -
+            # hypothesis: lorie renders 32-bit-visual windows black.
             WM=""
-            for w in openbox jwm icewm fluxbox; do
+            for w in jwm openbox icewm fluxbox; do
               if command -v ${'$'}w >/dev/null 2>&1; then
                 ${'$'}w &
                 WMPID=${'$'}!
@@ -233,6 +237,10 @@ object GuestDesktop {
               -e /bin/sh -c 'exec 2>/root/child-err.log; exec /bin/sh -i' ||
             echo "NO TERMINAL SURVIVED"
             cat /root/child-err.log 2>/dev/null
+            # DIAGNOSTIC + product: a windowed file manager (the FM window
+            # Ash asked for). Also tests whether gtk windows render here -
+            # if it shows black like tint2, 32-bit visuals are the cause.
+            pcmanfm /root &
             wait
             """.trimIndent() + "\n")
         val nd = ctx.applicationInfo.nativeLibraryDir

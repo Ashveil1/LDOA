@@ -139,6 +139,12 @@ class DesktopClientTest {
             "export DISPLAY=:0; xwininfo -root -tree 2>&1 | head -c 4000; echo; xdpyinfo 2>/dev/null | grep dimensions",
             listOf(XServer.socketDir(appCtx).absolutePath to "/tmp/.X11-unix"))
         android.util.Log.i("PHONEDIAG", "x window tree: " + winTree.replace("\n", "|"))
+        // Depth/visual per top-level window: tests the hypothesis that
+        // 32-bit-visual windows (tint2, gtk apps) render black under lorie.
+        val winDepths = GuestDesktop.guestShell(appCtx, rootfs,
+            "export DISPLAY=:0; for w in ${'$'}(xwininfo -root -children | awk '/^ *0x/ {print ${'$'}1}'); do echo == ${'$'}w; xwininfo -id ${'$'}w -stats 2>/dev/null | grep -E 'Map State|Depth:|Visual Class:'; done",
+            listOf(XServer.socketDir(appCtx).absolutePath to "/tmp/.X11-unix"))
+        android.util.Log.i("PHONEDIAG", "x window depths: " + winDepths.replace("\n", "|"))
         Shot.dismissSystemDialogs(device)
         Shot.save("08-desktop-shell-" + chosenWm)
         } finally {
