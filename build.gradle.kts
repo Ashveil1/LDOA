@@ -13,6 +13,10 @@ subprojects {
     configurations.all {
         resolutionStrategy.eachDependency {
             if (requested.group == "androidx.lifecycle") useVersion("2.8.7")
+            // lorie declares kotlin-stdlib 2.4.21; its metadata (2.4.0) is
+            // unreadable by our Kotlin 2.0.20 compiler. lorie applies no
+            // kotlin plugin, so 2.0.20 stdlib is sufficient.
+            if (requested.group == "org.jetbrains.kotlin" && requested.name.startsWith("kotlin-stdlib")) useVersion("2.0.20")
         }
     }
 }
