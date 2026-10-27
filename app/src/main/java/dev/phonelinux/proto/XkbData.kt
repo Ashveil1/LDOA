@@ -39,7 +39,7 @@ object XkbData {
                 val name = e.name.removePrefix("./")
                 if (!name.startsWith("usr/share/X11/xkb/")) return@forEach
                 val out = File(tmp, name.removePrefix("usr/share/X11/xkb/"))
-                check(out.canonicalPath.startsWith(canonRoot.path + File.separator)) { "unsafe entry $name" }
+                check(out.canonicalPath == canonRoot.path || out.canonicalPath.startsWith(canonRoot.path + File.separator)) { "unsafe entry $name" }
                 if (e.isDirectory) { out.mkdirs(); return@forEach }
                 out.parentFile?.mkdirs()
                 out.outputStream().use { tar.copyTo(it) }

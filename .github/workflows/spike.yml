@@ -57,11 +57,12 @@ jobs:
           arch: x86_64
           profile: pixel_6
           script: |
-            ./gradlew connectedDebugAndroidTest --info
+            ./gradlew connectedDebugAndroidTest --info; GRADLE_RC=$?
             mkdir -p screenshots
             adb -s emulator-5554 pull /sdcard/Android/data/dev.phonelinux.proto.test/files/shots screenshots/ || true
             adb -s emulator-5554 pull /sdcard/Android/data/dev.phonelinux.proto/files/shots screenshots/ || true
             ls -la screenshots/shots/ || true
+            exit $GRADLE_RC
       - uses: actions/upload-artifact@v4
         if: always()
         with:
