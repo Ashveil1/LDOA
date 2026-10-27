@@ -29,3 +29,14 @@ run {
         check(patched in f.readText()) { "lorie Gradle 8.9 compat patch failed to apply" }
     }
 }
+// Vendored modules compile at SDK 34, but their current androidx deps
+// (transition 1.6.0, compose-ui 1.11.0) require compileSdk 35. Bump the
+// vendored compileSdkVersion the same way; targetSdk/minSdk untouched.
+for (rel in listOf("third_party/termux-x11/lorie/build.gradle", "third_party/termux-x11/shell-loader/stub/build.gradle")) {
+    val f = File(rootDir, rel)
+    if (f.exists()) {
+        val text = f.readText()
+        if ("compileSdkVersion 34" in text) f.writeText(text.replace("compileSdkVersion 34", "compileSdkVersion 35"))
+        check("compileSdkVersion 35" in f.readText()) { "compileSdk 35 bump failed for $rel" }
+    }
+}

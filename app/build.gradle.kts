@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "dev.phonelinux.proto"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "dev.phonelinux.proto"

@@ -19,7 +19,7 @@ jobs:
       - name: Install NDK + bison for vendored :lorie X server
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq bison
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;29.0.14206865" >/dev/null
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;29.0.14206865" "platforms;android-35" >/dev/null
       - name: Build debug APK
         run: ./gradlew assembleDebug
       - name: Unit-level sanity (lint-free compile of androidTest)
@@ -44,7 +44,7 @@ jobs:
       - name: Install NDK + bison for vendored :lorie X server
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq bison
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;29.0.14206865" >/dev/null
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;29.0.14206865" "platforms;android-35" >/dev/null
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
