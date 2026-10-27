@@ -76,7 +76,10 @@ object GuestDesktop {
         "xwininfo", "xdpyinfo",
         // Interaction calibration: read the X pointer position after
         // injected taps (Alpine v3.21 community, both arches).
-        "xdotool")
+        "xdotool",
+        // Stripe experiment: force a full repaint to discriminate a
+        // damage-tracking artifact from actual st content.
+        "xrefresh")
 
     // tint2's own config generation corrupts its path under proot
     // ("/root/.config/tint2/t/nt2rc") and produces a 2px panel - ship a

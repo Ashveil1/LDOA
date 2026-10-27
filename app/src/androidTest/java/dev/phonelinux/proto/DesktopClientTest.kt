@@ -230,7 +230,10 @@ class DesktopClientTest {
         }
         val stBefore = stPos()
         val dragFrom = devFor(546.0, 433.0)
-        device.swipe(dragFrom.first, dragFrom.second, dragFrom.first + 200, dragFrom.second + 200, 40)
+        // Modest drag kept fully onscreen (the +200/+200 variant pushed the
+        // window controls off the right edge - see the dedicated offscreen
+        // recovery test below).
+        device.swipe(dragFrom.first, dragFrom.second, dragFrom.first - 30, dragFrom.second - 150, 40)
         Thread.sleep(2_000)
         Shot.save("10-st-dragged")
         val stAfter = stPos()
@@ -238,6 +241,103 @@ class DesktopClientTest {
         assertTrue("st window did not move on title-bar drag (before=" + stBefore + " after=" + stAfter + ")",
             stBefore != null && stAfter != null &&
                 (Math.abs(stAfter.first - stBefore.first) > 50 || Math.abs(stAfter.second - stBefore.second) > 50))
+
+        // 3. Keyboard input INTO the X terminal: focus st with a tap in
+        // its client area, inject a shell command through the Android
+        // input pipeline, verify an X side effect (a second xclock maps).
+        // The Compose-terminal UiFlow does not cover X input at all.
+        val clocksBefore = xwin("xwininfo -root -tree | grep -c XClock").trim().toIntOrNull() ?: -1
+        device.click(stBody.first, stBody.second)
+        Thread.sleep(800)
+        android.util.Log.i("PHONEDIAG", "st focus window: " + xwin("xdotool getactivewindow getwindowname"))
+        device.executeShellCommand("input text 'xclock%s&'")
+        Thread.sleep(500)
+        device.pressEnter()
+        Thread.sleep(3_000)
+        Shot.save("11-st-typed-xclock")
+        val clocksAfter = xwin("xwininfo -root -tree | grep -c XClock").trim().toIntOrNull() ?: -1
+        android.util.Log.i("PHONEDIAG", "st typed xclock: XClock count before=" + clocksBefore + " after=" + clocksAfter)
+        assertTrue("typed command did not run in the X terminal (XClock count before=" + clocksBefore + " after=" + clocksAfter + ")",
+            clocksBefore >= 0 && clocksAfter > clocksBefore)
+
+        // 4. Launch from the JWM menu: open the root menu, tap its first
+        // item ("Terminal", pixel-verified in the 09 shot), expect a
+        // second st client to map. The menu is an override-redirect
+        // popup: the LAST top-level child of the root window.
+        val stCountBefore = xwin("xwininfo -root -tree | grep -c st-256color").trim().toIntOrNull() ?: -1
+        device.click(menuBtn.first, menuBtn.second)
+        Thread.sleep(2_000)
+        val popup = xwin("xwininfo -root -tree").lines().lastOrNull { it.startsWith("     0x") }
+        val gm = Regex("(\\d+)x(\\d+)\\+(-?\\d+)\\+(-?\\d+)").find(popup ?: "")
+        android.util.Log.i("PHONEDIAG", "menu popup line: " + popup)
+        assertTrue("JWM menu popup not found in window tree (last top-level=" + popup + ")", gm != null)
+        val g0 = gm!!.groupValues
+        val itemDev = devFor(g0[3].toInt() + g0[1].toInt() / 2.0, g0[4].toInt() + 14.0)
+        device.click(itemDev.first, itemDev.second)
+        Thread.sleep(4_000)
+        Shot.save("12-menu-launched-terminal")
+        val stCountAfter = xwin("xwininfo -root -tree | grep -c st-256color").trim().toIntOrNull() ?: -1
+        android.util.Log.i("PHONEDIAG", "menu-launch: st count before=" + stCountBefore + " after=" + stCountAfter + " itemTap dev=" + itemDev)
+        assertTrue("menu Terminal item did not launch a new st (count before=" + stCountBefore + " after=" + stCountAfter + ")",
+            stCountAfter > stCountBefore)
+
+        // 5. Resize st by dragging the jwm frame's bottom-right corner
+        // (frame = client + 4px borders / 27px title) and verify the
+        // geometry changed.
+        fun stGeom(): IntArray? {
+            val out = xwin("xwininfo -name script -stats | grep -E 'Absolute upper-left|Width:|Height:' | awk '{print ${'$'}NF}'")
+            val n = out.lines().mapNotNull { it.trim().toIntOrNull() }
+            return if (n.size >= 4) intArrayOf(n[0], n[1], n[2], n[3]) else null
+        }
+        val gResize = stGeom()
+        android.util.Log.i("PHONEDIAG", "st geometry before resize: " + gResize?.toList())
+        assertTrue("st geometry unreadable for resize test", gResize != null)
+        val gr = gResize!!
+        val corner = devFor(gr[0] + gr[2] + 2.0, gr[1] + gr[3] + 2.0)
+        device.swipe(corner.first, corner.second, corner.first - 120, corner.second - 100, 40)
+        Thread.sleep(2_000)
+        val gResized = stGeom()
+        android.util.Log.i("PHONEDIAG", "st geometry after resize: " + gResized?.toList())
+        assertTrue("st did not resize on corner drag (before=" + gr.toList() + " after=" + gResized?.toList() + ")",
+            gResized != null &&
+                (Math.abs(gResized[2] - gr[2]) > 40 || Math.abs(gResized[3] - gr[3]) > 40))
+
+        // 6. Offscreen recovery: drag st right until its controls leave
+        // the screen, then drag it back by the still-visible title strip
+        // and verify the right edge (controls) is back onscreen.
+        val gHome = stGeom()!!
+        val tb = devFor(gHome[0] + 400.0, gHome[1] - 13.0)
+        device.swipe(tb.first, tb.second, tb.first + 600, tb.second, 40)
+        Thread.sleep(2_000)
+        val gOff = stGeom()
+        android.util.Log.i("PHONEDIAG", "offscreen drag: before=" + gHome.toList() + " off=" + gOff?.toList())
+        assertTrue("st did not move offscreen (before=" + gHome.toList() + " off=" + gOff?.toList() + ")",
+            gOff != null && gOff[0] + gOff[2] + 8 > 1080)
+        val go = gOff!!
+        val tb2 = devFor(900.0, go[1] - 13.0)
+        device.swipe(tb2.first, tb2.second, tb2.first + (20 - go[0]), tb2.second, 40)
+        Thread.sleep(2_000)
+        val gBack = stGeom()
+        Shot.save("13-st-recovered")
+        android.util.Log.i("PHONEDIAG", "recovery drag: off=" + go.toList() + " back=" + gBack?.toList())
+        assertTrue("st controls not recovered onscreen (off=" + go.toList() + " back=" + gBack?.toList() + ")",
+            gBack != null && gBack[0] + gBack[2] + 8 <= 1080)
+
+        // 7. White-stripe experiment: the band inside st exists only
+        // after the calibration taps (absent pre-interaction, run
+        // 29cb928 shot 08) and tracks the window -> st content, most
+        // likely a text selection from the tap press/release pairs.
+        // xrefresh clears damage artifacts; a single click in st clears
+        // a selection. Shots 14/15 discriminate.
+        xwin("xrefresh")
+        Thread.sleep(1_000)
+        Shot.save("14-stripe-after-xrefresh")
+        val gEnd = stGeom()!!
+        val center = devFor(gEnd[0] + gEnd[2] / 2.0, gEnd[1] + gEnd[3] / 2.0)
+        device.click(center.first, center.second)
+        Thread.sleep(1_000)
+        Shot.save("15-stripe-after-click")
+
         } // jwm-only interaction phase
 
         } finally {
