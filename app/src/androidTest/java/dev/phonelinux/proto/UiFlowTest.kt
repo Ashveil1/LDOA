@@ -24,8 +24,11 @@ class UiFlowTest {
         val ctx = InstrumentationRegistry.getInstrumentation().context // test pkg dir: writable + adb-pullable
         val dir = File(ctx.getExternalFilesDir(null), "shots").apply { mkdirs() }
         val f = File(dir, "$name.png")
-        val ok = device.takeScreenshot(f)
-        android.util.Log.i("PHONELINUX_SHOT", "$name -> ${f.absolutePath} ok=$ok exists=${f.exists()} size=${f.length()}")
+        // shell screencap: UiDevice.takeScreenshot silently returns false on
+        // this API 34 emulator (CI-verified: no file, no error).
+        device.executeShellCommand("screencap -p '${f.absolutePath}'")
+        android.util.Log.i("PHONELINUX_SHOT", "$name -> ${f.absolutePath} exists=${f.exists()} size=${f.length()}")
+        if (!f.isFile || f.length() == 0L) throw AssertionError("screenshot $name not captured at ${f.absolutePath}")
     }
 
     @Test
