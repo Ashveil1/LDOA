@@ -69,7 +69,10 @@ object GuestDesktop {
         "openbox", "jwm", "icewm", "fluxbox",
         "tint2", "pcmanfm", "xterm", "xsetroot", "fontconfig",
         "font-dejavu", "font-misc-misc", "hicolor-icon-theme",
-        "util-linux", "st")
+        "util-linux", "st",
+        // DIAGNOSTIC: dump the X window tree + screen size at screenshot
+        // time to pin where tint2's panel actually landed.
+        "xwininfo", "xdpyinfo")
 
     // tint2's own config generation corrupts its path under proot
     // ("/root/.config/tint2/t/nt2rc") and produces a 2px panel - ship a
@@ -215,10 +218,12 @@ object GuestDesktop {
             # trampoline inside st; st-childerr redirects the child's stderr
             # to a file so its actual death message is captured (the child's
             # stderr normally dies with the pty, never reaching this log).
-            launch_term xterm-xft xterm -ut -fa "DejaVu Sans Mono" -fs 12 -geometry 100x30+120+120 ||
-            launch_term st-nested st -f "DejaVu Sans Mono:size=12" -g 100x30+120+120 \
+            # Geometry +40+420: keeps the top-left desktop icons and the
+            # bottom panel visible in the same screenshot as the window.
+            launch_term xterm-xft xterm -ut -fa "DejaVu Sans Mono" -fs 12 -geometry 100x30+40+420 ||
+            launch_term st-nested st -f "DejaVu Sans Mono:size=12" -g 100x30+40+420 \
               -e script -qfc "/bin/sh -i" /dev/null ||
-            launch_term st-childerr st -f "DejaVu Sans Mono:size=12" -g 100x30+120+120 \
+            launch_term st-childerr st -f "DejaVu Sans Mono:size=12" -g 100x30+40+420 \
               -e /bin/sh -c 'exec 2>/root/child-err.log; exec /bin/sh -i' ||
             echo "NO TERMINAL SURVIVED"
             cat /root/child-err.log 2>/dev/null
@@ -251,8 +256,10 @@ object GuestDesktop {
     }
 
     /** Guest shell command stdout (diagnostics). */
-    fun guestShell(ctx: Context, rootfs: File, shellCmd: String): String =
-        (Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c", shellCmd)).stdout).trim()
+    fun guestShell(ctx: Context, rootfs: File, shellCmd: String,
+                   extraBinds: List<Pair<String, String>> = emptyList()): String =
+        (Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c", shellCmd),
+            extraBinds = extraBinds).stdout).trim()
 
     /** True when a guest shell command exits 0 (process liveness probes). */
     fun guestOk(ctx: Context, rootfs: File, shellCmd: String): Boolean =

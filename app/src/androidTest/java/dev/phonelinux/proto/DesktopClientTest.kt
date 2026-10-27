@@ -133,6 +133,12 @@ class DesktopClientTest {
         assertTrue("no terminal window (xterm/st) survived. Desktop log:\n$deskLog", termAlive)
         assertTrue("desktop session exited early. Desktop log:\n$deskLog", session.isAlive)
 
+        // Geometry evidence for the panel/icons visibility question: the
+        // full X window tree and screen size, timed with the 08 shot.
+        val winTree = GuestDesktop.guestShell(appCtx, rootfs,
+            "export DISPLAY=:0; xwininfo -root -tree 2>&1 | head -c 2400; echo; xdpyinfo 2>/dev/null | grep dimensions",
+            listOf(XServer.socketDir(appCtx).absolutePath to "/tmp/.X11-unix"))
+        android.util.Log.i("PHONEDIAG", "x window tree: " + winTree.replace("\n", "|"))
         Shot.dismissSystemDialogs(device)
         Shot.save("08-desktop-shell-" + chosenWm)
         } finally {
