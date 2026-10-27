@@ -21,6 +21,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -205,7 +207,8 @@ private fun TerminalScreen(vm: SpikeViewModel, onBack: () -> Unit) {
         scroll.animateScrollTo(scroll.maxValue)
     }
 
-    Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding().padding(12.dp)) {
+    Column(Modifier.fillMaxSize().semantics { testTagsAsResourceId = true }
+        .statusBarsPadding().navigationBarsPadding().imePadding().padding(12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Terminal", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold,
                 modifier = Modifier.weight(1f))
@@ -220,7 +223,7 @@ private fun TerminalScreen(vm: SpikeViewModel, onBack: () -> Unit) {
             .background(Color(0xFF0A0E1A)).padding(12.dp)) {
             Text(vm.termText, color = Accent2, fontFamily = FontFamily.Monospace, fontSize = 12.sp,
                 modifier = Modifier.fillMaxSize().verticalScroll(scroll)
-                    .semantics { contentDescription = "terminal-output" })
+                    .testTag("terminal-output"))
         }
         Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
