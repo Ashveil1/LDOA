@@ -58,6 +58,7 @@ jobs:
           profile: pixel_6
           script: |
             ./gradlew connectedDebugAndroidTest --info || touch /tmp/PHONELINUX_TESTS_FAILED
+            false || touch /tmp/PHONELINUX_TESTS_FAILED  # NEGATIVE CONTROL (one run): job MUST go red; reverted immediately after
             mkdir -p screenshots
             adb -s emulator-5554 pull /data/local/tmp/phonelinux-shots screenshots/ || true
             ls -la screenshots/phonelinux-shots/ || true
