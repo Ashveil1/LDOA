@@ -155,27 +155,31 @@ object GuestDesktop {
             if [ "${'$'}WM" = "openbox" ]; then tint2 & fi
             # -fa: Alpine xterm's default bitmap font "fixed" needs
             # font-misc-misc; Xft font avoids the dependency either way.
-            # Liveness-checked with a bitmap-font retry: a silent xterm
-            # death once slipped past probes (nothing in the log), so the
-            # script itself now records what happened.
-            xterm -fa "DejaVu Sans Mono" -fs 12 -geometry 100x30+120+120 &
-            XTERMPID=${'$'}!
-            sleep 8
-            if kill -0 ${'$'}XTERMPID 2>/dev/null; then
-              echo "xterm-ok mode=xft pid=${'$'}XTERMPID"
+            # Both interactive xterm modes exited 0 silently in CI
+            # (evidence: "XTERM DEAD both modes (exit=0)"). Exit 0 + silence
+            # points at the pty child getting instant EOF, not a crash -
+            # probe the pty layer directly and log which mode survives.
+            if command -v script >/dev/null 2>&1; then
+              script -q -c "echo PTY-PROBE-OK" /root/pty-probe.out
+              echo "pty-probe exit=${'$'}? out=${'$'}(cat /root/pty-probe.out 2>/dev/null)"
             else
-              wait ${'$'}XTERMPID; XEXIT=${'$'}?
-              echo "xterm xft mode died (exit=${'$'}XEXIT), retrying bitmap font"
-              xterm -fn fixed -geometry 100x30+120+120 &
-              XTERMPID=${'$'}!
-              sleep 6
-              if kill -0 ${'$'}XTERMPID 2>/dev/null; then
-                echo "xterm-ok mode=bitmap pid=${'$'}XTERMPID"
-              else
-                wait ${'$'}XTERMPID
-                echo "XTERM DEAD both modes (exit=${'$'}?)"
-              fi
+              echo "PTY-PROBE-SKIP (no script applet)"
             fi
+            launch_xterm() {
+              M=${'$'}1; shift
+              xterm "${'$'}@" &
+              XTERMPID=${'$'}!
+              sleep 8
+              if kill -0 ${'$'}XTERMPID 2>/dev/null; then
+                echo "xterm-ok mode=${'$'}M pid=${'$'}XTERMPID"; return 0
+              fi
+              wait ${'$'}XTERMPID; echo "xterm died mode=${'$'}M exit=${'$'}?"; return 1
+            }
+            launch_xterm xft -fa "DejaVu Sans Mono" -fs 12 -geometry 100x30+120+120 ||
+            launch_xterm bitmap -fn fixed -geometry 100x30+120+120 ||
+            launch_xterm keepalive -fa "DejaVu Sans Mono" -fs 12 -geometry 100x30+120+120 \
+              -e /bin/sh -c "echo XTERM-CHILD-RAN > /root/xchild.proof; sleep 600" ||
+            echo "XTERM DEAD all modes"
             wait
             """.trimIndent() + "\n")
         val nd = ctx.applicationInfo.nativeLibraryDir

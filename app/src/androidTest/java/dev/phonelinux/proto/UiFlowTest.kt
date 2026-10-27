@@ -131,8 +131,10 @@ class UiFlowTest {
             " out.text=" + (out.text ?: "").takeLast(300).replace("\n", "|") +
             " sessionLogTail=" + sessTail.replace("\n", "|"))
         // Dismiss the IME for the clean rendered-proof frame; the IME-open
-        // layout itself is proven separately by shot 04 and 04d.
-        device.pressBack()
+        // layout itself is proven separately by shot 04 and 04d. Guarded:
+        // a system dialog can steal focus and close the IME first, and a
+        // blind pressBack then hits BackHandler and leaves the terminal.
+        dismissImeIfShown(device)
         device.waitForIdle(2_000)
         Thread.sleep(1_500)
         shot(device, "04b-terminal-output-rendered")
@@ -157,7 +159,7 @@ class UiFlowTest {
         fieldAgain?.click()
         Thread.sleep(1_500)
         shot(device, "04d-long-output-scrolled-ime")
-        device.pressBack()
+        dismissImeIfShown(device)
         device.waitForIdle(1_000)
 
         // 5. orientation: landscape must keep the terminal usable
@@ -170,11 +172,32 @@ class UiFlowTest {
         device.waitForIdle(2_000)
     }
 
+    /** pressBack only when the IME is genuinely on screen; otherwise back
+     *  hits TerminalScreen's BackHandler and navigates away. */
+    private fun dismissImeIfShown(device: UiDevice) {
+        val shown = try {
+            device.executeShellCommand("dumpsys input_method | grep -m1 mInputShown")
+                .contains("mInputShown=true")
+        } catch (t: Throwable) { false }
+        if (shown) device.pressBack()
+    }
+
     /** Type-and-run one command through the real UI, asserting the input
      *  behavior (text lands, field clears after send) and that its output
      *  renders in the terminal-output node. */
     private fun runCommand(device: UiDevice, cmd: String, needle: String) {
-        val field = device.wait(Until.findObject(By.clazz("android.widget.EditText")), 10_000)
+        var field = device.wait(Until.findObject(By.clazz("android.widget.EditText")), 10_000)
+        if (field == null) {
+            // A system dialog may have eaten the IME and our earlier back
+            // press may have left the terminal: recover like a user would.
+            Shot.dismissSystemDialogs(device)
+            val reopen = device.wait(Until.findObject(By.desc("open-terminal")), 5_000)
+            if (reopen != null) {
+                android.util.Log.i("PHONEDIAG", "runCommand: terminal screen lost, re-opening for: " + cmd)
+                reopen.click()
+            }
+            field = device.wait(Until.findObject(By.clazz("android.widget.EditText")), 15_000)
+        }
         assertNotNull("terminal editable field for: " + cmd, field)
         field.click()
         device.waitForIdle(500)
