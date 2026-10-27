@@ -24,9 +24,9 @@ class TerminalSession(
 
     fun start(): Boolean {
         if (running.get()) return true
-        val nd = ctx.applicationInfo.nativeLibraryDir
+        val nd = Proot.ensureExtracted(ctx)
         val argv = listOf(
-            File(nd, "libproot.so").absolutePath,
+            File(nd, "proot").absolutePath,
             "--link2symlink",
             "-r", rootfs.absolutePath,
             "-b", "/dev", "-b", "/proc", "-b", "/sys",
@@ -36,9 +36,9 @@ class TerminalSession(
         return try {
             val pb = ProcessBuilder(argv).redirectErrorStream(true)
             pb.environment().putAll(mapOf(
-                "PROOT_LOADER" to File(nd, "libproot_loader.so").absolutePath,
-                "PROOT_LOADER_32" to File(nd, "libproot_loader32.so").absolutePath,
-                "LD_LIBRARY_PATH" to nd,
+                "PROOT_LOADER" to File(nd, "proot-loader").absolutePath,
+                "PROOT_LOADER_32" to File(nd, "proot-loader32").absolutePath,
+                "LD_LIBRARY_PATH" to nd.absolutePath,
                 "HOME" to "/root",
                 "TERM" to "xterm-256color",
                 "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",

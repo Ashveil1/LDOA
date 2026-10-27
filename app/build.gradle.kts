@@ -29,11 +29,6 @@ android {
 
     buildFeatures { compose = true }
 
-    packaging {
-        // extractNativeLibs=true requires legacy (uncompressed) packaging so our
-        // renamed executables land as real files in nativeLibraryDir with exec bit.
-        jniLibs { useLegacyPackaging = true }
-    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

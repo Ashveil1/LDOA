@@ -109,7 +109,8 @@ class MainActivity : ComponentActivity() {
                                     InstallState.Installed -> vm.openTerminal(this@MainActivity, distro)
                                     else -> vm.install(this@MainActivity, distro)
                                 }
-                            })
+                            },
+                            onDesktop = { XServer.openDesktop(this@MainActivity) })
                         Screen.TERMINAL -> TerminalScreen(vm, onBack = { vm.closeTerminal() })
                     }
                 }
@@ -119,12 +120,19 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun PickerScreen(d: Distro, vm: SpikeViewModel, onPrimary: () -> Unit) {
+private fun PickerScreen(d: Distro, vm: SpikeViewModel, onPrimary: () -> Unit, onDesktop: () -> Unit) {
     Column(Modifier.fillMaxSize().statusBarsPadding().padding(20.dp)) {
         Text("Phone Linux", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
         Text("prototype - terminal build", color = TextDim, fontSize = 13.sp)
         Spacer(Modifier.height(24.dp))
         DistroCard(d, vm, onPrimary)
+        if (vm.state == InstallState.Installed) {
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(
+                onClick = onDesktop,
+                modifier = Modifier.fillMaxWidth().semantics { contentDescription = "open-desktop" }
+            ) { Text("Open desktop (experimental)", color = Accent) }
+        }
         Spacer(Modifier.height(20.dp))
         Text("Output", color = TextDim, fontSize = 13.sp)
         Spacer(Modifier.height(6.dp))

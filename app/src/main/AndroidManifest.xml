@@ -5,7 +5,6 @@
     <application
         android:label="Phone Linux (proto)"
         android:theme="@style/Theme.PhoneLinux"
-        android:extractNativeLibs="true"
         android:allowBackup="false">
         <activity
             android:name=".MainActivity"
