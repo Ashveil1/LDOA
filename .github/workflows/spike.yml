@@ -44,9 +44,21 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_6
-          script: ./gradlew connectedDebugAndroidTest --info
+          script: |
+            ./gradlew connectedDebugAndroidTest --info
+      - name: Pull UI journey screenshots
+        if: always()
+        run: |
+          mkdir -p screenshots
+          adb -s emulator-5554 pull /sdcard/Android/data/dev.phonelinux.proto/files/shots screenshots/ || true
+          ls -la screenshots/ screenshots/shots/ 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: spike-test-reports
           path: app/build/reports/androidTests/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-journey-screenshots
+          path: screenshots/
