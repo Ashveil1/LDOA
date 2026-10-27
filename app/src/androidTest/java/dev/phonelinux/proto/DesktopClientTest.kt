@@ -98,6 +98,7 @@ class DesktopClientTest {
         assertTrue("desktop shell missing after provisioning", GuestDesktop.hasDesktopShell(rootfs))
 
         val session = GuestDesktop.launchDesktopSession(appCtx, rootfs)
+        try {
         Thread.sleep(25_000)
         val wmAlive = GuestDesktop.guestOk(appCtx, rootfs,
             "pgrep -x openbox || pgrep -x jwm || pgrep -x icewm || pgrep -x fluxbox")
@@ -132,7 +133,10 @@ class DesktopClientTest {
 
         Shot.dismissSystemDialogs(device)
         Shot.save("08-desktop-shell-" + chosenWm)
-
-        session.destroy()
+        } finally {
+            // Leave a lighter system for later tests even when an assertion
+            // above throws (a live desktop session feeds launcher ANR storms).
+            session.destroy()
+        }
     }
 }

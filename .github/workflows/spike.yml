@@ -63,6 +63,12 @@ jobs:
             # install/proot load) cover the app and flake UI tests; user
             # builds never show these. Foreground (our app) ANRs still show.
             adb -s emulator-5554 shell settings put global anr_show_background 0 || true
+            # The Pixel Launcher wedges under our desktop-test CPU load and
+            # then ANR-dialog-storms over the app, flaking UI tests. It is
+            # not needed during instrumentation; force-stop it for the run.
+            # (Observed: repeated "Application Not Responding:
+            # com.google.android.apps.nexuslauncher" in logcat.)
+            adb -s emulator-5554 shell am force-stop com.google.android.apps.nexuslauncher || true
             ./gradlew connectedDebugAndroidTest --info 2>&1 | tee /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
             grep -q "BUILD SUCCESSFUL" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
             adb -s emulator-5554 logcat -d > /tmp/shotlog.txt || true

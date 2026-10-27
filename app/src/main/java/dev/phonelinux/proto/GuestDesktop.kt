@@ -193,14 +193,19 @@ object GuestDesktop {
               fi
               wait ${'$'}TPID; echo "term died mode=${'$'}M bin=${'$'}BIN exit=${'$'}?"; return 1
             }
+            # Probes prove script's pty spawn recipe works for INTERACTIVE
+            # shells (clean prompt, commands run) while every terminal-spawned
+            # child dies instantly. st-nested applies that proven recipe as a
+            # trampoline inside st; st-childerr redirects the child's stderr
+            # to a file so its actual death message is captured (the child's
+            # stderr normally dies with the pty, never reaching this log).
             launch_term xterm-xft xterm -ut -fa "DejaVu Sans Mono" -fs 12 -geometry 100x30+120+120 ||
-            launch_term st-login st -f "DejaVu Sans Mono:size=12" -g 100x30+120+120 ||
-            launch_term st-nonlogin st -f "DejaVu Sans Mono:size=12" -g 100x30+120+120 \
-              -e /bin/sh ||
-            launch_term st-nom st -f "DejaVu Sans Mono:size=12" -g 100x30+120+120 \
-              -e /bin/sh +m ||
+            launch_term st-nested st -f "DejaVu Sans Mono:size=12" -g 100x30+120+120 \
+              -e script -qfc "/bin/sh -i" /dev/null ||
+            launch_term st-childerr st -f "DejaVu Sans Mono:size=12" -g 100x30+120+120 \
+              -e /bin/sh -c 'exec 2>/root/child-err.log; exec /bin/sh -i' ||
             echo "NO TERMINAL SURVIVED"
-            if [ -f /root/xchild.proof ]; then echo "XCHILD-PROOF-PRESENT"; fi
+            cat /root/child-err.log 2>/dev/null
             wait
             """.trimIndent() + "\n")
         val nd = ctx.applicationInfo.nativeLibraryDir

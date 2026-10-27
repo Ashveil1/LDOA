@@ -188,15 +188,20 @@ class UiFlowTest {
     private fun runCommand(device: UiDevice, cmd: String, needle: String) {
         var field = device.wait(Until.findObject(By.clazz("android.widget.EditText")), 10_000)
         if (field == null) {
-            // A system dialog may have eaten the IME and our earlier back
-            // press may have left the terminal: recover like a user would.
-            Shot.dismissSystemDialogs(device)
-            val reopen = device.wait(Until.findObject(By.desc("open-terminal")), 5_000)
-            if (reopen != null) {
-                android.util.Log.i("PHONEDIAG", "runCommand: terminal screen lost, re-opening for: " + cmd)
-                reopen.click()
+            // Launcher ANR dialogs can STORM (observed every ~10-25s after
+            // the desktop test): a single dismiss+wait loses whole windows.
+            // Ride the storm out: dismiss, re-enter the terminal if we were
+            // pushed back to the picker, retry the field.
+            val fieldDeadline = System.currentTimeMillis() + 90_000
+            while (System.currentTimeMillis() < fieldDeadline && field == null) {
+                Shot.dismissSystemDialogs(device)
+                val reopen = device.wait(Until.findObject(By.desc("open-terminal")), 2_000)
+                if (reopen != null) {
+                    android.util.Log.i("PHONEDIAG", "runCommand: terminal screen lost, re-opening for: " + cmd)
+                    reopen.click()
+                }
+                field = device.wait(Until.findObject(By.clazz("android.widget.EditText")), 5_000)
             }
-            field = device.wait(Until.findObject(By.clazz("android.widget.EditText")), 15_000)
         }
         assertNotNull("terminal editable field for: " + cmd, field)
         field.click()
