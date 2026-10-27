@@ -21,7 +21,8 @@ data class Distro(
     val description: String,
     val url: String,
     val sha256: String,
-    val sizeBytes: Long
+    val sizeBytes: Long,
+    val apkArch: String
 )
 
 object Distros {
@@ -36,12 +37,14 @@ object Distros {
         description = "Minimal userland, fast to install. Prototype base.",
         url = "$ALPINE_BASE/aarch64/alpine-minirootfs-$ALPINE_VER-aarch64.tar.gz",
         sha256 = "ead8a4b37867bd19e7417dd078748e2312c0aea364403d96758d63ea8ff261ea",
-        sizeBytes = 3_850_365L
+        sizeBytes = 3_850_365L,
+        apkArch = "aarch64"
     )
     private val ALPINE_X86_64 = ALPINE_ARM64.copy(
         url = "$ALPINE_BASE/x86_64/alpine-minirootfs-$ALPINE_VER-x86_64.tar.gz",
         sha256 = "1a694899e406ce55d32334c47ac0b2efb6c06d7e878102d1840892ad44cd5239",
-        sizeBytes = 3_650_000L // approx; real length comes from Content-Length
+        sizeBytes = 3_650_000L, // approx; real length comes from Content-Length
+        apkArch = "x86_64"
     )
 
     /** Distro matching this device's primary ABI. */
@@ -105,13 +108,17 @@ class DistroInstaller(private val ctx: Context) {
             // guest DNS (Android has no /etc/resolv.conf to inherit)
             File(root, "etc").mkdirs()
             File(root, "etc/resolv.conf").writeText("nameserver 1.1.1.1\nnameserver 8.8.8.8\n")
-            // Pin the guest package arch: under proot, uname -m reports the
-            // HOST kernel arch (x86_64 on CI emulators), and apk derives its
-            // target arch from uname unless /etc/apk/arch exists. Without
-            // this the emulator installs x86_64 binaries the phone never
-            // would, defeating emulator verification of the ARM guest.
+            // Pin the guest package arch to THIS rootfs' arch: apk derives its
+            // target arch (and therefore which signing keys must match) from
+            // uname unless /etc/apk/arch exists, and proot passes uname through
+            // from the host kernel. Rootfs arch and host arch always match in
+            // our per-ABI design, so the pin must match the distro, not a
+            // hardcoded value: an aarch64 pin on an x86_64 rootfs fetches
+            // aarch64 indexes whose signatures the x86_64 key set cannot
+            // verify (UNTRUSTED signature), and the binaries would not run
+            // anyway.
             File(root, "etc/apk").mkdirs()
-            File(root, "etc/apk/arch").writeText("aarch64\n")
+            File(root, "etc/apk/arch").writeText(d.apkArch + "\n")
             File(root, ".install-complete").writeText("${d.url}\n${d.sha256}\n")
             onState(InstallState.Installed)
             Log.i(TAG, "installed ${d.id} -> $root")

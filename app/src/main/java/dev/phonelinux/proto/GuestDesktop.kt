@@ -17,7 +17,9 @@ object GuestDesktop {
 
     /** apk add the minimal X client. Network in guest via rootfs resolv.conf. */
     fun provisionXclock(ctx: Context, rootfs: File): Proot.Result =
-        Proot.runGuest(ctx, rootfs, listOf("apk", "add", "--no-cache", "--arch", "aarch64", "xclock"))
+        // No --arch flag: /etc/apk/arch (pinned to the rootfs' own arch at
+        // install) governs; a wrong override breaks signature verification.
+        Proot.runGuest(ctx, rootfs, listOf("apk", "add", "--no-cache", "xclock"))
 
     fun hasXclock(rootfs: File): Boolean = File(rootfs, "usr/bin/xclock").isFile
 
