@@ -23,7 +23,9 @@ class UiFlowTest {
     private fun shot(device: UiDevice, name: String) {
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
         val dir = File(ctx.getExternalFilesDir(null), "shots").apply { mkdirs() }
-        device.takeScreenshot(File(dir, "$name.png"))
+        val f = File(dir, "$name.png")
+        val ok = device.takeScreenshot(f)
+        android.util.Log.i("PHONELINUX_SHOT", "$name -> ${f.absolutePath} ok=$ok exists=${f.exists()} size=${f.length()}")
     }
 
     @Test

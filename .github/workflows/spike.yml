@@ -46,13 +46,10 @@ jobs:
           profile: pixel_6
           script: |
             ./gradlew connectedDebugAndroidTest --info
-      - name: Pull UI journey screenshots
-        if: always()
-        run: |
-          mkdir -p screenshots
-          adb -s emulator-5554 pull /sdcard/Android/data/dev.phonelinux.proto.test/files/shots screenshots/ || true
-          adb -s emulator-5554 pull /sdcard/Android/data/dev.phonelinux.proto/files/shots screenshots/ || true
-          ls -la screenshots/ screenshots/shots/ 2>/dev/null || true
+            mkdir -p screenshots
+            adb -s emulator-5554 pull /sdcard/Android/data/dev.phonelinux.proto.test/files/shots screenshots/ || true
+            adb -s emulator-5554 pull /sdcard/Android/data/dev.phonelinux.proto/files/shots screenshots/ || true
+            ls -la screenshots/shots/ || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
