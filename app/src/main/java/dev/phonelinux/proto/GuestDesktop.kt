@@ -75,8 +75,7 @@ object GuestDesktop {
             pcmanfm --desktop &
             lxpanel &
             wait
-            """.trimIndent() + "
-")
+            """.trimIndent() + "\n")
         val nd = ctx.applicationInfo.nativeLibraryDir
         val log = File(ctx.filesDir, "guest-desktop.log")
         val pb = ProcessBuilder(
