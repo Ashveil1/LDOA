@@ -38,7 +38,9 @@ object GuestDesktop {
             "-b", "/dev", "-b", "/proc", "-b", "/sys",
             "-b", XServer.socketDir(ctx).absolutePath + ":/tmp/.X11-unix",
             "-w", "/root",
-            "/usr/bin/xclock"
+            // +150+40: default +0+0 covers the pcmanfm desktop-icon
+            // column (Terminal icon unreachable for icon-launch taps).
+            "/usr/bin/xclock", "-geometry", "164x164+150+40"
         )
         pb.environment().putAll(mapOf(
             "PROOT_LOADER" to File(nd, "libproot_loader.so").absolutePath,
@@ -139,10 +141,31 @@ object GuestDesktop {
     fun launchDesktopSession(ctx: Context, rootfs: File): Process {
         File(rootfs, "root/.config/tint2").mkdirs()
         File(rootfs, "root/.config/tint2/tint2rc").writeText(TINT2RC + "\n")
+        // JWM's stock menu launches xterm for Terminal (dies silently in
+        // this guest - "term died mode=xterm-xft exit=0" in CI). Ship our
+        // own jwmrc: Terminal uses the st recipe that survives, Files
+        // opens the FM. Tray mirrors the layout the stock config renders.
+        File(rootfs, "root/.jwmrc").writeText("""
+            <JWM>
+              <RootMenu onroot="1">
+                <Program label="Terminal">st -f "DejaVu Sans Mono:size=12" -e script -qfc "/bin/sh -i" /dev/null</Program>
+                <Program label="Files">pcmanfm /root</Program>
+                <Separator/>
+                <Restart label="Restart"/>
+                <Exit label="Exit"/>
+              </RootMenu>
+              <Tray x="0" y="-1" height="34">
+                <TrayButton label="JWM">root:1</TrayButton>
+                <Pager/>
+                <TaskList/>
+                <Clock>%H:%M</Clock>
+              </Tray>
+            </JWM>
+            """.trimIndent() + "\n")
         // Desktop icons for pcmanfm --desktop (empty Desktop dir = no icons).
         File(rootfs, "root/Desktop").mkdirs()
         File(rootfs, "root/Desktop/xterm.desktop").writeText(
-            "[Desktop Entry]\nType=Application\nName=Terminal\nExec=xterm -fa \"DejaVu Sans Mono\" -fs 12\nIcon=utilities-terminal\n")
+            "[Desktop Entry]\nType=Application\nName=Terminal\nExec=st -f \"DejaVu Sans Mono:size=12\" -e script -qfc \"/bin/sh -i\" /dev/null\nIcon=utilities-terminal\n")
         File(rootfs, "root/Desktop/files.desktop").writeText(
             "[Desktop Entry]\nType=Application\nName=Files\nExec=pcmanfm\nIcon=system-file-manager\n")
         File(rootfs, "root/desktop-session.sh").writeText(
