@@ -12,9 +12,12 @@
 - Modifications to vendored sources: exactly one compatibility line, applied
   at configuration time by settings.gradle.kts (a dirty submodule edit would
   not survive a clean recursive checkout, so the parent repo owns it) -
-  lorie/build.gradle host-app detection uses `it.dependencyProject.path`
+  (a) lorie/build.gradle host-app detection uses `it.dependencyProject.path`
   instead of `it.path` (ProjectDependency.getPath exists only in Gradle 9;
-  this repo builds with Gradle 8.9 / AGP 8.5.2).
+  this repo builds with Gradle 8.9 / AGP 8.7.3); (b) vendored
+  compileSdkVersion 34 -> 35 (their current androidx set requires 35; the
+  androidx.lifecycle group is separately pinned to 2.8.7 in the root
+  build.gradle.kts because 2.11.0 demands AGP 9.1 / compileSdk 37).
   Integration-only changes in this repo: settings.gradle.kts module mapping,
   app manifest strips the library's LAUNCHER intent-filter (single launcher
   icon), CI installs NDK 29.0.14206865 (required by lorie/version.gradle)
