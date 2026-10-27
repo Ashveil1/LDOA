@@ -31,7 +31,7 @@ object Proot {
     fun ensureExtracted(ctx: Context): File {
         val dir = binDir(ctx)
         val marker = File(dir, ".version")
-        if (marker.readText().trim() != PAYLOAD_VERSION || !FILES.all { File(dir, it).canExecute() }) {
+        if (!marker.isFile || marker.readText().trim() != PAYLOAD_VERSION || !FILES.all { File(dir, it).canExecute() }) {
             dir.mkdirs()
             for (name in FILES) {
                 ctx.assets.open("proot/${abi()}/$name").use { input ->
