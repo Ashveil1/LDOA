@@ -47,7 +47,6 @@ object GuestDesktop {
         Log.i(TAG, "launching xclock, log=$log")
         return pb.start()
     }
-}
 
     /** Windows-like shell: taskbar/menu (lxpanel), window management
      *  (openbox: drag, resize, minimize/maximize), file manager + desktop
@@ -107,3 +106,5 @@ object GuestDesktop {
     fun guestOk(ctx: Context, rootfs: File, shellCmd: String): Boolean =
         Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c", shellCmd),
             extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix")).exitCode == 0
+
+}
