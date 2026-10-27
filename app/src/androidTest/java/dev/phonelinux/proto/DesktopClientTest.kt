@@ -104,12 +104,12 @@ class DesktopClientTest {
             "pgrep -x openbox || pgrep -x jwm || pgrep -x icewm || pgrep -x fluxbox")
         val panelAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep tint2")
         val fmAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep pcmanfm")
-        // A real terminal window on the desktop: xterm's pty setup dies
-        // pre-spawn under proot on this emulator (executed evidence, CI run
-        // a4e6e3f), so the session script ladders xterm -> st -> fallbacks.
+        // A real terminal window on the desktop. Root cause of the earlier
+        // deaths: getpwuid(getuid()) failed for the app uid (st.c execsh ->
+        // die("who are you?")); the session script now writes the passwd
+        // entry first, then ladders xterm -> st -> fallbacks.
         var termAlive = false
-        // 120s covers the in-guest DIAGNOSTIC gcc compile (ctty probe) ahead
-        // of the ladder; trim once the probe comes back out.
+        // 120s covers terminal spawn under proot on a loaded emulator.
         val xtDeadline = System.currentTimeMillis() + 120_000
         while (System.currentTimeMillis() < xtDeadline) {
             if (GuestDesktop.guestOk(appCtx, rootfs, "pgrep -x xterm || pgrep -x st")) { termAlive = true; break }
