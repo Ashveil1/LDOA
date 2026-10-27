@@ -147,6 +147,57 @@ class DesktopClientTest {
         android.util.Log.i("PHONEDIAG", "x window depths: " + winDepths.replace("\n", "|"))
         Shot.dismissSystemDialogs(device)
         Shot.save("08-desktop-shell-" + chosenWm)
+
+        // ---- Interaction phase: real taps/drags through the Xlorie touch
+        // pipeline, geometry-verified via xwininfo and pixel-inspected from
+        // the screenshots. Direct-touch mode (touchMode=3) makes injected
+        // device coordinates land on the matching X coordinates; default
+        // trackpad mode is relative and untestable. 1 X px = 1 device px at
+        // scale 1.0; the picture centers vertically in the view (offset
+        // measured ~128 device px on this emulator).
+        appCtx.getSharedPreferences(appCtx.packageName + "_preferences", Context.MODE_PRIVATE)
+            .edit().putString("touchMode", "3").commit()
+        Thread.sleep(1_500)
+
+        val xBinds = listOf(XServer.socketDir(appCtx).absolutePath to "/tmp/.X11-unix")
+        fun xwin(query: String): String = GuestDesktop.guestShell(appCtx, rootfs,
+            "export DISPLAY=:0; " + query, xBinds)
+        fun topCount(): Int = xwin("xwininfo -root -children | grep -c '^ *0x'")
+            .trim().toIntOrNull() ?: -1
+
+        // 1. Tap the JWM menu button (tray = 1080x34+0+1978, button at the
+        // left end). jwm menus are override-redirect popups: a new top-level
+        // window appears while the menu is open.
+        val menuBefore = topCount()
+        device.click(20, 2105)
+        Thread.sleep(2_000)
+        Shot.save("09-jwm-menu-tapped")
+        val menuAfter = topCount()
+        android.util.Log.i("PHONEDIAG", "jwm-menu top-level windows before=" + menuBefore + " after=" + menuAfter)
+        assertTrue("JWM menu did not open after tapping the menu button (top-level windows before=" +
+            menuBefore + " after=" + menuAfter + ")", menuAfter > menuBefore)
+        // Dismiss by focusing the st client area (NOT empty desktop: jwm
+        // binds root-window clicks to the same menu).
+        device.click(500, 800)
+        Thread.sleep(1_000)
+
+        // 2. Drag the st window by its jwm title bar (frame 1012x605+40+420,
+        // title bar ~27px at the frame top) and verify the geometry moved.
+        fun stPos(): Pair<Int, Int>? {
+            val out = xwin("xwininfo -name script -stats | grep 'Absolute upper-left' | awk '{print ${'$'}NF}'")
+            val n = out.lines().mapNotNull { it.trim().toIntOrNull() }
+            return if (n.size >= 2) Pair(n[0], n[1]) else null
+        }
+        val stBefore = stPos()
+        device.swipe(546, 561, 746, 761, 40)
+        Thread.sleep(2_000)
+        Shot.save("10-st-dragged")
+        val stAfter = stPos()
+        android.util.Log.i("PHONEDIAG", "st drag before=" + stBefore + " after=" + stAfter)
+        assertTrue("st window did not move on title-bar drag (before=" + stBefore + " after=" + stAfter + ")",
+            stBefore != null && stAfter != null &&
+                (Math.abs(stAfter.first - stBefore.first) > 50 || Math.abs(stAfter.second - stBefore.second) > 50))
+
         } finally {
             // Leave a lighter system for later tests even when an assertion
             // above throws (a live desktop session feeds launcher ANR storms).
