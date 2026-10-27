@@ -75,14 +75,14 @@ class UiFlowTest {
         // Assert on the OUTPUT node only: a plain textContains would also
         // match the input field itself and pass vacuously.
         val out = device.wait(
-            Until.findObject(By.res("terminal-output").textContains("TERM-OK")), 30_000)
+            Until.findObject(By.desc("terminal-output").textContains("TERM-OK")), 30_000)
         if (out == null) {
             // diagnostics: dump what the accessibility tree actually exposes
             device.findObjects(By.pkg(ctx.packageName)).forEach { n ->
                 android.util.Log.i("PHONESHOT", "node res=${n.resourceName} desc=${n.contentDescription} text=${n.text?.takeLast(120)}")
             }
         }
-        val outNode = device.findObject(By.res("terminal-output"))
+        val outNode = device.findObject(By.desc("terminal-output"))
         assertNotNull("guest output visible in terminal; current output tail: " +
             (outNode?.text?.takeLast(400) ?: "<no terminal-output node>"), out)
         // Let the scroll-to-bottom animation settle so the pixels show the output.
