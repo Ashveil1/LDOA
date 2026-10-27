@@ -193,10 +193,12 @@ class DesktopClientTest {
                 Math.abs(tapA.first - tapB.first) > 20 && Math.abs(tapA.second - tapB.second) > 10)
 
         // device -> X: X = sX*dx + oX, Y = sY*dy + oY
-        val sX = (tapA.first - tapB.first) / 140.0
-        val sY = (tapA.second - tapB.second) / 50.0
-        val oX = tapA.first - sX * 540
-        val oY = tapA.second - sY * 800
+        // (JUnit assertTrue has no smart-cast contract: re-assert nullability.)
+        val a = tapA!!; val b = tapB!!
+        val sX = (a.first - b.first) / 140.0
+        val sY = (a.second - b.second) / 50.0
+        val oX = a.first - sX * 540
+        val oY = a.second - sY * 800
         android.util.Log.i("PHONEDIAG", "calibrated map sX=" + sX + " oX=" + oX + " sY=" + sY + " oY=" + oY)
         fun devFor(x: Double, y: Double) = Pair(((x - oX) / sX).toInt(), ((y - oY) / sY).toInt())
 
