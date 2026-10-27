@@ -52,7 +52,21 @@ class DesktopClientTest {
                 Thread.sleep(5_000)
                 add = GuestDesktop.provisionXclock(appCtx, rootfs) // transient fetch errors
             }
-            assertTrue("apk add xclock failed (exit ${add.exitCode}): ${(add.stdout + add.stderr).takeLast(2400)}", add.exitCode == 0)
+            if (add.exitCode != 0) {
+                // Trusted-path diagnosis (no --allow-untrusted ever): prove the
+                // Alpine signing keys survived extraction host-side, then look
+                // at the guest view of keys/repos and a plain apk update.
+                val keysDir = java.io.File(rootfs, "etc/apk/keys")
+                val hostKeys = keysDir.listFiles()?.joinToString(", ") { "${it.name}:${it.length()}B" } ?: "(keys dir MISSING)"
+                val guest = GuestDesktop.guestExec(appCtx, rootfs,
+                    "ls -l /etc/apk/keys; echo ---; cat /etc/apk/repositories; echo ---; cat /etc/apk/arch; echo ---; apk --version")
+                val upd = GuestDesktop.guestExec(appCtx, rootfs, "apk update 2>&1")
+                throw AssertionError("apk add xclock failed (exit ${add.exitCode})" +
+                    "\nadd out: ${(add.stdout + add.stderr).takeLast(900)}" +
+                    "\nhost keys: $hostKeys" +
+                    "\nguest view: ${(guest.stdout + guest.stderr).takeLast(800)}" +
+                    "\napk update exit=${upd.exitCode}: ${(upd.stdout + upd.stderr).takeLast(800)}")
+            }
         }
         assertTrue("xclock missing after provisioning", GuestDesktop.hasXclock(rootfs))
 

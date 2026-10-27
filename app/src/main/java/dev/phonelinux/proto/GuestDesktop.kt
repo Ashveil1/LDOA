@@ -21,6 +21,10 @@ object GuestDesktop {
 
     fun hasXclock(rootfs: File): Boolean = File(rootfs, "usr/bin/xclock").isFile
 
+    /** Run a shell line in the guest (diagnostics). */
+    fun guestExec(ctx: Context, rootfs: File, shell: String): Proot.Result =
+        Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c", shell))
+
     /** Launch xclock with DISPLAY on the embedded server's bound socket. */
     fun launchXclock(ctx: Context, rootfs: File): Process {
         val nd = ctx.applicationInfo.nativeLibraryDir

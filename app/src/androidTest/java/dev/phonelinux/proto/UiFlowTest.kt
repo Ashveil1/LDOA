@@ -63,11 +63,24 @@ class UiFlowTest {
         device.wait(Until.hasObject(By.text("live")), 20_000)
         shot(device, "03-terminal")
 
-        // 4. run a real guest command through the UI
-        termInput.click()
+        // 4. run a real guest command through the UI.
+        // The editable node is the Compose TextField inner node, exposed as
+        // className android.widget.EditText; setText on the desc-marked
+        // container fails silently (field stays empty, Run stays disabled).
+        val field = device.wait(Until.findObject(By.clazz("android.widget.EditText")), 10_000)
+        assertNotNull("terminal editable field", field)
+        field.click()
         device.waitForIdle(1_000)
-        termInput.text = "uname -a && echo TERM-OK"
-        device.waitForIdle(1_000)
+        field.setText("uname -a && echo TERM-OK")
+        val typeDeadline = System.currentTimeMillis() + 8_000
+        while (System.currentTimeMillis() < typeDeadline) {
+            val t = field.text
+            if (t != null && t.contains("TERM-OK")) break
+            Thread.sleep(300)
+        }
+        val typed = field.text
+        assertTrue("command text never landed in field (text=$typed)",
+            typed != null && typed.contains("TERM-OK"))
         val sendBtn = device.wait(Until.findObject(By.desc("terminal-send")), 10_000)
         assertNotNull("send button", sendBtn)
         assertTrue("send button enabled after typing", sendBtn.isEnabled)
