@@ -153,7 +153,8 @@ class DesktopClientTest {
         // the screenshots. jwm-gated: targets are jwm-specific (tray
         // coordinates, title-bar layout); the openbox fallback skips.
         if (chosenWm != "jwm") {
-            android.util.Log.i("PHONEDIAG", "interaction phase skipped (wm=" + chosenWm + ", needs jwm)")
+            throw AssertionError("interaction coverage requires jwm, got chosen-wm=" + chosenWm +
+                " - a fallback/skip must NOT count as a pass")
         } else {
         // Direct-touch mode (touchMode=3) maps injected device coordinates
         // linearly onto X coordinates; default trackpad mode is relative and
@@ -200,6 +201,14 @@ class DesktopClientTest {
         val oX = a.first - sX * 540
         val oY = a.second - sY * 800
         android.util.Log.i("PHONEDIAG", "calibrated map sX=" + sX + " oX=" + oX + " sY=" + sY + " oY=" + oY)
+
+        // Anchor all st measurements to the ORIGINAL terminal's window id:
+        // after the menu-launch test two "script" clients exist and
+        // xwininfo -name script picks an arbitrary one (run 9633cdc: the
+        // resize/offscreen asserts measured the menu-launched st).
+        val stWid = xwin("xdotool search --name script | head -n 1").trim()
+        android.util.Log.i("PHONEDIAG", "anchored st window id: " + stWid)
+        assertTrue("original st window id not found", stWid.startsWith("0x"))
         fun devFor(x: Double, y: Double) = Pair(((x - oX) / sX).toInt(), ((y - oY) / sY).toInt())
 
         // 1. Tap the JWM menu button (tray = 1080x34+0+1978, button at the
@@ -224,7 +233,7 @@ class DesktopClientTest {
         // title bar ~27px at the frame top -> X(546,433)) and verify the
         // geometry moved.
         fun stPos(): Pair<Int, Int>? {
-            val out = xwin("xwininfo -name script -stats | grep 'Absolute upper-left' | awk '{print ${'$'}NF}'")
+            val out = xwin("xwininfo -id " + stWid + " -stats | grep 'Absolute upper-left' | awk '{print ${'$'}NF}'")
             val n = out.lines().mapNotNull { it.trim().toIntOrNull() }
             return if (n.size >= 2) Pair(n[0], n[1]) else null
         }
@@ -274,7 +283,7 @@ class DesktopClientTest {
         // (frame = client + 4px borders / 27px title) and verify the
         // geometry changed.
         fun stGeom(): IntArray? {
-            val out = xwin("xwininfo -name script -stats | grep -E 'Absolute upper-left|Width:|Height:' | awk '{print ${'$'}NF}'")
+            val out = xwin("xwininfo -id " + stWid + " -stats | grep -E 'Absolute upper-left|Width:|Height:' | awk '{print ${'$'}NF}'")
             val n = out.lines().mapNotNull { it.trim().toIntOrNull() }
             return if (n.size >= 4) intArrayOf(n[0], n[1], n[2], n[3]) else null
         }

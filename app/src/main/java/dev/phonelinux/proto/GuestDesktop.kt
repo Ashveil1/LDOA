@@ -158,7 +158,7 @@ object GuestDesktop {
                 <TrayButton label="JWM">root:1</TrayButton>
                 <Pager/>
                 <TaskList/>
-                <Clock>%H:%M</Clock>
+                <Clock/>
               </Tray>
             </JWM>
             """.trimIndent() + "\n")
