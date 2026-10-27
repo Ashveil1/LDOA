@@ -117,7 +117,7 @@ class DesktopClientTest {
         assertTrue("desktop session exited early. Desktop log:\n$deskLog", session.isAlive)
 
         Shot.dismissSystemDialogs(device)
-        Shot.save("08-desktop-shell")
+        Shot.save("08-desktop-shell-" + chosenWm)
 
         session.destroy()
     }

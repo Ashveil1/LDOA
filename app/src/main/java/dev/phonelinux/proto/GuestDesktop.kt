@@ -67,7 +67,45 @@ object GuestDesktop {
     // community for both x86_64 and aarch64 (verified against the live index).
     private val DESKTOP_PACKAGES = listOf(
         "openbox", "jwm", "icewm", "fluxbox",
-        "tint2", "pcmanfm", "font-dejavu", "hicolor-icon-theme")
+        "tint2", "pcmanfm", "xterm", "xsetroot", "fontconfig",
+        "font-dejavu", "hicolor-icon-theme")
+
+    // tint2's own config generation corrupts its path under proot
+    // ("/root/.config/tint2/t/nt2rc") and produces a 2px panel - ship a
+    // known-good config instead: 48px bottom taskbar, launcher (xterm,
+    // pcmanfm), task list, clock.
+    private val TINT2RC = """
+        rounded = 0
+        border_width = 1
+        background_color = #1B1E28 100
+        border_color = #3B4252 100
+        rounded = 4
+        border_width = 0
+        background_color = #2E3440 60
+        border_color = #000000 0
+        panel_monitor = all
+        panel_position = bottom center horizontal
+        panel_size = 100% 48
+        panel_margin = 0 0
+        panel_padding = 6 4 6
+        panel_background_id = 1
+        panel_items = LTSC
+        launcher_padding = 4 4 4
+        launcher_background_id = 0
+        launcher_icon_size = 32
+        launcher_item_app = /usr/share/applications/xterm.desktop
+        launcher_item_app = /usr/share/applications/pcmanfm.desktop
+        taskbar_mode = single_desktop
+        taskbar_padding = 2 2 4
+        taskbar_background_id = 2
+        taskbar_active_background_id = 1
+        task_icon_size = 24
+        task_text = 1
+        time1_format = %H:%M
+        time1_font = DejaVu Sans 10
+        clock_padding = 6 2
+        clock_background_id = 0
+    """.trimIndent()
 
     fun provisionDesktopShell(ctx: Context, rootfs: File): Proot.Result =
         Proot.runGuest(ctx, rootfs, listOf("apk", "add", "--no-cache") + DESKTOP_PACKAGES)
@@ -83,6 +121,8 @@ object GuestDesktop {
     /** Launch the full desktop session: wm first, then desktop icons, then
      *  the panel; all against the embedded X server. */
     fun launchDesktopSession(ctx: Context, rootfs: File): Process {
+        File(rootfs, "root/.config/tint2").mkdirs()
+        File(rootfs, "root/.config/tint2/tint2rc").writeText(TINT2RC + "\n")
         File(rootfs, "root/desktop-session.sh").writeText(
             """
             #!/bin/sh
@@ -101,8 +141,11 @@ object GuestDesktop {
             done
             echo "chosen-wm=${'$'}WM"
             if [ -z "${'$'}WM" ]; then echo "NO WM SURVIVED"; exit 1; fi
+            fc-cache -f >/dev/null 2>&1
+            xsetroot -solid "#2E3440"
             pcmanfm --desktop &
             tint2 &
+            xterm -geometry 100x30+120+120 &
             wait
             """.trimIndent() + "\n")
         val nd = ctx.applicationInfo.nativeLibraryDir

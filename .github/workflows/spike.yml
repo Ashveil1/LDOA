@@ -76,4 +76,6 @@ jobs:
         if: always()
         with:
           name: ui-journey-screenshots
-          path: screenshots/
+          path: |
+            screenshots/
+            /tmp/shotlog.txt
