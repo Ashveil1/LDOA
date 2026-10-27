@@ -32,6 +32,9 @@ class UiFlowTest {
             .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK)
         ctx.startActivity(intent)
         device.wait(Until.hasObject(By.pkg(ctx.packageName)), 15_000)
+        // The app requests POST_NOTIFICATIONS at startup; answer once here so
+        // the dialog never covers later screenshots.
+        Shot.dismissSystemDialogs(device)
 
         // 1. picker
         assertNotNull("distro card", device.wait(Until.hasObject(By.text("Alpine Linux")), 10_000))
@@ -58,15 +61,21 @@ class UiFlowTest {
         shot(device, "03-terminal")
 
         // 4. run a real guest command through the UI
+        termInput.click()
+        device.waitForIdle(1_000)
         termInput.text = "uname -a && echo TERM-OK"
+        device.waitForIdle(1_000)
         val sendBtn = device.wait(Until.findObject(By.desc("terminal-send")), 10_000)
         assertNotNull("send button", sendBtn)
+        assertTrue("send button enabled after typing", sendBtn.isEnabled)
         sendBtn.click()
         // Assert on the OUTPUT node only: a plain textContains would also
         // match the input field itself and pass vacuously.
         val out = device.wait(
             Until.findObject(By.desc("terminal-output").textContains("TERM-OK")), 30_000)
-        assertNotNull("guest output visible in terminal", out)
+        val outNode = device.findObject(By.desc("terminal-output"))
+        assertNotNull("guest output visible in terminal; current output tail: " +
+            (outNode?.text?.takeLast(400) ?: "<no terminal-output node>"), out)
         // Let the scroll-to-bottom animation settle so the pixels show the output.
         device.waitForIdle(2_000)
         Thread.sleep(1_500)

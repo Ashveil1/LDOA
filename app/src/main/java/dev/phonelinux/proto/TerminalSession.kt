@@ -31,7 +31,11 @@ class TerminalSession(
             "-r", rootfs.absolutePath,
             "-b", "/dev", "-b", "/proc", "-b", "/sys",
             "-w", "/root",
-            "/bin/sh"
+            // -i: no pty is available through ProcessBuilder, and a
+            // non-interactive busybox sh never prints a prompt, leaving the
+            // terminal looking dead. -i gives prompt + echo; it prints one
+            // "can't access tty" job-control notice, which is authentic.
+            "/bin/sh", "-i"
         )
         return try {
             val tmp = File(ctx.filesDir, "usr/tmp").apply { mkdirs() }
