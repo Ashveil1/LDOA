@@ -167,6 +167,16 @@ object GuestDesktop {
               echo "PTY-PROBE-SKIP (no script applet)"
             fi
             rm -f /root/xchild.proof
+            # Non-interactive pty commands work (probe above) but terminal
+            # children - INTERACTIVE shells - exit instantly (st: child
+            # exited status 1; xterm: silent exit 0). Feed script a fixed
+            # two-line session so the inner interactive shell closes itself.
+            printf 'echo INNER-ALIVE; exit\n' | script -q -c "/bin/sh -i" /root/pty-int.out
+            echo "pty-interactive exit=${'$'}?"
+            cat /root/pty-int.out
+            printf 'echo INNER-ALIVE-NOM; exit\n' | script -q -c "/bin/sh +m -i" /root/pty-int-nom.out
+            echo "pty-interactive-nom exit=${'$'}?"
+            cat /root/pty-int-nom.out
             # Executed evidence (CI run a4e6e3f): guest ptys WORK (util-linux
             # script probe OK) but xterm dies pre-spawn in every mode, silent
             # exit=0 - xterm's own pty acquisition path is proot-incompatible
@@ -184,16 +194,13 @@ object GuestDesktop {
               wait ${'$'}TPID; echo "term died mode=${'$'}M bin=${'$'}BIN exit=${'$'}?"; return 1
             }
             launch_term xterm-xft xterm -ut -fa "DejaVu Sans Mono" -fs 12 -geometry 100x30+120+120 ||
-            launch_term st st -f "DejaVu Sans Mono:size=12" -g 100x30+120+120 ||
-            launch_term xterm-bitmap xterm -ut -fn fixed -geometry 100x30+120+120 ||
-            launch_term xterm-keepalive xterm -ut -fa "DejaVu Sans Mono" -fs 12 -geometry 100x30+120+120 \
-              -e /bin/sh -c "echo XTERM-CHILD-RAN > /root/xchild.proof; sleep 600" ||
+            launch_term st-login st -f "DejaVu Sans Mono:size=12" -g 100x30+120+120 ||
+            launch_term st-nonlogin st -f "DejaVu Sans Mono:size=12" -g 100x30+120+120 \
+              -e /bin/sh ||
+            launch_term st-nom st -f "DejaVu Sans Mono:size=12" -g 100x30+120+120 \
+              -e /bin/sh +m ||
             echo "NO TERMINAL SURVIVED"
-            if [ -f /root/xchild.proof ]; then
-              echo "XCHILD-PROOF-PRESENT (xterm exec'd its child, then died)"
-            else
-              echo "XCHILD-PROOF-ABSENT (xterm died before spawning - pty alloc path)"
-            fi
+            if [ -f /root/xchild.proof ]; then echo "XCHILD-PROOF-PRESENT"; fi
             wait
             """.trimIndent() + "\n")
         val nd = ctx.applicationInfo.nativeLibraryDir
