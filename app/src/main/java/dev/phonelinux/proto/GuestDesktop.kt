@@ -68,7 +68,7 @@ object GuestDesktop {
     private val DESKTOP_PACKAGES = listOf(
         "openbox", "jwm", "icewm", "fluxbox",
         "tint2", "pcmanfm", "xterm", "xsetroot", "fontconfig",
-        "font-dejavu", "hicolor-icon-theme")
+        "font-dejavu", "font-misc-misc", "hicolor-icon-theme")
 
     // tint2's own config generation corrupts its path under proot
     // ("/root/.config/tint2/t/nt2rc") and produces a 2px panel - ship a
@@ -123,6 +123,12 @@ object GuestDesktop {
     fun launchDesktopSession(ctx: Context, rootfs: File): Process {
         File(rootfs, "root/.config/tint2").mkdirs()
         File(rootfs, "root/.config/tint2/tint2rc").writeText(TINT2RC + "\n")
+        // Desktop icons for pcmanfm --desktop (empty Desktop dir = no icons).
+        File(rootfs, "root/Desktop").mkdirs()
+        File(rootfs, "root/Desktop/xterm.desktop").writeText(
+            "[Desktop Entry]\nType=Application\nName=Terminal\nExec=xterm -fa \"DejaVu Sans Mono\" -fs 12\nIcon=utilities-terminal\n")
+        File(rootfs, "root/Desktop/files.desktop").writeText(
+            "[Desktop Entry]\nType=Application\nName=Files\nExec=pcmanfm\nIcon=system-file-manager\n")
         File(rootfs, "root/desktop-session.sh").writeText(
             """
             #!/bin/sh
@@ -142,10 +148,14 @@ object GuestDesktop {
             echo "chosen-wm=${'$'}WM"
             if [ -z "${'$'}WM" ]; then echo "NO WM SURVIVED"; exit 1; fi
             fc-cache -f >/dev/null 2>&1
-            xsetroot -solid "#2E3440"
             pcmanfm --desktop &
-            tint2 &
-            xterm -geometry 100x30+120+120 &
+            sleep 1
+            xsetroot -solid "#2E3440"
+            # jwm/icewm/fluxbox ship their own tray; only openbox needs tint2.
+            if [ "${'$'}WM" = "openbox" ]; then tint2 & fi
+            # -fa: Alpine xterm's default bitmap font "fixed" needs
+            # font-misc-misc; Xft font avoids the dependency either way.
+            xterm -fa "DejaVu Sans Mono" -fs 12 -geometry 100x30+120+120 &
             wait
             """.trimIndent() + "\n")
         val nd = ctx.applicationInfo.nativeLibraryDir
