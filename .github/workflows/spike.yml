@@ -57,10 +57,11 @@ jobs:
           arch: x86_64
           profile: pixel_6
           script: |
-            ./gradlew connectedDebugAndroidTest --info || touch /tmp/PHONELINUX_TESTS_FAILED
+            ./gradlew connectedDebugAndroidTest --info 2>&1 | tee /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
+            grep -q "BUILD SUCCESSFUL" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
             mkdir -p screenshots
-            adb -s emulator-5554 pull /data/local/tmp/phonelinux-shots screenshots/ || true
-            find screenshots -name "*.png" | sort || true
+            python3 .github/scripts/extract_shots.py /tmp/instr.log screenshots || true
+            find screenshots -type f | sort || true
             if [ -f /tmp/PHONELINUX_TESTS_FAILED ]; then exit 1; fi
       - uses: actions/upload-artifact@v4
         if: always()
