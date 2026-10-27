@@ -84,8 +84,7 @@ class UiFlowTest {
                 .filter { it.text != null || it.contentDescription != null }
                 .joinToString("\n") { n -> "desc=${n.contentDescription} text=${n.text?.takeLast(100)}" }
                 .takeLast(1800)
-            throw AssertionError("guest output visible in terminal FAILED; nodes:
-" + dump)
+            throw AssertionError("guest output visible in terminal FAILED; nodes:\n" + dump)
         }
         assertNotNull("guest output visible in terminal", out)
         // Let the scroll-to-bottom animation settle so the pixels show the output.
