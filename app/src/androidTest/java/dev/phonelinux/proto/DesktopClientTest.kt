@@ -69,8 +69,13 @@ class DesktopClientTest {
         // Desktop shell phase: real wm + panel + file manager, the
         // computer-like desktop the user asked for.
         if (!GuestDesktop.hasDesktopShell(rootfs)) {
-            val add = GuestDesktop.provisionDesktopShell(appCtx, rootfs)
-            assertTrue("apk add desktop shell failed (exit ${add.exitCode}): ${(add.stdout + add.stderr).takeLast(600)}", add.exitCode == 0)
+            var add = GuestDesktop.provisionDesktopShell(appCtx, rootfs)
+            if (add.exitCode != 0) {
+                Thread.sleep(5_000)
+                add = GuestDesktop.provisionDesktopShell(appCtx, rootfs) // one retry: transient fetch errors
+            }
+            val arch = GuestDesktop.guestShell(appCtx, rootfs, "apk --print-arch")
+            assertTrue("apk add desktop shell failed (exit ${add.exitCode}), guest apk arch=$arch\n${(add.stdout + add.stderr).takeLast(2400)}", add.exitCode == 0)
         }
         assertTrue("desktop shell missing after provisioning", GuestDesktop.hasDesktopShell(rootfs))
 

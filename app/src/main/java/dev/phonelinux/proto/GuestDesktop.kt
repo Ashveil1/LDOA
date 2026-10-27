@@ -101,6 +101,10 @@ object GuestDesktop {
         return pb.start()
     }
 
+    /** Guest shell command stdout (diagnostics). */
+    fun guestShell(ctx: Context, rootfs: File, shellCmd: String): String =
+        (Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c", shellCmd)).stdout).trim()
+
     /** True when a guest shell command exits 0 (process liveness probes). */
     fun guestOk(ctx: Context, rootfs: File, shellCmd: String): Boolean =
         Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c", shellCmd),

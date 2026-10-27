@@ -74,17 +74,20 @@ class UiFlowTest {
         sendBtn.click()
         // Assert on the OUTPUT node only: a plain textContains would also
         // match the input field itself and pass vacuously.
+        // Locate the output node by its known session-start content: the
+        // sh -i job-control notice is unique to it, so this cannot match the
+        // input field, and it sidesteps the desc-matching issue entirely.
         val out = device.wait(
-            Until.findObject(By.desc("terminal-output").textContains("TERM-OK")), 30_000)
+            Until.findObject(By.textContains("job control").textContains("TERM-OK")), 30_000)
         if (out == null) {
-            // diagnostics: dump what the accessibility tree actually exposes
-            device.findObjects(By.pkg(ctx.packageName)).forEach { n ->
-                android.util.Log.i("PHONESHOT", "node res=${n.resourceName} desc=${n.contentDescription} text=${n.text?.takeLast(120)}")
-            }
+            val dump = device.findObjects(By.pkg(ctx.packageName))
+                .filter { it.text != null || it.contentDescription != null }
+                .joinToString("\n") { n -> "desc=${n.contentDescription} text=${n.text?.takeLast(100)}" }
+                .takeLast(1800)
+            throw AssertionError("guest output visible in terminal FAILED; nodes:
+" + dump)
         }
-        val outNode = device.findObject(By.desc("terminal-output"))
-        assertNotNull("guest output visible in terminal; current output tail: " +
-            (outNode?.text?.takeLast(400) ?: "<no terminal-output node>"), out)
+        assertNotNull("guest output visible in terminal", out)
         // Let the scroll-to-bottom animation settle so the pixels show the output.
         device.waitForIdle(2_000)
         Thread.sleep(1_500)
