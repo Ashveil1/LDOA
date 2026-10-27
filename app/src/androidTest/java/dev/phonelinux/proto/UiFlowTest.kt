@@ -130,9 +130,8 @@ class UiFlowTest {
         android.util.Log.i("PHONEDIAG", "out.bounds=" + out.visibleBounds +
             " out.text=" + (out.text ?: "").takeLast(300).replace("\n", "|") +
             " sessionLogTail=" + sessTail.replace("\n", "|"))
-        // Dismiss the IME before the pixel-proof shot: with the keyboard open
-        // the terminal column renders shifted under the status bar (app bug
-        // under investigation); the rendered-proof frame must be clean.
+        // Dismiss the IME for the clean rendered-proof frame; the IME-open
+        // layout itself is proven separately by shot 04 and 04d.
         device.pressBack()
         device.waitForIdle(2_000)
         Thread.sleep(1_500)
