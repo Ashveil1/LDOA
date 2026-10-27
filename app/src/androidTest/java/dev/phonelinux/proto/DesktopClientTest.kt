@@ -61,12 +61,12 @@ class DesktopClientTest {
         val guiLog = try { device.executeShellCommand("run-as dev.phonelinux.proto tail -c 1000 files/guest-gui.log 2>&1") } catch (t: Throwable) { "" }
         assertTrue("xclock exited early - not drawing. Guest log:\n$guiLog", client.isAlive)
 
-        val testCtx = InstrumentationRegistry.getInstrumentation().context
-        val shots = File(testCtx.getExternalFilesDir(null), "shots").apply { mkdirs() }
-        val out = File(shots, "07-desktop-client.png")
-        device.executeShellCommand("screencap -p '${out.absolutePath}'")
-        android.util.Log.i("PHONELINUX_SHOT", "07-desktop-client -> ${out.absolutePath} exists=${out.exists()} size=${out.length()}")
-        assertTrue("desktop client screenshot not captured", out.isFile && out.length() > 0L)
+        val path = "/data/local/tmp/phonelinux-shots/07-desktop-client.png"
+        device.executeShellCommand("mkdir -p /data/local/tmp/phonelinux-shots")
+        device.executeShellCommand("screencap -p '$path'")
+        val probe = device.executeShellCommand("test -s '$path' && echo SHOT_OK").trim()
+        android.util.Log.i("PHONELINUX_SHOT", "07-desktop-client -> $path probe=$probe")
+        assertTrue("desktop client screenshot not captured at $path", probe == "SHOT_OK")
 
         client.destroy()
     }

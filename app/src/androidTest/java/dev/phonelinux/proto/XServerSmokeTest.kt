@@ -54,11 +54,11 @@ class XServerSmokeTest {
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             )
             Thread.sleep(8_000)
-            val testCtx = InstrumentationRegistry.getInstrumentation().context
-            val shots = File(testCtx.getExternalFilesDir(null), "shots").apply { mkdirs() }
-            val out = File(shots, "06-desktop-activity.png")
-            device.executeShellCommand("screencap -p '${out.absolutePath}'")
-            android.util.Log.i("PHONELINUX_SHOT", "06-desktop-activity -> ${out.absolutePath} exists=${out.exists()} size=${out.length()}")
+            val path = "/data/local/tmp/phonelinux-shots/06-desktop-activity.png"
+            device.executeShellCommand("mkdir -p /data/local/tmp/phonelinux-shots")
+            device.executeShellCommand("screencap -p '$path'")
+            val probe = device.executeShellCommand("test -s '$path' && echo SHOT_OK").trim()
+            android.util.Log.i("PHONELINUX_SHOT", "06-desktop-activity -> $path probe=$probe")
         } catch (t: Throwable) {
             android.util.Log.e("PHONELINUX_SHOT", "desktop screenshot attempt failed", t)
         }

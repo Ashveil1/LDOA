@@ -21,14 +21,16 @@ import java.io.File
 class UiFlowTest {
 
     private fun shot(device: UiDevice, name: String) {
-        val ctx = InstrumentationRegistry.getInstrumentation().context // test pkg dir: writable + adb-pullable
-        val dir = File(ctx.getExternalFilesDir(null), "shots").apply { mkdirs() }
-        val f = File(dir, "$name.png")
-        // shell screencap: UiDevice.takeScreenshot silently returns false on
-        // this API 34 emulator (CI-verified: no file, no error).
-        device.executeShellCommand("screencap -p '${f.absolutePath}'")
-        android.util.Log.i("PHONELINUX_SHOT", "$name -> ${f.absolutePath} exists=${f.exists()} size=${f.length()}")
-        if (!f.isFile || f.length() == 0L) throw AssertionError("screenshot $name not captured at ${f.absolutePath}")
+        // getExternalFilesDir is NULL on this CI emulator (no mounted external
+        // storage) - CI-verified: shots silently landed at /shots/*. Use
+        // shell-writable /data/local/tmp and verify via shell.
+        val dir = "/data/local/tmp/phonelinux-shots"
+        device.executeShellCommand("mkdir -p $dir")
+        val path = "$dir/$name.png"
+        device.executeShellCommand("screencap -p '$path'")
+        val probe = device.executeShellCommand("test -s '$path' && echo SHOT_OK").trim()
+        android.util.Log.i("PHONELINUX_SHOT", "$name -> $path probe=$probe")
+        if (probe != "SHOT_OK") throw AssertionError("screenshot $name not captured at $path")
     }
 
     @Test
