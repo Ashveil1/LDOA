@@ -9,11 +9,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
+      - name: Install NDK + bison for vendored :lorie X server
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bison
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;29.0.14206865" >/dev/null
       - name: Build debug APK
         run: ./gradlew assembleDebug
       - name: Unit-level sanity (lint-free compile of androidTest)
@@ -28,11 +34,17 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
+      - name: Install NDK + bison for vendored :lorie X server
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bison
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;29.0.14206865" >/dev/null
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
