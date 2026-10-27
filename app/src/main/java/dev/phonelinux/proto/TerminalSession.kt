@@ -19,6 +19,7 @@ class TerminalSession(
     private val TAG = "PhoneLinuxTerm"
     private var proc: Process? = null
     private val buf = StringBuilder()
+    private val sessionLog by lazy { File(ctx.filesDir, "terminal-session.log") }
     private val running = AtomicBoolean(false)
     private val lock = Any()
 
@@ -63,10 +64,12 @@ class TerminalSession(
                         val n = input.read(chunk)
                         if (n < 0) break
                         synchronized(lock) { buf.append(String(chunk, 0, n, Charsets.UTF_8)) }
+                        sessionLog.appendText("READ " + n + " buf=" + buf.length + "\n")
                         onUpdate()
                     }
                 } catch (t: Throwable) {
                     Log.w(TAG, "reader ended: ${t.message}")
+            sessionLog.appendText("READER ENDED: ${t.message}\n")
                 } finally {
                     running.set(false); onUpdate()
                 }
@@ -86,6 +89,7 @@ class TerminalSession(
         try {
             p.outputStream.write((line + "\n").toByteArray(Charsets.UTF_8))
             p.outputStream.flush()
+            sessionLog.appendText("SENT: " + line + "\n")
         } catch (t: Throwable) {
             Log.w(TAG, "write failed: ${t.message}")
         }
