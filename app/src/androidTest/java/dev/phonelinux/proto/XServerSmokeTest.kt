@@ -54,6 +54,7 @@ class XServerSmokeTest {
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             )
             Thread.sleep(8_000)
+            Shot.dismissSystemDialogs(UiDevice.getInstance(instr))
             Shot.save("06-desktop-activity")
         } catch (t: Throwable) {
             android.util.Log.e("PHONELINUX_SHOT", "desktop screenshot attempt failed", t)

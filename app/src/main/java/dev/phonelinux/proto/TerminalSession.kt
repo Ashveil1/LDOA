@@ -34,8 +34,11 @@ class TerminalSession(
             "/bin/sh"
         )
         return try {
+            val tmp = File(ctx.filesDir, "usr/tmp").apply { mkdirs() }
             val pb = ProcessBuilder(argv).redirectErrorStream(true)
             pb.environment().putAll(mapOf(
+                "PROOT_TMP_DIR" to tmp.absolutePath,
+                "TMPDIR" to tmp.absolutePath,
                 "PROOT_LOADER" to File(nd, "libproot_loader.so").absolutePath,
                 "PROOT_LOADER_32" to File(nd, "libproot_loader32.so").absolutePath,
                 "LD_LIBRARY_PATH" to nd,

@@ -16,6 +16,15 @@ import java.io.ByteArrayOutputStream
 object Shot {
     private const val CHUNK = 3000
 
+    /** Dismiss one-time system dialogs (e.g. the POST_NOTIFICATIONS prompt)
+     *  so desktop screenshots show the actual surface. */
+    fun dismissSystemDialogs(device: androidx.test.uiautomator.UiDevice) {
+        val allow = device.wait(androidx.test.uiautomator.Until.findObject(
+            androidx.test.uiautomator.By.text("Allow")), 1_500)
+        allow?.click()
+        device.waitForIdle(1_000)
+    }
+
     fun save(name: String) {
         val instr = InstrumentationRegistry.getInstrumentation()
         val bmp: Bitmap = instr.uiAutomation.takeScreenshot()

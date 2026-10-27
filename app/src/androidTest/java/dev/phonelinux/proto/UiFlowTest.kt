@@ -62,8 +62,14 @@ class UiFlowTest {
         val sendBtn = device.wait(Until.findObject(By.desc("terminal-send")), 10_000)
         assertNotNull("send button", sendBtn)
         sendBtn.click()
-        assertNotNull("guest output visible in terminal",
-            device.wait(Until.hasObject(By.textContains("TERM-OK")), 30_000))
+        // Assert on the OUTPUT node only: a plain textContains would also
+        // match the input field itself and pass vacuously.
+        val out = device.wait(
+            Until.findObject(By.desc("terminal-output").textContains("TERM-OK")), 30_000)
+        assertNotNull("guest output visible in terminal", out)
+        // Let the scroll-to-bottom animation settle so the pixels show the output.
+        device.waitForIdle(2_000)
+        Thread.sleep(1_500)
         shot(device, "04-terminal-output")
 
         // 5. orientation: landscape must keep the terminal usable

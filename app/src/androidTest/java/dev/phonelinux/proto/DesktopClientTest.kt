@@ -61,6 +61,7 @@ class DesktopClientTest {
         val guiLog = try { device.executeShellCommand("run-as dev.phonelinux.proto tail -c 1000 files/guest-gui.log 2>&1") } catch (t: Throwable) { "" }
         assertTrue("xclock exited early - not drawing. Guest log:\n$guiLog", client.isAlive)
 
+        Shot.dismissSystemDialogs(device)
         Shot.save("07-desktop-client")
 
         client.destroy()

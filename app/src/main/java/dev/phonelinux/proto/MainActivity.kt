@@ -91,6 +91,11 @@ class SpikeViewModel : ViewModel() {
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // The X server runs as a foreground service; ask for notifications
+        // once, up front, so the dialog never covers the desktop surface.
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
+        }
         val distro = Distros.ALPINE
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(
@@ -214,7 +219,8 @@ private fun TerminalScreen(vm: SpikeViewModel, onBack: () -> Unit) {
         Box(Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(14.dp))
             .background(Color(0xFF0A0E1A)).padding(12.dp)) {
             Text(vm.termText, color = Accent2, fontFamily = FontFamily.Monospace, fontSize = 12.sp,
-                modifier = Modifier.fillMaxSize().verticalScroll(scroll))
+                modifier = Modifier.fillMaxSize().verticalScroll(scroll)
+                    .semantics { contentDescription = "terminal-output" })
         }
         Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
