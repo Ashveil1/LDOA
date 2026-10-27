@@ -105,6 +105,13 @@ class DistroInstaller(private val ctx: Context) {
             // guest DNS (Android has no /etc/resolv.conf to inherit)
             File(root, "etc").mkdirs()
             File(root, "etc/resolv.conf").writeText("nameserver 1.1.1.1\nnameserver 8.8.8.8\n")
+            // Pin the guest package arch: under proot, uname -m reports the
+            // HOST kernel arch (x86_64 on CI emulators), and apk derives its
+            // target arch from uname unless /etc/apk/arch exists. Without
+            // this the emulator installs x86_64 binaries the phone never
+            // would, defeating emulator verification of the ARM guest.
+            File(root, "etc/apk").mkdirs()
+            File(root, "etc/apk/arch").writeText("aarch64\n")
             File(root, ".install-complete").writeText("${d.url}\n${d.sha256}\n")
             onState(InstallState.Installed)
             Log.i(TAG, "installed ${d.id} -> $root")

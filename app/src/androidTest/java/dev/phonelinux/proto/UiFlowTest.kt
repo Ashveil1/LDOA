@@ -76,9 +76,15 @@ class UiFlowTest {
         // match the input field itself and pass vacuously.
         // Locate the output node by its known session-start content: the
         // sh -i job-control notice is unique to it, so this cannot match the
-        // input field, and it sidesteps the desc-matching issue entirely.
-        val out = device.wait(
-            Until.findObject(By.textContains("job control").textContains("TERM-OK")), 30_000)
+        // input field. (Two textContains on one BySelector are illegal, so
+        // poll the node manually.)
+        var out: androidx.test.uiautomator.UiObject2? = null
+        val outDeadline = System.currentTimeMillis() + 30_000
+        while (System.currentTimeMillis() < outDeadline) {
+            val n = device.findObject(By.textContains("job control"))
+            if (n != null && n.text != null && n.text.contains("TERM-OK")) { out = n; break }
+            Thread.sleep(1_000)
+        }
         if (out == null) {
             val dump = device.findObjects(By.pkg(ctx.packageName))
                 .filter { it.text != null || it.contentDescription != null }
