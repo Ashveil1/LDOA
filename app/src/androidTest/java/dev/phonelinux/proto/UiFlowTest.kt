@@ -78,25 +78,24 @@ class UiFlowTest {
         // sh -i job-control notice is unique to it, so this cannot match the
         // input field. (Two textContains on one BySelector are illegal, so
         // poll the node manually.)
+        Thread.sleep(8_000)
+        shot(device, "04-terminal-output") // pixel evidence regardless of semantics
         var out: androidx.test.uiautomator.UiObject2? = null
-        val outDeadline = System.currentTimeMillis() + 30_000
+        val outDeadline = System.currentTimeMillis() + 25_000
         while (System.currentTimeMillis() < outDeadline) {
             val n = device.findObject(By.textContains("job control"))
             if (n != null && n.text != null && n.text.contains("TERM-OK")) { out = n; break }
             Thread.sleep(1_000)
         }
         if (out == null) {
-            val dump = device.findObjects(By.pkg(ctx.packageName))
+            val sessLog = try { device.executeShellCommand("run-as dev.phonelinux.proto tail -c 800 files/terminal-session.log 2>&1") } catch (t: Throwable) { "(unreadable)" }
+            val dump = "session log: " + sessLog + "\n" + device.findObjects(By.pkg(ctx.packageName))
                 .filter { it.text != null || it.contentDescription != null }
                 .joinToString("\n") { n -> "desc=${n.contentDescription} text=${n.text?.takeLast(100)}" }
                 .takeLast(1800)
             throw AssertionError("guest output visible in terminal FAILED; nodes:\n" + dump)
         }
         assertNotNull("guest output visible in terminal", out)
-        // Let the scroll-to-bottom animation settle so the pixels show the output.
-        device.waitForIdle(2_000)
-        Thread.sleep(1_500)
-        shot(device, "04-terminal-output")
 
         // 5. orientation: landscape must keep the terminal usable
         device.setOrientationLandscape()

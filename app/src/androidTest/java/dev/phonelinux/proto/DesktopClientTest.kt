@@ -47,8 +47,12 @@ class DesktopClientTest {
         assertTrue("X socket never appeared. Server log tail:\n$logTail", up)
 
         if (!GuestDesktop.hasXclock(rootfs)) {
-            val add = GuestDesktop.provisionXclock(appCtx, rootfs)
-            assertTrue("apk add xclock failed (exit ${add.exitCode}): ${(add.stdout + add.stderr).takeLast(600)}", add.exitCode == 0)
+            var add = GuestDesktop.provisionXclock(appCtx, rootfs)
+            if (add.exitCode != 0) {
+                Thread.sleep(5_000)
+                add = GuestDesktop.provisionXclock(appCtx, rootfs) // transient fetch errors
+            }
+            assertTrue("apk add xclock failed (exit ${add.exitCode}): ${(add.stdout + add.stderr).takeLast(2400)}", add.exitCode == 0)
         }
         assertTrue("xclock missing after provisioning", GuestDesktop.hasXclock(rootfs))
 
