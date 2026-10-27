@@ -60,14 +60,23 @@ object GuestDesktop {
      *  icons (pcmanfm), fonts so GUI text actually renders. lxpanel is gone
      *  from Alpine v3.21 (gtk2 purge); tint2 is the maintained light panel.
      *  No --arch flag: /etc/apk/arch (pinned to the rootfs' own arch) governs. */
+    // Four candidate WMs: openbox SEGFAULTS (signal 11) under proot on the
+    // x86_64 emulator (tint2 and pcmanfm run fine), and which WM survives may
+    // differ on ARM phones - so the session script tries them in order and
+    // keeps the first one that stays alive. All four exist in Alpine v3.21
+    // community for both x86_64 and aarch64 (verified against the live index).
     private val DESKTOP_PACKAGES = listOf(
-        "openbox", "tint2", "pcmanfm", "font-dejavu", "hicolor-icon-theme")
+        "openbox", "jwm", "icewm", "fluxbox",
+        "tint2", "pcmanfm", "font-dejavu", "hicolor-icon-theme")
 
     fun provisionDesktopShell(ctx: Context, rootfs: File): Proot.Result =
         Proot.runGuest(ctx, rootfs, listOf("apk", "add", "--no-cache") + DESKTOP_PACKAGES)
 
     fun hasDesktopShell(rootfs: File): Boolean =
         File(rootfs, "usr/bin/openbox").isFile &&
+        File(rootfs, "usr/bin/jwm").isFile &&
+        File(rootfs, "usr/bin/icewm").isFile &&
+        File(rootfs, "usr/bin/fluxbox").isFile &&
         File(rootfs, "usr/bin/tint2").isFile &&
         File(rootfs, "usr/bin/pcmanfm").isFile
 
@@ -79,8 +88,19 @@ object GuestDesktop {
             #!/bin/sh
             export DISPLAY=:0 HOME=/root XDG_RUNTIME_DIR=/tmp/xdg
             mkdir -p /tmp/xdg
-            openbox &
-            sleep 2
+            WM=""
+            for w in openbox jwm icewm fluxbox; do
+              if command -v ${'$'}w >/dev/null 2>&1; then
+                ${'$'}w &
+                WMPID=${'$'}!
+                sleep 5
+                if kill -0 ${'$'}WMPID 2>/dev/null; then WM=${'$'}w; break; fi
+                wait ${'$'}WMPID 2>/dev/null
+                echo "wm ${'$'}w died, trying next"
+              fi
+            done
+            echo "chosen-wm=${'$'}WM"
+            if [ -z "${'$'}WM" ]; then echo "NO WM SURVIVED"; exit 1; fi
             pcmanfm --desktop &
             tint2 &
             wait
