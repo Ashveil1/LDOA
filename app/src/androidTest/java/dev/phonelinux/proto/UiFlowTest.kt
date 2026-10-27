@@ -114,7 +114,11 @@ class UiFlowTest {
                 .filter { it.text != null || it.contentDescription != null }
                 .joinToString("\n") { n -> "desc=${n.contentDescription} text=${n.text?.takeLast(100)}" }
                 .takeLast(1800)
-            throw AssertionError("guest output visible in terminal FAILED; nodes:\n" + sanitize(dump))
+            val fg = try { device.currentPackageName } catch (t: Throwable) { "(unknown)" }
+            val allNodes = try { device.findObjects(By.pkg(fg)).size } catch (t: Throwable) { -1 }
+            throw AssertionError("guest output visible in terminal FAILED" +
+                "\nforeground pkg: " + fg + " (nodes in it: " + allNodes + ")" +
+                "\napp-pkg nodes:\n" + sanitize(dump))
         }
         assertNotNull("guest output visible in terminal", out)
         // Ground truth at the assert moment: semantics text vs session log vs
