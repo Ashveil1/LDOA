@@ -205,7 +205,11 @@ private fun TerminalScreen(vm: SpikeViewModel, onBack: () -> Unit) {
         scroll.animateScrollTo(scroll.maxValue)
     }
 
-    Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding().padding(12.dp)) {
+    // No imePadding: windowSoftInputMode=adjustResize shrinks the window
+    // above the IME already; stacking imePadding on top double-applied the
+    // inset and (pre-adjustResize) adjustPan pushed the whole column -
+    // header and output - off the top of the screen with the keyboard open.
+    Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Terminal", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold,
                 modifier = Modifier.weight(1f))
@@ -216,10 +220,13 @@ private fun TerminalScreen(vm: SpikeViewModel, onBack: () -> Unit) {
             TextButton(onClick = onBack) { Text("Close", color = Accent) }
         }
         Spacer(Modifier.height(8.dp))
+        // Bottom-anchored like a real terminal: short output sits at the
+        // bottom, long output scrolls; auto-scroll effect follows new output.
         Box(Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(14.dp))
-            .background(Color(0xFF0A0E1A)).padding(12.dp)) {
+            .background(Color(0xFF0A0E1A)).padding(12.dp),
+            contentAlignment = Alignment.BottomStart) {
             Text(vm.termText, color = Accent2, fontFamily = FontFamily.Monospace, fontSize = 12.sp,
-                modifier = Modifier.fillMaxSize().verticalScroll(scroll)
+                modifier = Modifier.fillMaxWidth().verticalScroll(scroll)
                     .semantics { contentDescription = "terminal-output" })
         }
         Spacer(Modifier.height(8.dp))
