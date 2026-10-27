@@ -50,6 +50,7 @@ jobs:
         if: always()
         run: |
           mkdir -p screenshots
+          adb -s emulator-5554 pull /sdcard/Android/data/dev.phonelinux.proto.test/files/shots screenshots/ || true
           adb -s emulator-5554 pull /sdcard/Android/data/dev.phonelinux.proto/files/shots screenshots/ || true
           ls -la screenshots/ screenshots/shots/ 2>/dev/null || true
       - uses: actions/upload-artifact@v4
