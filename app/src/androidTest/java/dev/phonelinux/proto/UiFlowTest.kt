@@ -50,6 +50,9 @@ class UiFlowTest {
         shot(device, "02-installed")
 
         // 3. open terminal (take the object returned by wait: no hasObject/findObject race)
+        // Install load can trigger a Pixel Launcher ANR dialog on the
+        // emulator; clear any stacked system dialogs before re-finding.
+        Shot.dismissSystemDialogs(device)
         // After install the card recomposes several times while state settles;
         // a short findObject window can lose the button mid-recomposition.
         val openBtn = device.wait(Until.findObject(By.desc("open-terminal")), 120_000)

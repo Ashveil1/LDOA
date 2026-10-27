@@ -16,13 +16,20 @@ import java.io.ByteArrayOutputStream
 object Shot {
     private const val CHUNK = 3000
 
-    /** Dismiss one-time system dialogs (e.g. the POST_NOTIFICATIONS prompt)
-     *  so desktop screenshots show the actual surface. */
+    /** Dismiss one-time system dialogs so screenshots and clicks reach the
+     *  app. Handles the POST_NOTIFICATIONS prompt ("Allow") and ANR dialogs
+     *  ("Wait" - the emulator's Pixel Launcher ANRs under install load).
+     *  Never clicks "Close app". Loops since dialogs can stack. */
     fun dismissSystemDialogs(device: androidx.test.uiautomator.UiDevice) {
-        val allow = device.wait(androidx.test.uiautomator.Until.findObject(
-            androidx.test.uiautomator.By.text("Allow")), 1_500)
-        allow?.click()
-        device.waitForIdle(1_000)
+        repeat(6) {
+            var clicked = false
+            device.wait(androidx.test.uiautomator.Until.findObject(
+                androidx.test.uiautomator.By.text("Wait")), 800)?.let { it.click(); clicked = true }
+            device.wait(androidx.test.uiautomator.Until.findObject(
+                androidx.test.uiautomator.By.text("Allow")), 800)?.let { it.click(); clicked = true }
+            if (!clicked) return
+            device.waitForIdle(800)
+        }
     }
 
     fun save(name: String) {
