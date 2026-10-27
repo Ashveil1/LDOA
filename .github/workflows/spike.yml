@@ -59,8 +59,10 @@ jobs:
           script: |
             ./gradlew connectedDebugAndroidTest --info || touch /tmp/PHONELINUX_TESTS_FAILED
             mkdir -p screenshots
-            adb -s emulator-5554 pull /data/local/tmp/phonelinux-shots screenshots/ || true
-            ls -la screenshots/phonelinux-shots/ || true
+            adb -s emulator-5554 shell "screencap -p /data/local/tmp/adb-shot.png; echo SCREEN_CAP_RC=\$?; ls -la /data/local/tmp/" || true
+            adb -s emulator-5554 root || true
+            adb -s emulator-5554 pull /data/data/dev.phonelinux.proto/files/shots screenshots/ || true
+            ls -la screenshots/shots/ || true
             if [ -f /tmp/PHONELINUX_TESTS_FAILED ]; then exit 1; fi
       - uses: actions/upload-artifact@v4
         if: always()

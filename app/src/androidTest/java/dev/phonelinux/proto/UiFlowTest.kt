@@ -20,18 +20,7 @@ import java.io.File
 @RunWith(AndroidJUnit4::class)
 class UiFlowTest {
 
-    private fun shot(device: UiDevice, name: String) {
-        // getExternalFilesDir is NULL on this CI emulator (no mounted external
-        // storage) - CI-verified: shots silently landed at /shots/*. Use
-        // shell-writable /data/local/tmp and verify via shell.
-        val dir = "/data/local/tmp/phonelinux-shots"
-        device.executeShellCommand("mkdir -p $dir")
-        val path = "$dir/$name.png"
-        val diag = device.executeShellCommand("screencap -p $path; echo RC=\$?; ls -la $dir").trim()
-        android.util.Log.i("PHONELINUX_SHOT", "$name -> $path diag=$diag")
-        val probe = device.executeShellCommand("test -s $path && echo SHOT_OK").trim()
-        if (probe != "SHOT_OK") throw AssertionError("screenshot $name not captured at $path; diag: $diag")
-    }
+    private fun shot(device: UiDevice, name: String) = Shot.save(name)
 
     @Test
     fun installOpenTerminalRunCommand() {
