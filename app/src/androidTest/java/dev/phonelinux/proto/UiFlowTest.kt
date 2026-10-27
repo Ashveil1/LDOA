@@ -113,10 +113,8 @@ class UiFlowTest {
         // node bounds (the IME-open frame renders wrong; diagnose precisely).
         val sessTail = try { device.executeShellCommand("run-as dev.phonelinux.proto tail -c 500 files/terminal-session.log 2>&1") } catch (t: Throwable) { "(unreadable)" }
         android.util.Log.i("PHONEDIAG", "out.bounds=" + out.visibleBounds +
-            " out.text=" + (out.text ?: "").takeLast(300).replace("
-", "|") +
-            " sessionLogTail=" + sessTail.replace("
-", "|"))
+            " out.text=" + (out.text ?: "").takeLast(300).replace("\n", "|") +
+            " sessionLogTail=" + sessTail.replace("\n", "|"))
         // Dismiss the IME before the pixel-proof shot: with the keyboard open
         // the terminal column renders shifted under the status bar (app bug
         // under investigation); the rendered-proof frame must be clean.
