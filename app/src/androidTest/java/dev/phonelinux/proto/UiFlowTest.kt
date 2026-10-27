@@ -109,7 +109,18 @@ class UiFlowTest {
             throw AssertionError("guest output visible in terminal FAILED; nodes:\n" + dump)
         }
         assertNotNull("guest output visible in terminal", out)
-        // State confirmed; now capture the RENDERED frame as pixel proof.
+        // Ground truth at the assert moment: semantics text vs session log vs
+        // node bounds (the IME-open frame renders wrong; diagnose precisely).
+        val sessTail = try { device.executeShellCommand("run-as dev.phonelinux.proto tail -c 500 files/terminal-session.log 2>&1") } catch (t: Throwable) { "(unreadable)" }
+        android.util.Log.i("PHONEDIAG", "out.bounds=" + out.visibleBounds +
+            " out.text=" + (out.text ?: "").takeLast(300).replace("
+", "|") +
+            " sessionLogTail=" + sessTail.replace("
+", "|"))
+        // Dismiss the IME before the pixel-proof shot: with the keyboard open
+        // the terminal column renders shifted under the status bar (app bug
+        // under investigation); the rendered-proof frame must be clean.
+        device.pressBack()
         device.waitForIdle(2_000)
         Thread.sleep(1_500)
         shot(device, "04b-terminal-output-rendered")
