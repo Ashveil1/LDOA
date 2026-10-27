@@ -168,9 +168,9 @@ class DistroInstaller(private val ctx: Context) {
             val canonDest = dest.canonicalPath + File.separator
             while (e != null) {
                 val out = File(dest, e.name)
-                fun blocked(reason: String): Nothing =
-                    throw SecurityException("archive entry blocked ($reason): ${e.name}")
-                if (!out.canonicalPath.startsWith(canonDest)) blocked("path escapes root")
+                fun blocked(reason: String, entryName: String): Nothing =
+                    throw SecurityException("archive entry blocked ($reason): $entryName")
+                if (!out.canonicalPath.startsWith(canonDest)) blocked("path escapes root", e.name)
                 // Absolute symlink targets (e.g. -> /bin/busybox) are safe: proot remaps /
                 // to this rootfs, and extraction never dereferences them on the host.
                 // Relative targets must not escape dest via .. traversal.
@@ -178,7 +178,7 @@ class DistroInstaller(private val ctx: Context) {
                     val ln = e.linkName
                     if (!java.io.File(ln).isAbsolute) {
                         val resolved = runCatching { File(out.parentFile, ln).canonicalPath }.getOrNull()
-                        if (resolved == null || !resolved.startsWith(canonDest)) blocked("link target escapes root")
+                        if (resolved == null || !resolved.startsWith(canonDest)) blocked("link target escapes root", e.name)
                     }
                 }
                 when {
