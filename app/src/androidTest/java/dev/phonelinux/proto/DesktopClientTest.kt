@@ -102,8 +102,15 @@ class DesktopClientTest {
         val wmAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep openbox")
         val panelAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep tint2")
         val fmAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep pcmanfm")
-        val deskLog = try { device.executeShellCommand("run-as dev.phonelinux.proto tail -c 1500 files/guest-desktop.log 2>&1") } catch (t: Throwable) { "" }
-        assertTrue("openbox not running. Desktop log:\n$deskLog", wmAlive)
+        val deskLog = try { device.executeShellCommand("run-as dev.phonelinux.proto tail -c 4000 files/guest-desktop.log 2>&1") } catch (t: Throwable) { "" }
+        if (!wmAlive) {
+            // Run openbox standalone to capture its actual startup error.
+            val solo = GuestDesktop.guestExec(appCtx, rootfs,
+                "export DISPLAY=:0 HOME=/root; timeout 12 openbox 2>&1; echo openbox-exit=${'$'}?")
+            throw AssertionError("openbox not running." +
+                "\nstandalone openbox (exit ${solo.exitCode}):\n${(solo.stdout + solo.stderr).takeLast(1500)}" +
+                "\ndesktop log:\n$deskLog")
+        }
         assertTrue("tint2 not running. Desktop log:\n$deskLog", panelAlive)
         assertTrue("pcmanfm not running. Desktop log:\n$deskLog", fmAlive)
         assertTrue("desktop session exited early. Desktop log:\n$deskLog", session.isAlive)
