@@ -109,6 +109,10 @@ class UiFlowTest {
             throw AssertionError("guest output visible in terminal FAILED; nodes:\n" + dump)
         }
         assertNotNull("guest output visible in terminal", out)
+        // State confirmed; now capture the RENDERED frame as pixel proof.
+        device.waitForIdle(2_000)
+        Thread.sleep(1_500)
+        shot(device, "04b-terminal-output-rendered")
 
         // 5. orientation: landscape must keep the terminal usable
         device.setOrientationLandscape()

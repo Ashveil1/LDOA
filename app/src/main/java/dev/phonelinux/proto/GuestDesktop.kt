@@ -8,7 +8,7 @@ import java.io.File
  * Guest-side GUI: provisions an X client inside the installed rootfs and
  * launches it against the embedded X server through the proot-bound socket.
  * Milestone client is xclock; on top of it a real desktop shell profile:
- * openbox (draggable/resizable windows) + lxpanel (taskbar + app menu) +
+ * openbox (draggable/resizable windows) + tint2 (taskbar + launchers) +
  * pcmanfm (desktop icons + file manager). User-facing goal: a computer-like
  * desktop, not a bare X surface.
  */
@@ -54,18 +54,20 @@ object GuestDesktop {
         return pb.start()
     }
 
-    /** Windows-like shell: taskbar/menu (lxpanel), window management
+    /** Windows-like shell: taskbar (tint2), window management
      *  (openbox: drag, resize, minimize/maximize), file manager + desktop
-     *  icons (pcmanfm), fonts so GUI text actually renders. */
+     *  icons (pcmanfm), fonts so GUI text actually renders. lxpanel is gone
+     *  from Alpine v3.21 (gtk2 purge); tint2 is the maintained light panel.
+     *  No --arch flag: /etc/apk/arch (pinned to the rootfs' own arch) governs. */
     private val DESKTOP_PACKAGES = listOf(
-        "openbox", "lxpanel", "pcmanfm", "font-dejavu", "hicolor-icon-theme")
+        "openbox", "tint2", "pcmanfm", "font-dejavu", "hicolor-icon-theme")
 
     fun provisionDesktopShell(ctx: Context, rootfs: File): Proot.Result =
-        Proot.runGuest(ctx, rootfs, listOf("apk", "add", "--no-cache", "--arch", "aarch64") + DESKTOP_PACKAGES)
+        Proot.runGuest(ctx, rootfs, listOf("apk", "add", "--no-cache") + DESKTOP_PACKAGES)
 
     fun hasDesktopShell(rootfs: File): Boolean =
         File(rootfs, "usr/bin/openbox").isFile &&
-        File(rootfs, "usr/bin/lxpanel").isFile &&
+        File(rootfs, "usr/bin/tint2").isFile &&
         File(rootfs, "usr/bin/pcmanfm").isFile
 
     /** Launch the full desktop session: wm first, then desktop icons, then
@@ -79,7 +81,7 @@ object GuestDesktop {
             openbox &
             sleep 2
             pcmanfm --desktop &
-            lxpanel &
+            tint2 &
             wait
             """.trimIndent() + "\n")
         val nd = ctx.applicationInfo.nativeLibraryDir

@@ -100,11 +100,11 @@ class DesktopClientTest {
         val session = GuestDesktop.launchDesktopSession(appCtx, rootfs)
         Thread.sleep(25_000)
         val wmAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep openbox")
-        val panelAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep lxpanel")
+        val panelAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep tint2")
         val fmAlive = GuestDesktop.guestOk(appCtx, rootfs, "pgrep pcmanfm")
         val deskLog = try { device.executeShellCommand("run-as dev.phonelinux.proto tail -c 1500 files/guest-desktop.log 2>&1") } catch (t: Throwable) { "" }
         assertTrue("openbox not running. Desktop log:\n$deskLog", wmAlive)
-        assertTrue("lxpanel not running. Desktop log:\n$deskLog", panelAlive)
+        assertTrue("tint2 not running. Desktop log:\n$deskLog", panelAlive)
         assertTrue("pcmanfm not running. Desktop log:\n$deskLog", fmAlive)
         assertTrue("desktop session exited early. Desktop log:\n$deskLog", session.isAlive)
 
