@@ -143,7 +143,9 @@ object GuestUbuntu {
             "HOME" to "/root",
             "DISPLAY" to ":0",
             "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            "PROOT_TMP_DIR" to Proot.prootTmpDir(ctx).absolutePath
+            "PROOT_TMP_DIR" to Proot.prootTmpDir(ctx).absolutePath,
+            // Same TMPDIR leak as Proot.exec (see there).
+            "TMPDIR" to "/tmp"
         ))
         pb.redirectErrorStream(true)
         pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))

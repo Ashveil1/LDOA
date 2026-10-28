@@ -22,7 +22,7 @@ class UbuntuBaseSpikeTest {
     private val TAG = "PHONELINUX_UBUNTU_BASE"
 
     @Test
-    fun ubuntuInstallsAndAptWorks() = runBlocking {
+    fun ubuntuInstallsAndAptWorks(): Unit = runBlocking {
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
         val d = Distros.UBUNTU
         val installer = DistroInstaller(ctx)

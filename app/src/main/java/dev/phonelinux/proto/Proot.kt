@@ -66,7 +66,12 @@ object Proot {
             "HOME" to "/root",
             "TERM" to "xterm-256color",
             "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            "PROOT_TMP_DIR" to prootTmpDir(ctx).absolutePath
+            "PROOT_TMP_DIR" to prootTmpDir(ctx).absolutePath,
+            // ProcessBuilder inherits the app process env; Android sets
+            // TMPDIR to the app cache dir, which does not exist inside the
+            // guest rootfs. apt's ldhash/store methods then abort with
+            // "Cannot make temporary directory under /data/user/0/...".
+            "TMPDIR" to "/tmp"
         )
         env.putAll(extraEnv)
         val start = System.nanoTime()
