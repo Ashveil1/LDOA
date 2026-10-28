@@ -100,7 +100,7 @@ object Shot {
         // the whole task AFTER 9/9 tests passed (run 40678896241). Logcat is
         // the proven channel (every artifact set complete), so sendStatus is
         // opt-in via -e shot_send_status true for non-UTP lanes.
-        val sendStatus = "true" == instr.arguments.getString("shot_send_status")
+        val sendStatus = "true" == InstrumentationRegistry.getArguments().getString("shot_send_status")
         var seq = 0
         while (seq < total) {
             val end = minOf((seq + 1) * CHUNK, b64.length)
