@@ -190,11 +190,39 @@ class UbuntuGnomeSpikeTest {
         val wBefore = nauVisible()?.let { Pair(it.second, it.third) }
         Log.i(TAG, "dock-interact: nautilus visible wid=" + nauWid + " pos=" + wBefore)
         assertTrue("nautilus window geometry unreadable", wBefore != null)
+
+        // X-to-device coordinate mapping: UNKNOWN a priori (run 40686393933
+        // grabbed wallpaper - guest (216,111) was not the headerbar in
+        // device px; Android status bar offsets the lorie surface and the
+        // X screen size may differ from the panel). Probe it empirically:
+        // park the finger at two device points, read the pointer in X
+        // coords with xdotool, fit a linear map per axis.
+        Log.i(TAG, "dock-interact: root dims: " + xwin("xwininfo -root | grep -E 'Width|Height|dimensions'").replace("\n", " | "))
+        fun probeX(devX: Int, devY: Int): Pair<Int, Int>? {
+            device.swipe(devX, devY, devX + 1, devY, 5)
+            Thread.sleep(600)
+            val out = xwin("xdotool getmouselocation --shell 2>/dev/null || true")
+            val x = Regex("X=(-?\\d+)").find(out)?.groupValues?.get(1)?.toIntOrNull()
+            val y = Regex("Y=(-?\\d+)").find(out)?.groupValues?.get(1)?.toIntOrNull()
+            return if (x != null && y != null) Pair(x, y) else null
+        }
+        val p1 = probeX(300, 900)
+        val p2 = probeX(700, 1500)
+        Log.i(TAG, "dock-interact: mapping probes dev(300,900)->" + p1 + " dev(700,1500)->" + p2)
+        fun mapToDevice(x: Int, y: Int): Pair<Int, Int>? {
+            if (p1 == null || p2 == null) return null
+            val ax = (700 - 300).toDouble() / (p2.first - p1.first)
+            val bx = 300 - ax * p1.first
+            val ay = (1500 - 900).toDouble() / (p2.second - p1.second)
+            val by = 900 - ay * p1.second
+            return Pair((ax * x + bx).toInt(), (ay * y + by).toInt())
+        }
         // Headerbar (CSD) drag: grab inside the window top area, off-center
         // to avoid the path bar/search button, move up-left modestly.
-        val grabX = wBefore!!.first + 150
-        val grabY = wBefore.second + 25
-        device.swipe(grabX, grabY, grabX - 60, grabY + 120, 40)
+        val grab = mapToDevice(wBefore!!.first + 150, wBefore.second + 25)
+        assertTrue("X-to-device mapping unavailable for drag (probes=" + p1 + "," + p2 + ")", grab != null)
+        Log.i(TAG, "dock-interact: drag grab guest(" + (wBefore.first + 150) + "," + (wBefore.second + 25) + ") -> dev " + grab)
+        device.swipe(grab!!.first, grab.second, grab.first - 60, grab.second + 120, 40)
         Thread.sleep(2_000)
         Shot.save("23-ubuntu-window-dragged")
         val wAfter = nauVisible()?.let { Pair(it.second, it.third) }

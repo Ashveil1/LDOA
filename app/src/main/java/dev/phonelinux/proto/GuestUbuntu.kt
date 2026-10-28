@@ -42,6 +42,7 @@ object GuestUbuntu {
         "gnome-terminal",
         "nautilus",
         "x11-utils",
+        "xdotool",
         "adwaita-icon-theme",
         "fonts-dejavu-core"
     )
