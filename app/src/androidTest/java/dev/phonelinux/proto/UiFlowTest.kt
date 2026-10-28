@@ -228,7 +228,12 @@ class UiFlowTest {
         }
         assertTrue("send button never enabled for: " + cmd, sendEnabled)
         try { send.click() } catch (e: androidx.test.uiautomator.StaleObjectException) {
-            device.findObject(By.desc("terminal-send")).click()
+            // A system dialog (launcher ANR) can hide the whole app tree:
+            // the bare re-find then returns null and NPEs (run 1a81e3d).
+            Shot.dismissSystemDialogs(device)
+            val send2 = device.wait(Until.findObject(By.desc("terminal-send")), 10_000)
+            assertTrue("send button never re-found after stale node", send2 != null)
+            send2!!.click()
         }
         // Input behavior: Run must clear the field.
         val clearDeadline = System.currentTimeMillis() + 5_000

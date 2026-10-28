@@ -274,19 +274,32 @@ class DesktopClientTest {
             val n = out.lines().mapNotNull { it.trim().toIntOrNull() }
             return if (n.size >= 2) Pair(n[0], n[1]) else null
         }
-        val stBefore = stPos()
         val dragFrom = devFor(546.0, 433.0)
         // Modest drag kept fully onscreen (the +200/+200 variant pushed the
         // window controls off the right edge - see the dedicated offscreen
         // recovery test below).
-        device.swipe(dragFrom.first, dragFrom.second, dragFrom.first - 30, dragFrom.second - 150, 40)
-        Thread.sleep(2_000)
+        // Bounded retry: the emulator's Pixel-Launcher ANR dialog eats the
+        // swipe (pixel-proven in shots 10 of runs 8f18370/eaaf47f/1a81e3d) -
+        // dismiss and re-attempt rather than failing on the storm.
+        var stBefore = stPos()
+        var stAfter = stPos()
+        var moved = false
+        for (attempt in 1..3) {
+            Shot.dismissSystemDialogs(device)
+            Thread.sleep(500)
+            stBefore = stPos()
+            device.swipe(dragFrom.first, dragFrom.second, dragFrom.first - 30, dragFrom.second - 150, 40)
+            Thread.sleep(2_000)
+            stAfter = stPos()
+            if (stBefore != null && stAfter != null &&
+                (Math.abs(stAfter.first - stBefore.first) > 50 || Math.abs(stAfter.second - stBefore.second) > 50)) {
+                moved = true; break
+            }
+            android.util.Log.i("PHONEDIAG", "st drag attempt " + attempt + " no move (before=" + stBefore + " after=" + stAfter + ")")
+        }
         Shot.save("10-st-dragged")
-        val stAfter = stPos()
-        android.util.Log.i("PHONEDIAG", "st drag from dev=" + dragFrom + " before=" + stBefore + " after=" + stAfter)
-        assertTrue("st window did not move on title-bar drag (before=" + stBefore + " after=" + stAfter + ")",
-            stBefore != null && stAfter != null &&
-                (Math.abs(stAfter.first - stBefore.first) > 50 || Math.abs(stAfter.second - stBefore.second) > 50))
+        android.util.Log.i("PHONEDIAG", "st drag from dev=" + dragFrom + " before=" + stBefore + " after=" + stAfter + " moved=" + moved)
+        assertTrue("st window did not move on title-bar drag after 3 attempts (before=" + stBefore + " after=" + stAfter + ")", moved)
 
         // 3. Launch from the JWM menu: open the root menu, identify the
         // popup by DIFFING top-level window ids (the JWM 1x1 support
