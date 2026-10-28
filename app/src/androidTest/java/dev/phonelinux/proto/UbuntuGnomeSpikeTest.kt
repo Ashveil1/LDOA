@@ -244,12 +244,25 @@ class UbuntuGnomeSpikeTest {
         val grab = mapToDevice(grabGuestX, grabGuestY)
         assertTrue("X-to-device mapping unavailable for drag (probes=" + p1 + "," + p2 + ")", grab != null)
         Log.i(TAG, "dock-interact: drag grab guest(" + grabGuestX + "," + grabGuestY + ") vis=(" + visX + "," + visY + " w=" + visW + ") -> dev " + grab)
-        device.swipe(grab!!.first, grab.second, grab.first - 60, grab.second + 120, 40)
-        Thread.sleep(2_000)
+        // Effect-verified drag with finger-like hold-then-move: identical
+        // coordinates moved the window in run 40702734816 but not in
+        // 40712620463 (swipe speed vs mutter's drag threshold). Each attempt
+        // presses-and-holds briefly (slow 2px segment), then moves slowly;
+        // geometry re-read between attempts, all logged.
+        var wAfter = nauVisible()?.let { Pair(it.x, it.y) }
+        var dragAttempt = 0
+        while (dragAttempt < 3 && !(wAfter != null && wBefore != null &&
+                (Math.abs(wAfter.first - wBefore.first) > 50 || Math.abs(wAfter.second - wBefore.second) > 50))) {
+            dragAttempt++
+            device.swipe(grab!!.first, grab.second, grab.first + 2, grab.second, 50)
+            device.swipe(grab.first + 2, grab.second, grab.first - 60, grab.second + 120, 60 + dragAttempt * 40)
+            Thread.sleep(2_000)
+            wAfter = nauVisible()?.let { Pair(it.x, it.y) }
+            Log.i(TAG, "dock-interact: drag attempt " + dragAttempt + " -> " + wAfter)
+        }
         Shot.save("23-ubuntu-window-dragged")
-        val wAfter = nauVisible()?.let { Pair(it.x, it.y) }
-        Log.i(TAG, "dock-interact: dragged from=" + wBefore + " to=" + wAfter)
-        assertTrue("nautilus window did not move on finger drag (before=" + wBefore + " after=" + wAfter + ")",
+        Log.i(TAG, "dock-interact: dragged from=" + wBefore + " to=" + wAfter + " attempts=" + dragAttempt)
+        assertTrue("nautilus window did not move on finger drag (before=" + wBefore + " after=" + wAfter + " attempts=" + dragAttempt + ")",
             wAfter != null && wBefore != null &&
                 (Math.abs(wAfter.first - wBefore.first) > 50 || Math.abs(wAfter.second - wBefore.second) > 50))
         Log.i(TAG, "UBUNTU-GNOME-INTERACTION-OK dock tap opened Files; finger drag moved the window")
