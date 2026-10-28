@@ -99,7 +99,7 @@ class MainActivity : ComponentActivity() {
         // Phone-native default: tap-to-point (direct touch), not termux-x11's
         // trackpad default. Only when never set; the lorie preferences
         // screen remains free to change it.
-        val touchPrefs = androidx.preference.PreferenceManager.getDefaultSharedPreferences(this)
+        val touchPrefs = getSharedPreferences(packageName + "_preferences", MODE_PRIVATE)
         if (!touchPrefs.contains("touchMode")) {
             touchPrefs.edit().putString("touchMode", "3").apply()
         }
