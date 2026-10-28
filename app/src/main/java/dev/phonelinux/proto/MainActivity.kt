@@ -41,6 +41,11 @@ private val TextDim = Color(0xFF9AA6C8)
 
 enum class Screen { PICKER, TERMINAL }
 
+// Flip to true only when the Ubuntu GNOME session is runtime-qualified
+// (emulator real-render green). Kept as a compile-time gate so a preview
+// build cannot expose the unproven GNOME entry by accident.
+private const val DESKTOP_PREVIEW_ENABLED = false
+
 class SpikeViewModel : ViewModel() {
     val states: SnapshotStateMap<String, InstallState> = mutableStateMapOf()
     var log by mutableStateOf("")
@@ -144,7 +149,12 @@ private fun PickerScreen(distros: List<Distro>, vm: SpikeViewModel, onPrimary: (
         Spacer(Modifier.height(24.dp))
         for (d in distros) {
             DistroCard(d, vm.stateFor(d), vm.busy, onPrimary = { onPrimary(d) })
-            if (vm.stateFor(d) == InstallState.Installed) {
+            // Ubuntu's desktop button stays hidden until the GNOME session is
+            // runtime-qualified: offering it now would start a multi-hundred-MB
+            // unproven apt install on the user's phone. Ubuntu is still
+            // installable with a working terminal (real userland + apt).
+            if (vm.stateFor(d) == InstallState.Installed &&
+                (d.pkgMgr == PkgMgr.APK || DESKTOP_PREVIEW_ENABLED)) {
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(
                     onClick = { onDesktop(d) },

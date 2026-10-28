@@ -29,11 +29,15 @@ object Proot {
     fun runHost(ctx: Context, args: List<String>): Result =
         exec(ctx, listOf(prootPath(ctx)) + args)
 
-    /** Run a command inside the installed guest rootfs. */
-    fun runGuest(ctx: Context, rootfs: File, guestCmd: List<String>, extraBinds: List<Pair<String, String>> = emptyList(), extraEnv: Map<String, String> = emptyMap()): Result {
+    /** Run a command inside the installed guest rootfs.
+     *  fakeRoot (-0): guest sees uid 0. Required for apt/dpkg (they refuse
+     *  to install as non-root); Alpine's apk never needed it, so the flag
+     *  is opt-in per call site, not a global behavior change. */
+    fun runGuest(ctx: Context, rootfs: File, guestCmd: List<String>, extraBinds: List<Pair<String, String>> = emptyList(), extraEnv: Map<String, String> = emptyMap(), fakeRoot: Boolean = false): Result {
         val args = buildList {
             add(prootPath(ctx))
             add("--link2symlink")
+            if (fakeRoot) add("-0")
             add("-r"); add(rootfs.absolutePath)
             add("-b"); add("/dev")
             add("-b"); add("/proc")

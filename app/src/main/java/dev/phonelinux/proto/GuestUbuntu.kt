@@ -47,9 +47,11 @@ object GuestUbuntu {
 
     fun hasGnome(rootfs: File): Boolean = File(rootfs, "usr/bin/gnome-shell").isFile
 
+    // fakeRoot: apt/dpkg refuse to install as a non-root euid; proot -0
+    // fakes uid 0 inside the guest (same trick proot-distro uses).
     private fun apt(ctx: Context, rootfs: File, vararg args: String): Proot.Result =
         Proot.runGuest(ctx, rootfs, listOf("apt-get") + args.toList(),
-            extraEnv = mapOf("DEBIAN_FRONTEND" to "noninteractive"))
+            extraEnv = mapOf("DEBIAN_FRONTEND" to "noninteractive"), fakeRoot = true)
 
     /** apt-get update + install the GNOME set. One retry on failure: apt
      *  fetch hiccups under proot are transient. */
@@ -127,6 +129,7 @@ object GuestUbuntu {
         val pb = ProcessBuilder(
             File(nd, "libproot.so").absolutePath,
             "--link2symlink",
+            "-0", // fake root: GNOME session components + dbus expect euid 0
             "-r", rootfs.absolutePath,
             "-b", "/dev", "-b", "/proc", "-b", "/sys",
             "-b", XServer.socketDir(ctx).absolutePath + ":/tmp/.X11-unix",
