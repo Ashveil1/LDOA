@@ -419,10 +419,37 @@ class UbuntuGnomeSpikeTest {
         // with a fresh session marker and post-settle pixels.
         val launchCountBefore = logFile.readText().lineSequence()
             .count { it.contains("gnome-launch: trying gnome-session") }
-        val scenario = androidx.test.core.app.ActivityScenario.launch(MainActivity::class.java)
-        Thread.sleep(5_000)
-        scenario.recreate()
-        Thread.sleep(5_000)
+        // MainActivity intentionally forwards to X11, so ActivityScenario's
+        // sustained RESUMED requirement is wrong for this entry activity.
+        // Observe real lifecycle and recreate once on its first resume.
+        val app = ctx.applicationContext as android.app.Application
+        val recreated = java.util.concurrent.atomic.AtomicBoolean(false)
+        val createdCount = java.util.concurrent.atomic.AtomicInteger(0)
+        val callbacks = object : android.app.Application.ActivityLifecycleCallbacks {
+            override fun onActivityCreated(a: android.app.Activity, b: android.os.Bundle?) {
+                if (a is MainActivity) createdCount.incrementAndGet()
+            }
+            override fun onActivityResumed(a: android.app.Activity) {
+                if (a is MainActivity && recreated.compareAndSet(false, true)) a.recreate()
+            }
+            override fun onActivityStarted(a: android.app.Activity) {}
+            override fun onActivityPaused(a: android.app.Activity) {}
+            override fun onActivityStopped(a: android.app.Activity) {}
+            override fun onActivitySaveInstanceState(a: android.app.Activity, b: android.os.Bundle) {}
+            override fun onActivityDestroyed(a: android.app.Activity) {}
+        }
+        app.registerActivityLifecycleCallbacks(callbacks)
+        try {
+            ctx.startActivity(android.content.Intent(ctx, MainActivity::class.java)
+                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP))
+            val recreateDeadline = System.currentTimeMillis() + 60_000
+            while (createdCount.get() < 2 && System.currentTimeMillis() < recreateDeadline) Thread.sleep(1_000)
+            Log.i(TAG, "reentry: actual MainActivity created count=" + createdCount.get() + " recreate requested=" + recreated.get())
+            assertTrue("actual MainActivity was not recreated", recreated.get() && createdCount.get() >= 2)
+            Thread.sleep(10_000)
+        } finally {
+            app.unregisterActivityLifecycleCallbacks(callbacks)
+        }
         val reenterDeadline = System.currentTimeMillis() + 120_000
         var reentered = false
         while (System.currentTimeMillis() < reenterDeadline) {
@@ -438,7 +465,6 @@ class UbuntuGnomeSpikeTest {
         val launchCountAfter = logFile.readText().lineSequence()
             .count { it.contains("gnome-launch: trying gnome-session") }
         assertEquals("MainActivity recreation started a duplicate session", launchCountBefore, launchCountAfter)
-        scenario.close()
         Log.i(TAG, "UBUNTU-COLDSTART-REENTER-OK recreated MainActivity re-entered the running desktop, no second session")
         // Full-log mirroring: the artifact file pull has proven unreliable
         // (0-byte guest-gnome.log in run eaaf47f); logcat (shotlog.txt) is
