@@ -208,7 +208,10 @@ class DesktopClientTest {
         // resize/offscreen asserts measured the menu-launched st).
         val stWid = xwin("xdotool search --name script | head -n 1").trim()
         android.util.Log.i("PHONEDIAG", "anchored st window id: " + stWid)
-        assertTrue("original st window id not found", stWid.startsWith("0x"))
+        // xdotool prints DECIMAL ids (8388613 = 0x800005); xwininfo -id
+        // accepts either form.
+        assertTrue("original st window id not found: '" + stWid + "'",
+            stWid.matches(Regex("(0x[0-9a-fA-F]+|[0-9]+)")))
         fun devFor(x: Double, y: Double) = Pair(((x - oX) / sX).toInt(), ((y - oY) / sY).toInt())
 
         // 1. Tap the JWM menu button (tray = 1080x34+0+1978, button at the
