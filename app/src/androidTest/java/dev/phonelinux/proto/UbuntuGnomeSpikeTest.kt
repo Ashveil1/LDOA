@@ -137,22 +137,34 @@ class UbuntuGnomeSpikeTest {
         // the 324x720 preview = 40,193 on the 1080x2400 panel). Second
         // candidate y=260 covers the icon sitting one slot lower when the
         // screen-lock banner shifts the layout.
+        // Clear any open shell popup first: in run 40671527573 the
+        // notification shade was open at tap time (shot 21b) and ate the
+        // first tap; an empty-wallpaper tap dismisses shell popups.
+        device.click(540, 1200)
+        Thread.sleep(2_000)
+        Shot.save("21c-ubuntu-desktop-clean")
+        // Icon centers pixel-measured from the full-panel cold-start shot
+        // (30, run 40671527573): Files = y~194 (grey/red cabinet),
+        // second icon y~264, both spanning x~4-60 -> tap x=30.
         var nauWid: String? = null
-        for ((attempt, tapY) in listOf(193, 260).withIndex().map { it.index + 1 to it.value }) {
-            Shot.dismissSystemDialogs(device)
-            device.click(40, tapY)
-            Log.i(TAG, "dock-interact: tapped Files candidate (40," + tapY + ") attempt " + attempt)
-            val openDeadline = System.currentTimeMillis() + 45_000
+        for ((attempt, tapY) in listOf(194, 264).withIndex().map { it.index + 1 to it.value }) {
+            // Finger-like press: short hold instead of an instant
+            // down/up, closer to how a finger lands on glass.
+            device.swipe(30, tapY, 32, tapY, 25)
+            Log.i(TAG, "dock-interact: pressed Files candidate (30," + tapY + ") attempt " + attempt)
+            val openDeadline = System.currentTimeMillis() + 90_000
             while (System.currentTimeMillis() < openDeadline) {
                 val now = windowIds("nautilus")
                 val fresh = now.firstOrNull { it !in nauBefore }
                 if (fresh != null) { nauWid = fresh; break }
+                val proc = xwin("pgrep -x nautilus || true").trim()
+                if (proc.isNotEmpty()) Log.i(TAG, "dock-interact: nautilus process alive pid=" + proc + " (no window yet)")
                 Thread.sleep(3_000)
             }
             if (nauWid != null) break
         }
         Shot.save("22-ubuntu-dock-files-opened")
-        assertTrue("finger-tap on the dock Files icon did not open a nautilus window (2 positions tried)", nauWid != null)
+        assertTrue("finger press on the dock Files icon did not open a nautilus window (2 positions tried)", nauWid != null)
 
         fun winPos(id: String): Pair<Int, Int>? {
             val out = xwin("xwininfo -id " + id + " -stats | grep 'Absolute upper-left' | awk '{print ${'$'}NF}'")
