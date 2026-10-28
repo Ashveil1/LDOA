@@ -311,11 +311,20 @@ class DesktopClientTest {
             .filter { it.trimStart().startsWith("0x") }
         val stCountBefore = xwin("xwininfo -root -tree | grep -c st-256color").trim().toIntOrNull() ?: -1
         val beforeIds = topIds().map { it.trimStart().substringBefore(' ') }.toSet()
-        device.click(menuBtn.first, menuBtn.second)
-        Thread.sleep(2_000)
-        val newLines = topIds().filter { it.trimStart().substringBefore(' ') !in beforeIds }
+        // Same ANR-storm posture as the drag: the Pixel Launcher dialog ate
+        // this tap in run 06654bc (shot 09/10 show the dialog at tap time).
+        var newLines = listOf<String>()
+        for (attempt in 1..3) {
+            Shot.dismissSystemDialogs(device)
+            Thread.sleep(500)
+            device.click(menuBtn.first, menuBtn.second)
+            Thread.sleep(2_000)
+            newLines = topIds().filter { it.trimStart().substringBefore(' ') !in beforeIds }
+            if (newLines.size == 1) break
+            android.util.Log.i("PHONEDIAG", "menu second-tap attempt " + attempt + " new top-levels: " + newLines)
+        }
         android.util.Log.i("PHONEDIAG", "menu new top-levels: " + newLines)
-        assertTrue("JWM menu popup did not appear on second menu-button tap (new top-levels=" + newLines + ")",
+        assertTrue("JWM menu popup did not appear on second menu-button tap after 3 attempts (new top-levels=" + newLines + ")",
             newLines.size == 1)
         val gm = Regex("(\\d+)x(\\d+)\\+(-?\\d+)\\+(-?\\d+)").find(newLines[0])
         assertTrue("menu popup geometry unparsable: " + newLines[0], gm != null)

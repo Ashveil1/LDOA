@@ -56,6 +56,9 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_6
+          # pixel_6 AVD defaults starve the launcher under test load
+          # (ANR dialog storm, pixel-proven 4 runs) - give it all 4 runner cores.
+          cores: 4
           script: |
             adb -s emulator-5554 logcat -G 16M || true
             adb -s emulator-5554 logcat -c || true
@@ -136,6 +139,9 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_6
+          # pixel_6 AVD defaults starve the launcher under test load
+          # (ANR dialog storm, pixel-proven 4 runs) - give it all 4 runner cores.
+          cores: 4
           script: |
             adb -s emulator-5554 logcat -G 16M || true
             adb -s emulator-5554 logcat -c || true
@@ -195,6 +201,9 @@ jobs:
           target: google_apis
           arch: arm64-v8a
           profile: pixel_6
+          # pixel_6 AVD defaults starve the launcher under test load
+          # (ANR dialog storm, pixel-proven 4 runs) - give it all 4 runner cores.
+          cores: 4
           script: |
             adb -s emulator-5554 logcat -G 16M || true
             adb -s emulator-5554 logcat -c || true

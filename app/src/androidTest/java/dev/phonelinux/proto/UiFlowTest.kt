@@ -165,8 +165,10 @@ class UiFlowTest {
         // 5. orientation: landscape must keep the terminal usable
         device.setOrientationLandscape()
         device.waitForIdle(3_000)
+        // Rotation under emulator load can outlast waitForIdle: wait for the
+        // node explicitly instead of asserting on an instant snapshot.
         assertTrue("terminal still visible in landscape",
-            device.hasObject(By.desc("terminal-input")))
+            device.wait(Until.hasObject(By.desc("terminal-input")), 10_000))
         shot(device, "05-landscape")
         device.setOrientationNatural()
         device.waitForIdle(2_000)
