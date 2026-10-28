@@ -75,9 +75,11 @@ jobs:
             # for flake-free iteration, "off" qualifies the normal-launcher
             # shipping path).
             if [ "$(cat ci/launcher-suppression.conf 2>/dev/null || echo on)" = "on" ]; then adb -s emulator-5554 shell pm disable-user --user 0 com.google.android.apps.nexuslauncher || adb -s emulator-5554 shell am force-stop com.google.android.apps.nexuslauncher || true; echo "launcher suppression: ON (pm disable-user; force-stop proved insufficient - the launcher restarts and re-ANRs mid-lane, pixel-proven runs 8f18370/eaaf47f/1a81e3d/06654bc; fresh emulator each job so no re-enable needed)"; else echo "launcher suppression: OFF - normal Pixel launcher active (shipping-path qualification)"; fi
-            # notClass: UbuntuGnomeSpikeTest provisions full GNOME over apt
-            # (tens of minutes); it runs only in the ubuntu-gnome-spike job.
-            ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.notClass=dev.phonelinux.proto.UbuntuGnomeSpikeTest --info 2>&1 | tee /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
+            # Both Ubuntu classes belong to the fresh-install GNOME job below.
+            # AutoEnter requires an empty Ubuntu state and must run FIRST;
+            # UbuntuBaseSpikeTest has already installed Ubuntu in the generic suite.
+            # It is still gating in the dedicated job, not skipped or retried.
+            ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.notClass=dev.phonelinux.proto.UbuntuGnomeSpikeTest,dev.phonelinux.proto.UbuntuDesktopAutoEnterTest --info 2>&1 | tee /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
             grep -q "BUILD SUCCESSFUL" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
             # Host-driven cold-start E2E (parent directive): install the APK
             # on this RUNNING emulator, drive the real UI, am force-stop,
@@ -235,9 +237,11 @@ jobs:
             adb -s emulator-5554 logcat -c || true
             adb -s emulator-5554 shell settings put global anr_show_background 0 || true
             if [ "$(cat ci/launcher-suppression.conf 2>/dev/null || echo on)" = "on" ]; then adb -s emulator-5554 shell pm disable-user --user 0 com.google.android.apps.nexuslauncher || adb -s emulator-5554 shell am force-stop com.google.android.apps.nexuslauncher || true; echo "launcher suppression: ON (pm disable-user; force-stop proved insufficient - the launcher restarts and re-ANRs mid-lane, pixel-proven runs 8f18370/eaaf47f/1a81e3d/06654bc; fresh emulator each job so no re-enable needed)"; else echo "launcher suppression: OFF - normal Pixel launcher active (shipping-path qualification)"; fi
-            # notClass: UbuntuGnomeSpikeTest provisions full GNOME over apt
-            # (tens of minutes); it runs only in the ubuntu-gnome-spike job.
-            ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.notClass=dev.phonelinux.proto.UbuntuGnomeSpikeTest --info 2>&1 | tee /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
+            # Both Ubuntu classes belong to the fresh-install GNOME job below.
+            # AutoEnter requires an empty Ubuntu state and must run FIRST;
+            # UbuntuBaseSpikeTest has already installed Ubuntu in the generic suite.
+            # It is still gating in the dedicated job, not skipped or retried.
+            ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.notClass=dev.phonelinux.proto.UbuntuGnomeSpikeTest,dev.phonelinux.proto.UbuntuDesktopAutoEnterTest --info 2>&1 | tee /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
             grep -q "BUILD SUCCESSFUL" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
             adb -s emulator-5554 logcat -d > /tmp/shotlog.txt || true
             python3 .github/scripts/extract_shots.py /tmp/shotlog.txt screenshots || true

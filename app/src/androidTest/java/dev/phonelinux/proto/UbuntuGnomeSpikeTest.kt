@@ -244,28 +244,35 @@ class UbuntuGnomeSpikeTest {
         val grab = mapToDevice(grabGuestX, grabGuestY)
         assertTrue("X-to-device mapping unavailable for drag (probes=" + p1 + "," + p2 + ")", grab != null)
         Log.i(TAG, "dock-interact: drag grab guest(" + grabGuestX + "," + grabGuestY + ") vis=(" + visX + "," + visY + " w=" + visW + ") -> dev " + grab)
-        // Effect-verified drag with finger-like hold-then-move: identical
-        // coordinates moved the window in run 40702734816 but not in
-        // 40712620463 (swipe speed vs mutter's drag threshold). Each attempt
-        // presses-and-holds briefly (slow 2px segment), then moves slowly;
-        // geometry re-read between attempts, all logged.
-        var wAfter = nauVisible()?.let { Pair(it.x, it.y) }
-        var dragAttempt = 0
-        while (dragAttempt < 3 && !(wAfter != null && wBefore != null &&
-                (Math.abs(wAfter.first - wBefore.first) > 50 || Math.abs(wAfter.second - wBefore.second) > 50))) {
-            dragAttempt++
-            device.swipe(grab!!.first, grab.second, grab.first + 2, grab.second, 50)
-            device.swipe(grab.first + 2, grab.second, grab.first - 60, grab.second + 120, 60 + dragAttempt * 40)
-            Thread.sleep(2_000)
-            wAfter = nauVisible()?.let { Pair(it.x, it.y) }
-            Log.i(TAG, "dock-interact: drag attempt " + dragAttempt + " -> " + wAfter)
+        // One continuous touchscreen gesture. Two UiDevice.swipe calls
+        // lift the finger between hold and movement and cannot prove a
+        // press-hold-drag. No retries: first-attempt failure stays red.
+        fun fingerDrag(from: Pair<Int, Int>) {
+            val down = android.os.SystemClock.uptimeMillis()
+            fun event(action: Int, x: Float, y: Float) {
+                val e = android.view.MotionEvent.obtain(down, android.os.SystemClock.uptimeMillis(), action, x, y, 0)
+                e.source = android.view.InputDevice.SOURCE_TOUCHSCREEN
+                try { instr.sendPointerSync(e) } finally { e.recycle() }
+            }
+            event(android.view.MotionEvent.ACTION_DOWN, from.first.toFloat(), from.second.toFloat())
+            android.os.SystemClock.sleep(600)
+            for (step in 1..30) {
+                event(android.view.MotionEvent.ACTION_MOVE,
+                    from.first - 60f * step / 30, from.second + 120f * step / 30)
+                android.os.SystemClock.sleep(25)
+            }
+            event(android.view.MotionEvent.ACTION_UP, from.first - 60f, from.second + 120f)
+            Thread.sleep(8_000)
         }
+        fingerDrag(grab!!)
+        val wAfter = nauVisible()?.let { Pair(it.x, it.y) }
         Shot.save("23-ubuntu-window-dragged")
-        Log.i(TAG, "dock-interact: dragged from=" + wBefore + " to=" + wAfter + " attempts=" + dragAttempt)
-        assertTrue("nautilus window did not move on finger drag (before=" + wBefore + " after=" + wAfter + " attempts=" + dragAttempt + ")",
+        Log.i(TAG, "dock-interact: continuous drag from=" + wBefore + " to=" + wAfter + " attempts=1")
+        assertTrue("nautilus window did not follow finger drag (before=" + wBefore + " after=" + wAfter + ")",
             wAfter != null && wBefore != null &&
-                (Math.abs(wAfter.first - wBefore.first) > 50 || Math.abs(wAfter.second - wBefore.second) > 50))
-        Log.i(TAG, "UBUNTU-GNOME-INTERACTION-OK dock tap opened Files; finger drag moved the window")
+                Math.abs(wAfter.first - wBefore.first + 60) < 30 &&
+                Math.abs(wAfter.second - wBefore.second - 120) < 30)
+        Log.i(TAG, "UBUNTU-GNOME-INTERACTION-OK dock tap opened Files; continuous finger drag moved the window")
 
         // Kill a pid with all its /proc descendants (deepest first): guest
         // binaries exec under proot so their cmdline does not carry the
@@ -308,41 +315,65 @@ class UbuntuGnomeSpikeTest {
         while (proc.isAlive && System.currentTimeMillis() < deathDeadline) Thread.sleep(2_000)
         Log.i(TAG, "restart: old session alive=" + proc.isAlive)
         assertTrue("old gnome session process tree survived the kill", !proc.isAlive)
-        fun guestLogTail(): String = try {
-            java.io.File(ctx.filesDir, "guest-gnome.log").readText().takeLast(600)
-        } catch (t: Throwable) { "<unreadable: " + t.message + ">" }
-        fun waitShell(p: Process, budgetMs: Long): Boolean {
-            val deadline = System.currentTimeMillis() + budgetMs
-            while (System.currentTimeMillis() < deadline) {
-                if (xwin("xwininfo -root -tree | grep -c 'gnome-shell'").trim().toIntOrNull()?.let { it > 0 } == true) return true
-                if (!p.isAlive) return false
-                Thread.sleep(10_000)
-            }
-            return false
-        }
-        var proc2 = GuestUbuntu.launchGnomeSession(ctx, rootfs)
-        var shellBack = waitShell(proc2, 300_000)
-        if (!shellBack) {
-            // Run 40721333763: relaunched session produced NO shell within
-            // 300s while the host probe's later session came up in ~35s.
-            // Log the evidence, then ONE retry if the process died (the ICE
-            // lock death is a known transient race).
-            Log.i(TAG, "restart: first relaunch shellBack=false proc2.alive=" + proc2.isAlive)
-            Log.i(TAG, "restart: guest log tail: " + guestLogTail().replace("\n", " | "))
-            if (!proc2.isAlive) {
-                Log.i(TAG, "restart: first relaunch died - one retry (transient ICE race suspected)")
-                proc2 = GuestUbuntu.launchGnomeSession(ctx, rootfs)
-                shellBack = waitShell(proc2, 300_000)
-                Log.i(TAG, "restart: retry shellBack=" + shellBack + " alive=" + proc2.isAlive)
-                if (!shellBack) Log.i(TAG, "restart: retry guest log tail: " + guestLogTail().replace("\n", " | "))
+        fun mirrorGuestLog() {
+            if (logFile.isFile) logFile.readText().chunked(900).forEachIndexed { i, c ->
+                Log.i(TAG, "restart-full[$i]: $c")
             }
         }
+        // Bind the X window manager's identity to its actual process.
+        // xwininfo names the shell 'GNOME Shell', not 'gnome-shell'. A
+        // case-insensitive grep alone cannot establish a live manager.
+        fun shellIdentity(): Boolean {
+            val wm = xwin("xprop -root _NET_SUPPORTING_WM_CHECK")
+            val id = Regex("0x[0-9a-fA-F]+").find(wm)?.value ?: return false
+            val props = xwin("xprop -id " + id + " _NET_WM_NAME _NET_WM_PID")
+            val pid = Regex("_NET_WM_PID\\(CARDINAL\\) = (\\d+)").find(props)?.groupValues?.get(1)
+                ?: return false
+            val cmd = try { File("/proc/" + pid + "/cmdline").readText().replace('\u0000', ' ') }
+                catch (_: Throwable) { return false }
+            val valid = props.contains("GNOME Shell") && cmd.contains("gnome-shell")
+            if (valid) Log.i(TAG, "restart: live WM id=" + id + " pid=" + pid + " cmd=" + cmd)
+            return valid
+        }
+        val proc2 = GuestUbuntu.launchGnomeSession(ctx, rootfs)
+        val shellDeadline = System.currentTimeMillis() + 300_000
+        var shellBack = false
+        while (System.currentTimeMillis() < shellDeadline && proc2.isAlive) {
+            if (shellIdentity()) { shellBack = true; break }
+            Thread.sleep(10_000)
+        }
+        Log.i(TAG, "restart: FIRST launch shellBack=" + shellBack + " proc2.alive=" + proc2.isAlive + " retries=0")
+        mirrorGuestLog() // preserve even on failure, before the host removes it
         Thread.sleep(20_000)
         Shot.dismissSystemDialogs(device)
         Shot.save("24-ubuntu-gnome-restarted")
         assertTrue("relaunched gnome session process died", proc2.isAlive)
-        assertTrue("gnome-shell windows did not reappear after session restart", shellBack)
-        Log.i(TAG, "UBUNTU-GNOME-RESTART-OK session killed and relaunched; shell back on :0")
+        assertTrue("GNOME window manager identity/process missing after restart", shellBack)
+
+        // Qualify interaction AFTER restart, not just a live shell marker.
+        device.click(540, 1200)
+        device.swipe(30, 194, 32, 194, 25)
+        val reopenedDeadline = System.currentTimeMillis() + 90_000
+        var reopened: NauWin? = null
+        while (System.currentTimeMillis() < reopenedDeadline) {
+            reopened = nauVisible()
+            if (reopened != null) break
+            Thread.sleep(3_000)
+        }
+        Thread.sleep(10_000)
+        Shot.save("24b-ubuntu-restart-files")
+        assertTrue("finger press did not reopen Files after restart", reopened != null)
+        val rw = reopened!!
+        val re = frameExtents(rw.id)
+        val rg = mapToDevice(rw.x + re[0] + rw.w - re[0] - re[1] - 200, rw.y + re[2] + 20)
+        assertTrue("restart drag mapping missing", rg != null)
+        fingerDrag(rg!!)
+        val moved = nauVisible()
+        Shot.save("24c-ubuntu-restart-dragged")
+        Log.i(TAG, "restart: finger drag (" + rw.x + "," + rw.y + ") -> " + moved?.let { it.x.toString() + "," + it.y })
+        assertTrue("Files did not follow finger drag after restart", moved != null &&
+            Math.abs(moved.x - rw.x + 60) < 30 && Math.abs(moved.y - rw.y - 120) < 30)
+        Log.i(TAG, "UBUNTU-GNOME-RESTART-OK FIRST launch; live WM identity + finger Files launch + continuous drag")
 
         // 5. COLD-START decision path: the plinux_desktop pref was set when
         // the auto-enter test opened the desktop. Recreating MainActivity
