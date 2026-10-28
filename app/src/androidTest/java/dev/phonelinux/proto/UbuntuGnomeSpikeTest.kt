@@ -254,12 +254,47 @@ class UbuntuGnomeSpikeTest {
                 (Math.abs(wAfter.first - wBefore.first) > 50 || Math.abs(wAfter.second - wBefore.second) > 50))
         Log.i(TAG, "UBUNTU-GNOME-INTERACTION-OK dock tap opened Files; finger drag moved the window")
 
+        // Kill a pid with all its /proc descendants (deepest first): guest
+        // binaries exec under proot so their cmdline does not carry the
+        // rootfs path - name/pattern kills miss them (run 40702734816 left
+        // gnome-session alive, relaunch never owned :0).
+        fun killProcessTree(pid: Int) {
+            val kids = HashMap<Int, MutableList<Int>>()
+            java.io.File("/proc").listFiles()?.forEach { dir ->
+                val cpid = dir.name.toIntOrNull() ?: return@forEach
+                try {
+                    val stat = java.io.File(dir, "stat").readText()
+                    val ppid = stat.substringAfterLast(')').trim().split(Regex("\\s+"))[1].toInt()
+                    kids.getOrPut(ppid) { mutableListOf() }.add(cpid)
+                } catch (_: Throwable) { }
+            }
+            fun rec(p: Int) { kids[p]?.forEach { rec(it) }; android.os.Process.killProcess(p) }
+            rec(pid)
+        }
+
         // 4. RESTART persistence: kill the whole session, relaunch, the
         // desktop must come back (shell windows reappear on :0).
-        xwin("for f in /proc/[0-9]*/cmdline; do c=${'$'}(tr '\\0' ' ' < ${'$'}f 2>/dev/null); case ${'$'}c in *cmdline*) ;; *gnome-session*|*gnome-shell*) echo ${'$'}f | cut -d/ -f3;; esac; done | xargs -r kill 2>/dev/null; true")
-        val deathDeadline = System.currentTimeMillis() + 90_000
-        while (proc.isAlive && System.currentTimeMillis() < deathDeadline) Thread.sleep(3_000)
+        // Kill the full process TREE from the Android side via the Java
+        // handle: run 40702734816's in-guest /proc scan killed gnome-shell
+        // but left gnome-session alive, so the old session kept :0 and the
+        // relaunch never owned the display.
+        // The proot PARENTS carry the rootfs path in their cmdline (guest
+        // children do not): find them, kill their whole trees.
+        var killedRoots = 0
+        java.io.File("/proc").listFiles()?.forEach { dir ->
+            val cpid = dir.name.toIntOrNull() ?: return@forEach
+            try {
+                val cmd = java.io.File(dir, "cmdline").readText()
+                if (cmd.contains("distros/ubuntu") && !cmd.contains("pkill")) {
+                    killProcessTree(cpid); killedRoots++
+                }
+            } catch (_: Throwable) { }
+        }
+        Log.i(TAG, "restart: killed " + killedRoots + " session root(s)")
+        val deathDeadline = System.currentTimeMillis() + 60_000
+        while (proc.isAlive && System.currentTimeMillis() < deathDeadline) Thread.sleep(2_000)
         Log.i(TAG, "restart: old session alive=" + proc.isAlive)
+        assertTrue("old gnome session process tree survived the kill", !proc.isAlive)
         val proc2 = GuestUbuntu.launchGnomeSession(ctx, rootfs)
         val shellDeadline = System.currentTimeMillis() + 300_000
         var shellBack = false
