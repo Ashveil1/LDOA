@@ -31,7 +31,28 @@ object Shot {
      *  Loops since dialogs can stack. */
     private val OBSERVED_SYSTEM_ANRS = listOf(
         "com.google.android.apps.nexuslauncher", "Pixel Launcher")
+
+    /** Registered once per instrumentation: fires whenever UiAutomator's
+     *  own finds stall, so node-based paths are covered even between
+     *  explicit dismissSystemDialogs calls. Same allowlist + logging as
+     *  dismissSystemDialogs: ONLY the observed Pixel-Launcher storm is
+     *  auto-answered ("Wait"); anything else stays on screen. */
+    private var watcherRegistered = false
+    fun registerAnrWatcher(device: androidx.test.uiautomator.UiDevice) {
+        if (watcherRegistered) return
+        watcherRegistered = true
+        device.registerWatcher("phonelinux-anr") {
+            val t = device.findObject(androidx.test.uiautomator.By.textContains("isn't responding"))
+                ?: device.findObject(androidx.test.uiautomator.By.textContains("Not Responding"))
+            if (t != null && OBSERVED_SYSTEM_ANRS.any { (t.text ?: "").contains(it) }) {
+                android.util.Log.i("PHONEDIAG", "watcher dismissing allowlisted ANR: " + t.text)
+                device.findObject(androidx.test.uiautomator.By.text("Wait"))?.click()
+                true
+            } else false
+        }
+    }
     fun dismissSystemDialogs(device: androidx.test.uiautomator.UiDevice) {
+        registerAnrWatcher(device)
         repeat(6) {
             var clicked = false
             val anrTitle = device.wait(androidx.test.uiautomator.Until.findObject(androidx.test.uiautomator.By.textContains("Not Responding")), 800)
@@ -51,9 +72,10 @@ object Shot {
                 android.util.Log.i("PHONEDIAG", "answering app permission prompt: Allow")
                 allow.click(); clicked = true
             }
-            if (!clicked) return
+            if (!clicked) { device.runWatchers(); return }
             device.waitForIdle(800)
         }
+        device.runWatchers()
     }
 
     fun save(name: String) {

@@ -165,8 +165,10 @@ class UiFlowTest {
         // 5. orientation: landscape must keep the terminal usable
         device.setOrientationLandscape()
         device.waitForIdle(3_000)
+        // Rotation under emulator load can outlast waitForIdle: wait for the
+        // node explicitly instead of asserting on an instant snapshot.
         assertTrue("terminal still visible in landscape",
-            device.hasObject(By.desc("terminal-input")))
+            device.wait(Until.hasObject(By.desc("terminal-input")), 10_000))
         shot(device, "05-landscape")
         device.setOrientationNatural()
         device.waitForIdle(2_000)
@@ -209,8 +211,10 @@ class UiFlowTest {
         field.setText(cmd)
         val typeDeadline = System.currentTimeMillis() + 8_000
         while (System.currentTimeMillis() < typeDeadline) {
-            val t = field.text
-            if (t != null && t.contains(needle.take(6))) break
+            try {
+                val t = field.text
+                if (t != null && t.contains(needle.take(6))) break
+            } catch (e: androidx.test.uiautomator.StaleObjectException) { }
             Thread.sleep(300)
         }
         var send = device.wait(Until.findObject(By.desc("terminal-send")), 5_000)
@@ -227,23 +231,43 @@ class UiFlowTest {
             send = device.findObject(By.desc("terminal-send")) ?: send
         }
         assertTrue("send button never enabled for: " + cmd, sendEnabled)
-        try { send.click() } catch (e: androidx.test.uiautomator.StaleObjectException) {
-            device.findObject(By.desc("terminal-send")).click()
-        }
-        // Input behavior: Run must clear the field.
-        val clearDeadline = System.currentTimeMillis() + 5_000
+        // Input behavior: Run must clear the field. The click can also be
+        // swallowed whole by an ANR dialog (run fa391df: click "succeeded",
+        // field never cleared, next shot shows a healthy app) - so verify
+        // the EFFECT and re-click with dismissal, bounded 3 attempts.
         var cleared = false
-        while (System.currentTimeMillis() < clearDeadline) {
-            if (field.text.isNullOrEmpty()) { cleared = true; break }
-            Thread.sleep(300)
+        for (attempt in 1..3) {
+            try { send.click() } catch (e: androidx.test.uiautomator.StaleObjectException) {
+                // A system dialog (launcher ANR) can hide the whole app tree:
+                // the bare re-find then returns null and NPEs (run 1a81e3d).
+                Shot.dismissSystemDialogs(device)
+                val send2 = device.wait(Until.findObject(By.desc("terminal-send")), 10_000)
+                assertTrue("send button never re-found after stale node", send2 != null)
+                send2!!.click()
+            }
+            val clearDeadline = System.currentTimeMillis() + 5_000
+            while (System.currentTimeMillis() < clearDeadline) {
+                try { if (field.text.isNullOrEmpty()) { cleared = true; break } }
+                catch (e: androidx.test.uiautomator.StaleObjectException) { }
+                Thread.sleep(300)
+            }
+            if (cleared) break
+            android.util.Log.i("PHONEDIAG", "run click attempt " + attempt + " did not clear the field - dismissing + retry")
+            Shot.dismissSystemDialogs(device)
+            send = device.wait(Until.findObject(By.desc("terminal-send")), 5_000) ?: send
         }
-        assertTrue("input field not cleared after Run", cleared)
+        assertTrue("input field not cleared after Run (3 attempts)", cleared)
         val deadline = System.currentTimeMillis() + 90_000
         var ok = false
         while (System.currentTimeMillis() < deadline) {
             Shot.dismissSystemDialogs(device)
-            val n = device.findObject(By.desc("terminal-output"))
-            if (n != null && n.text != null && n.text.contains(needle)) { ok = true; break }
+            try {
+                val n = device.findObject(By.desc("terminal-output"))
+                if (n != null && n.text != null && n.text.contains(needle)) { ok = true; break }
+            } catch (e: androidx.test.uiautomator.StaleObjectException) {
+                // node vanished mid-read (ANR-storm churn, run 70d796c) - the
+                // poll loop retries with a fresh node on the next pass.
+            }
             Thread.sleep(1_000)
         }
         assertTrue("output for '" + cmd + "' never contained '" + needle + "'", ok)

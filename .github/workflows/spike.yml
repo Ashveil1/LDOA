@@ -56,6 +56,9 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_6
+          # pixel_6 AVD defaults starve the launcher under test load
+          # (ANR dialog storm, pixel-proven 4 runs) - give it all 4 runner cores.
+          cores: 4
           script: |
             adb -s emulator-5554 logcat -G 16M || true
             adb -s emulator-5554 logcat -c || true
@@ -71,7 +74,7 @@ jobs:
             # CAVEAT: ci/launcher-suppression.conf gates it ("on" suppresses
             # for flake-free iteration, "off" qualifies the normal-launcher
             # shipping path).
-            if [ "$(cat ci/launcher-suppression.conf 2>/dev/null || echo on)" = "on" ]; then adb -s emulator-5554 shell am force-stop com.google.android.apps.nexuslauncher || true; echo "launcher suppression: ON (emulator flake workaround)"; else echo "launcher suppression: OFF - normal Pixel launcher active (shipping-path qualification)"; fi
+            if [ "$(cat ci/launcher-suppression.conf 2>/dev/null || echo on)" = "on" ]; then adb -s emulator-5554 shell pm disable-user --user 0 com.google.android.apps.nexuslauncher || adb -s emulator-5554 shell am force-stop com.google.android.apps.nexuslauncher || true; echo "launcher suppression: ON (pm disable-user; force-stop proved insufficient - the launcher restarts and re-ANRs mid-lane, pixel-proven runs 8f18370/eaaf47f/1a81e3d/06654bc; fresh emulator each job so no re-enable needed)"; else echo "launcher suppression: OFF - normal Pixel launcher active (shipping-path qualification)"; fi
             # notClass: UbuntuGnomeSpikeTest provisions full GNOME over apt
             # (tens of minutes); it runs only in the ubuntu-gnome-spike job.
             ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.notClass=dev.phonelinux.proto.UbuntuGnomeSpikeTest --info 2>&1 | tee /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
@@ -136,6 +139,9 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_6
+          # pixel_6 AVD defaults starve the launcher under test load
+          # (ANR dialog storm, pixel-proven 4 runs) - give it all 4 runner cores.
+          cores: 4
           script: |
             adb -s emulator-5554 logcat -G 16M || true
             adb -s emulator-5554 logcat -c || true
@@ -214,11 +220,14 @@ jobs:
           target: google_apis
           arch: arm64-v8a
           profile: pixel_6
+          # pixel_6 AVD defaults starve the launcher under test load
+          # (ANR dialog storm, pixel-proven 4 runs) - give it all 4 runner cores.
+          cores: 4
           script: |
             adb -s emulator-5554 logcat -G 16M || true
             adb -s emulator-5554 logcat -c || true
             adb -s emulator-5554 shell settings put global anr_show_background 0 || true
-            if [ "$(cat ci/launcher-suppression.conf 2>/dev/null || echo on)" = "on" ]; then adb -s emulator-5554 shell am force-stop com.google.android.apps.nexuslauncher || true; echo "launcher suppression: ON (emulator flake workaround)"; else echo "launcher suppression: OFF - normal Pixel launcher active (shipping-path qualification)"; fi
+            if [ "$(cat ci/launcher-suppression.conf 2>/dev/null || echo on)" = "on" ]; then adb -s emulator-5554 shell pm disable-user --user 0 com.google.android.apps.nexuslauncher || adb -s emulator-5554 shell am force-stop com.google.android.apps.nexuslauncher || true; echo "launcher suppression: ON (pm disable-user; force-stop proved insufficient - the launcher restarts and re-ANRs mid-lane, pixel-proven runs 8f18370/eaaf47f/1a81e3d/06654bc; fresh emulator each job so no re-enable needed)"; else echo "launcher suppression: OFF - normal Pixel launcher active (shipping-path qualification)"; fi
             # notClass: UbuntuGnomeSpikeTest provisions full GNOME over apt
             # (tens of minutes); it runs only in the ubuntu-gnome-spike job.
             ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.notClass=dev.phonelinux.proto.UbuntuGnomeSpikeTest --info 2>&1 | tee /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED

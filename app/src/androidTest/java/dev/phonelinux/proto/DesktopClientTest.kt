@@ -274,19 +274,32 @@ class DesktopClientTest {
             val n = out.lines().mapNotNull { it.trim().toIntOrNull() }
             return if (n.size >= 2) Pair(n[0], n[1]) else null
         }
-        val stBefore = stPos()
         val dragFrom = devFor(546.0, 433.0)
         // Modest drag kept fully onscreen (the +200/+200 variant pushed the
         // window controls off the right edge - see the dedicated offscreen
         // recovery test below).
-        device.swipe(dragFrom.first, dragFrom.second, dragFrom.first - 30, dragFrom.second - 150, 40)
-        Thread.sleep(2_000)
+        // Bounded retry: the emulator's Pixel-Launcher ANR dialog eats the
+        // swipe (pixel-proven in shots 10 of runs 8f18370/eaaf47f/1a81e3d) -
+        // dismiss and re-attempt rather than failing on the storm.
+        var stBefore = stPos()
+        var stAfter = stPos()
+        var moved = false
+        for (attempt in 1..3) {
+            Shot.dismissSystemDialogs(device)
+            Thread.sleep(500)
+            stBefore = stPos()
+            device.swipe(dragFrom.first, dragFrom.second, dragFrom.first - 30, dragFrom.second - 150, 40)
+            Thread.sleep(2_000)
+            stAfter = stPos()
+            if (stBefore != null && stAfter != null &&
+                (Math.abs(stAfter.first - stBefore.first) > 50 || Math.abs(stAfter.second - stBefore.second) > 50)) {
+                moved = true; break
+            }
+            android.util.Log.i("PHONEDIAG", "st drag attempt " + attempt + " no move (before=" + stBefore + " after=" + stAfter + ")")
+        }
         Shot.save("10-st-dragged")
-        val stAfter = stPos()
-        android.util.Log.i("PHONEDIAG", "st drag from dev=" + dragFrom + " before=" + stBefore + " after=" + stAfter)
-        assertTrue("st window did not move on title-bar drag (before=" + stBefore + " after=" + stAfter + ")",
-            stBefore != null && stAfter != null &&
-                (Math.abs(stAfter.first - stBefore.first) > 50 || Math.abs(stAfter.second - stBefore.second) > 50))
+        android.util.Log.i("PHONEDIAG", "st drag from dev=" + dragFrom + " before=" + stBefore + " after=" + stAfter + " moved=" + moved)
+        assertTrue("st window did not move on title-bar drag after 3 attempts (before=" + stBefore + " after=" + stAfter + ")", moved)
 
         // 3. Launch from the JWM menu: open the root menu, identify the
         // popup by DIFFING top-level window ids (the JWM 1x1 support
@@ -298,22 +311,42 @@ class DesktopClientTest {
             .filter { it.trimStart().startsWith("0x") }
         val stCountBefore = xwin("xwininfo -root -tree | grep -c st-256color").trim().toIntOrNull() ?: -1
         val beforeIds = topIds().map { it.trimStart().substringBefore(' ') }.toSet()
-        device.click(menuBtn.first, menuBtn.second)
-        Thread.sleep(2_000)
-        val newLines = topIds().filter { it.trimStart().substringBefore(' ') !in beforeIds }
+        // Same ANR-storm posture as the drag: the Pixel Launcher dialog ate
+        // this tap in run 06654bc (shot 09/10 show the dialog at tap time).
+        var newLines = listOf<String>()
+        for (attempt in 1..3) {
+            Shot.dismissSystemDialogs(device)
+            Thread.sleep(500)
+            device.click(menuBtn.first, menuBtn.second)
+            Thread.sleep(2_000)
+            newLines = topIds().filter { it.trimStart().substringBefore(' ') !in beforeIds }
+            if (newLines.size == 1) break
+            android.util.Log.i("PHONEDIAG", "menu second-tap attempt " + attempt + " new top-levels: " + newLines)
+        }
         android.util.Log.i("PHONEDIAG", "menu new top-levels: " + newLines)
-        assertTrue("JWM menu popup did not appear on second menu-button tap (new top-levels=" + newLines + ")",
+        assertTrue("JWM menu popup did not appear on second menu-button tap after 3 attempts (new top-levels=" + newLines + ")",
             newLines.size == 1)
         val gm = Regex("(\\d+)x(\\d+)\\+(-?\\d+)\\+(-?\\d+)").find(newLines[0])
         assertTrue("menu popup geometry unparsable: " + newLines[0], gm != null)
         val g0 = gm!!.groupValues
         val itemDev = devFor(g0[3].toInt() + g0[1].toInt() / 2.0, g0[4].toInt() + 14.0)
-        device.click(itemDev.first, itemDev.second)
-        Thread.sleep(4_000)
+        var stCountAfter = -1
+        for (attempt in 1..3) {
+            Shot.dismissSystemDialogs(device)
+            Thread.sleep(500)
+            device.click(itemDev.first, itemDev.second)
+            Thread.sleep(4_000)
+            stCountAfter = xwin("xwininfo -root -tree | grep -c st-256color").trim().toIntOrNull() ?: -1
+            if (stCountAfter > stCountBefore) break
+            android.util.Log.i("PHONEDIAG", "menu-launch attempt " + attempt + ": st count before=" + stCountBefore + " after=" + stCountAfter)
+            // menu closes on the failed tap; reopen for the retry
+            Shot.dismissSystemDialogs(device)
+            device.click(menuBtn.first, menuBtn.second)
+            Thread.sleep(2_000)
+        }
         Shot.save("11-menu-launched-terminal")
-        val stCountAfter = xwin("xwininfo -root -tree | grep -c st-256color").trim().toIntOrNull() ?: -1
         android.util.Log.i("PHONEDIAG", "menu-launch: st count before=" + stCountBefore + " after=" + stCountAfter + " itemTap dev=" + itemDev)
-        assertTrue("menu Terminal item did not launch a new st (count before=" + stCountBefore + " after=" + stCountAfter + ")",
+        assertTrue("menu Terminal item did not launch a new st after 3 attempts (count before=" + stCountBefore + " after=" + stCountAfter + ")",
             stCountAfter > stCountBefore)
 
         // 4. Resize via touch. The jwm frame rect and title buttons are
