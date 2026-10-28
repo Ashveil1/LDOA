@@ -41,10 +41,11 @@ private val TextDim = Color(0xFF9AA6C8)
 
 enum class Screen { PICKER, TERMINAL }
 
-// Flip to true only when the Ubuntu GNOME session is runtime-qualified
-// (emulator real-render green). Kept as a compile-time gate so a preview
-// build cannot expose the unproven GNOME entry by accident.
-private const val DESKTOP_PREVIEW_ENABLED = false
+// gnome/evidence branch: GNOME render + interaction qualification in
+// flight (wallpaper/topbar/dock pixel-proven run 40661199161). Merge to
+// main only after interaction + cold install-to-desktop + restart tests
+// pass at this exact head.
+private const val DESKTOP_PREVIEW_ENABLED = true
 
 class SpikeViewModel : ViewModel() {
     val states: SnapshotStateMap<String, InstallState> = mutableStateMapOf()
@@ -57,6 +58,9 @@ class SpikeViewModel : ViewModel() {
     var terminal by mutableStateOf<TerminalSession?>(null)
     var termText by mutableStateOf("")
     var termRunning by mutableStateOf(false)
+    /** Set by the activity: opens the desktop for a distro (XServer). */
+    var autoDesktop: ((Distro) -> Unit)? = null
+    var coldAutoEntered = false
 
     fun install(ctx: android.content.Context, d: Distro) {
         if (busy) return
@@ -66,6 +70,12 @@ class SpikeViewModel : ViewModel() {
             val ok = installer.install(d) { states[d.id] = it }
             busy = false
             log += if (ok) "[ok] ${d.displayName} installed\n" else "[fail] ${d.displayName} install failed\n"
+            // User spec: tap -> install -> AUTO-ENTER the desktop, no extra
+            // taps. Ubuntu only; the Alpine lane keeps its manual flow.
+            if (ok && d.pkgMgr == PkgMgr.APT && DESKTOP_PREVIEW_ENABLED) {
+                log += "[..] starting ${d.displayName} desktop (GNOME provisioning can take a while)\n"
+                autoDesktop?.invoke(d)
+            }
         }
     }
 
@@ -116,11 +126,21 @@ class MainActivity : ComponentActivity() {
             MaterialTheme(colorScheme = darkColorScheme(
                 primary = Accent, secondary = Accent2, background = BgTop, surface = CardBg)) {
                 val vm: SpikeViewModel = viewModel()
+                vm.autoDesktop = { d -> XServer.openDesktop(this@MainActivity, d) }
                 LaunchedEffect(Unit) {
                     for (d in distros) {
                         if (DistroInstaller(applicationContext).isInstalled(d)) {
                             vm.states[d.id] = InstallState.Installed
                         }
+                    }
+                    // Cold-start re-entry: the user left with a live Ubuntu
+                    // desktop - reopen it without making them tap again.
+                    val prefs = getSharedPreferences("plinux_desktop", MODE_PRIVATE)
+                    if (!vm.coldAutoEntered && DESKTOP_PREVIEW_ENABLED &&
+                        prefs.getBoolean("ubuntu_desktop_active", false) &&
+                        vm.stateFor(Distros.UBUNTU) == InstallState.Installed) {
+                        vm.coldAutoEntered = true
+                        XServer.openDesktop(this@MainActivity, Distros.UBUNTU)
                     }
                 }
                 Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(BgTop, BgBottom)))) {

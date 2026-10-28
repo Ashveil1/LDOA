@@ -41,6 +41,7 @@ object GuestUbuntu {
         "ubuntu-wallpapers",
         "gnome-terminal",
         "nautilus",
+        "x11-utils",
         "adwaita-icon-theme",
         "fonts-dejavu-core"
     )

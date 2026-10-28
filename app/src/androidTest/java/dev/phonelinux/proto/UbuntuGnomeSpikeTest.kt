@@ -55,6 +55,13 @@ class UbuntuGnomeSpikeTest {
         }
         assertTrue("gnome-shell binary present", GuestUbuntu.hasGnome(rootfs))
 
+        // Session reset: the auto-enter test (runs first in this lane) may
+        // have left a live GNOME session on :0. Kill leftovers via /proc
+        // (no procps dependency) so this launch owns the display.
+        val kill = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c",
+            "for f in /proc/[0-9]*/cmdline; do c=${'$'}(tr '\\0' ' ' < ${'$'}f 2>/dev/null); case ${'$'}c in *cmdline*) ;; *gnome-session*|*gnome-shell*) echo ${'$'}f | cut -d/ -f3;; esac; done | xargs -r kill 2>/dev/null; sleep 3; echo reset-done"))
+        Log.i(TAG, "pre-launch session reset exit=${kill.exitCode} out=${kill.stdout.trim()}")
+
         // X server + GNOME session.
         XServer.start(ctx)
         val proc = GuestUbuntu.launchGnomeSession(ctx, rootfs)
@@ -101,6 +108,85 @@ class UbuntuGnomeSpikeTest {
         Log.i(TAG, "gnome log tail2: " + (if (logFile.isFile) logFile.readText().takeLast(1500) else "<missing>"))
         assertTrue("gnome session died during the render window", proc.isAlive)
         Log.i(TAG, "UBUNTU-GNOME-SESSION-ALIVE (visual Ubuntu appearance is judged on artifact screenshots)")
+
+        // 3. INTERACTION proof (not just render): finger-tap the Files dock
+        // icon -> a real nautilus window must map; finger-drag its headerbar
+        // -> the geometry must move. Verified through the guest's own
+        // xwininfo against :0, like the Alpine desktop lane.
+        fun xwin(cmd: String): String {
+            val r = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c", "export DISPLAY=:0; " + cmd),
+                extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"))
+            return r.stdout
+        }
+        fun windowIds(pattern: String): List<String> =
+            xwin("xwininfo -root -children | grep -i '" + pattern + "' | awk '{print ${'$'}1}'")
+                .lines().filter { it.trimStart().startsWith("0x") }
+
+        // Dismiss the screen-lock notification banner (top center) so it
+        // cannot cover the dock: swipe it upward off the stack.
+        device.swipe(540, 200, 540, 60, 20)
+        Thread.sleep(1_000)
+
+        val nauBefore = windowIds("nautilus")
+        Log.i(TAG, "dock-interact: nautilus before=" + nauBefore)
+        // Files icon = top dock icon. Pixel-proven coords from the settled
+        // shot of run 40661199161 (dock at left edge, first icon ~12,58 in
+        // the 324x720 preview = 40,193 on the 1080x2400 panel).
+        device.click(40, 193)
+        val openDeadline = System.currentTimeMillis() + 60_000
+        var nauWid: String? = null
+        while (System.currentTimeMillis() < openDeadline) {
+            val now = windowIds("nautilus")
+            val fresh = now.firstOrNull { it !in nauBefore }
+            if (fresh != null) { nauWid = fresh; break }
+            Thread.sleep(3_000)
+        }
+        Shot.save("22-ubuntu-dock-files-opened")
+        assertTrue("finger-tap on the dock Files icon did not open a nautilus window", nauWid != null)
+
+        fun winPos(id: String): Pair<Int, Int>? {
+            val out = xwin("xwininfo -id " + id + " -stats | grep 'Absolute upper-left' | awk '{print ${'$'}NF}'")
+            val n = out.lines().mapNotNull { it.trim().toIntOrNull() }
+            return if (n.size >= 2) Pair(n[0], n[1]) else null
+        }
+        val wBefore = winPos(nauWid!!)
+        Log.i(TAG, "dock-interact: nautilus wid=" + nauWid + " pos=" + wBefore)
+        assertTrue("nautilus window geometry unreadable", wBefore != null)
+        // Headerbar (CSD) drag: grab inside the window top area, off-center
+        // to avoid the path bar/search button, move up-left modestly.
+        val grabX = wBefore!!.first + 150
+        val grabY = wBefore.second + 25
+        device.swipe(grabX, grabY, grabX - 60, grabY + 120, 40)
+        Thread.sleep(2_000)
+        Shot.save("23-ubuntu-window-dragged")
+        val wAfter = winPos(nauWid)
+        Log.i(TAG, "dock-interact: dragged from=" + wBefore + " to=" + wAfter)
+        assertTrue("nautilus window did not move on finger drag (before=" + wBefore + " after=" + wAfter + ")",
+            wAfter != null && (Math.abs(wAfter.first - wBefore.first) > 50 || Math.abs(wAfter.second - wBefore.second) > 50))
+        Log.i(TAG, "UBUNTU-GNOME-INTERACTION-OK dock tap opened Files; finger drag moved the window")
+
+        // 4. RESTART persistence: kill the whole session, relaunch, the
+        // desktop must come back (shell windows reappear on :0).
+        xwin("for f in /proc/[0-9]*/cmdline; do c=${'$'}(tr '\\0' ' ' < ${'$'}f 2>/dev/null); case ${'$'}c in *cmdline*) ;; *gnome-session*|*gnome-shell*) echo ${'$'}f | cut -d/ -f3;; esac; done | xargs -r kill 2>/dev/null; true")
+        val deathDeadline = System.currentTimeMillis() + 90_000
+        while (proc.isAlive && System.currentTimeMillis() < deathDeadline) Thread.sleep(3_000)
+        Log.i(TAG, "restart: old session alive=" + proc.isAlive)
+        val proc2 = GuestUbuntu.launchGnomeSession(ctx, rootfs)
+        val shellDeadline = System.currentTimeMillis() + 300_000
+        var shellBack = false
+        while (System.currentTimeMillis() < shellDeadline) {
+            if (xwin("xwininfo -root -tree | grep -c 'gnome-shell'").trim().toIntOrNull()?.let { it > 0 } == true) {
+                shellBack = true; break
+            }
+            if (!proc2.isAlive) break
+            Thread.sleep(10_000)
+        }
+        Thread.sleep(20_000)
+        Shot.dismissSystemDialogs(device)
+        Shot.save("24-ubuntu-gnome-restarted")
+        assertTrue("relaunched gnome session process died", proc2.isAlive)
+        assertTrue("gnome-shell windows did not reappear after session restart", shellBack)
+        Log.i(TAG, "UBUNTU-GNOME-RESTART-OK session killed and relaunched; shell back on :0")
         // Full-log mirroring: the artifact file pull has proven unreliable
         // (0-byte guest-gnome.log in run eaaf47f); logcat (shotlog.txt) is
         // the collection path that works. Chunk to stay under logcat limits.

@@ -92,6 +92,8 @@ object XServer {
                             }
                             if (GuestUbuntu.hasGnome(rootfs)) {
                                 Log.i(TAG, "launching GNOME session")
+                                ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
+                                    .edit().putBoolean("ubuntu_desktop_active", true).apply()
                                 GuestUbuntu.launchGnomeSession(ctx, rootfs)
                             } else {
                                 Log.e(TAG, "GNOME unavailable; desktop will be empty")
