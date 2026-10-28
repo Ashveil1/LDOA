@@ -77,10 +77,33 @@ object GuestUbuntu {
         File(rootfs, "root/gnome-session.sh").writeText(
             """
             #!/bin/sh
-            export DISPLAY=:0 HOME=/root XDG_RUNTIME_DIR=/tmp/xdg XDG_CURRENT_DESKTOP=GNOME
+            export DISPLAY=:0 HOME=/root XDG_RUNTIME_DIR=/tmp/xdg XDG_CURRENT_DESKTOP=ubuntu:GNOME
             export PLINUX_SESSION=desktop
             mkdir -p /tmp/xdg
             chmod 0700 /tmp/xdg
+            # EVIDENCE: dump the session definition + live gsettings values so
+            # the missing-dock/wallpaper cause is read from the guest, not
+            # guessed. Runs beside the session start, prints into the same log.
+            ( sleep 40
+              echo "=== gnome-diag begin ==="
+              echo "XDG_CURRENT_DESKTOP=${'$'}XDG_CURRENT_DESKTOP"
+              echo "-- ubuntu.session --"
+              cat /usr/share/gnome-session/sessions/ubuntu.session 2>&1
+              echo "-- gsettings --"
+              gsettings get org.gnome.shell enabled-extensions 2>&1
+              gsettings get org.gnome.desktop.background picture-uri 2>&1
+              gsettings get org.gnome.desktop.interface gtk-theme 2>&1
+              echo "-- backgrounds --"
+              ls /usr/share/backgrounds/ 2>&1 | head -20
+              echo "-- schema overrides --"
+              ls /usr/share/glib-2.0/schemas/ 2>&1 | grep -i override
+              echo "compiled-ubuntu-key-hits: ${'$'}(grep -c -a -i ubuntu /usr/share/glib-2.0/schemas/gschemas.compiled 2>/dev/null)"
+              echo "-- gsd processes --"
+              pgrep -a -f gsd 2>&1 || echo "no gsd processes"
+              echo "-- gnome-shell mode --"
+              gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Properties.Get org.gnome.Shell Mode 2>&1
+              echo "=== gnome-diag end ==="
+            ) &
             # Same identity fix as the Alpine session: GNOME components call
             # getpwuid(getuid()) and fail for the Android app uid.
             UID_NOW=${'$'}(id -u); GID_NOW=${'$'}(id -g)
