@@ -119,16 +119,38 @@ class UbuntuGnomeSpikeTest {
             return r.stdout
         }
         fun windowIds(pattern: String): List<String> =
-            xwin("xwininfo -root -children | grep -i '" + pattern + "' | awk '{print ${'$'}1}'")
+            xwin("xwininfo -root -tree | grep -i '" + pattern + "' | awk '{print ${'$'}1}'")
                 .lines().filter { it.trimStart().startsWith("0x") }
+
+        /** The VISIBLE nautilus window: (id, x, y) of the first matching
+         *  window that IsViewable and >200x200. Nautilus owns hidden 1x1
+         *  utility windows (run 40675364228: windowIds matched one at
+         *  (0,0), the real Files window was elsewhere) and under Mutter
+         *  the frame carries no "nautilus" name - the visible CSD window
+         *  is found via its ("nautilus" "Nautilus") class in the full
+         *  tree, so walk -tree and filter by map state + size. */
+        fun nauVisible(): Triple<String, Int, Int>? {
+            for (id in windowIds("nautilus")) {
+                val st = xwin("xwininfo -id " + id + " -stats")
+                val map = Regex("Map State: (\\w+)").find(st)?.groupValues?.get(1)
+                val w = Regex("Width: (\\d+)").find(st)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                val h = Regex("Height: (\\d+)").find(st)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                if (map == "IsViewable" && w > 200 && h > 200) {
+                    val x = Regex("Absolute upper-left X:\\s+(-?\\d+)").find(st)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                    val y = Regex("Absolute upper-left Y:\\s+(-?\\d+)").find(st)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                    return Triple(id, x, y)
+                }
+            }
+            return null
+        }
 
         // Dismiss the screen-lock notification banner (top center) so it
         // cannot cover the dock: swipe it upward off the stack.
         device.swipe(540, 200, 540, 60, 20)
         Thread.sleep(1_000)
 
-        val nauBefore = windowIds("nautilus")
-        Log.i(TAG, "dock-interact: nautilus before=" + nauBefore)
+        val beforeIds = windowIds("nautilus")
+        Log.i(TAG, "dock-interact: nautilus before=" + beforeIds)
         Log.i(TAG, "dock-interact: window tree at tap time: " +
             xwin("xwininfo -root -children | tail -8").replace("\n", " | "))
         Shot.save("21b-ubuntu-dock-before-tap")
@@ -154,11 +176,10 @@ class UbuntuGnomeSpikeTest {
             Log.i(TAG, "dock-interact: pressed Files candidate (30," + tapY + ") attempt " + attempt)
             val openDeadline = System.currentTimeMillis() + 90_000
             while (System.currentTimeMillis() < openDeadline) {
-                val now = windowIds("nautilus")
-                val fresh = now.firstOrNull { it !in nauBefore }
-                if (fresh != null) { nauWid = fresh; break }
+                val vis = nauVisible()
+                if (vis != null && vis.first !in beforeIds) { nauWid = vis.first; break }
                 val proc = xwin("pgrep -x nautilus || true").trim()
-                if (proc.isNotEmpty()) Log.i(TAG, "dock-interact: nautilus process alive pid=" + proc + " (no window yet)")
+                if (proc.isNotEmpty()) Log.i(TAG, "dock-interact: nautilus process alive pid=" + proc + " (no visible window yet)")
                 Thread.sleep(3_000)
             }
             if (nauWid != null) break
@@ -166,13 +187,8 @@ class UbuntuGnomeSpikeTest {
         Shot.save("22-ubuntu-dock-files-opened")
         assertTrue("finger press on the dock Files icon did not open a nautilus window (2 positions tried)", nauWid != null)
 
-        fun winPos(id: String): Pair<Int, Int>? {
-            val out = xwin("xwininfo -id " + id + " -stats | grep 'Absolute upper-left' | awk '{print ${'$'}NF}'")
-            val n = out.lines().mapNotNull { it.trim().toIntOrNull() }
-            return if (n.size >= 2) Pair(n[0], n[1]) else null
-        }
-        val wBefore = winPos(nauWid!!)
-        Log.i(TAG, "dock-interact: nautilus wid=" + nauWid + " pos=" + wBefore)
+        val wBefore = nauVisible()?.let { Pair(it.second, it.third) }
+        Log.i(TAG, "dock-interact: nautilus visible wid=" + nauWid + " pos=" + wBefore)
         assertTrue("nautilus window geometry unreadable", wBefore != null)
         // Headerbar (CSD) drag: grab inside the window top area, off-center
         // to avoid the path bar/search button, move up-left modestly.
@@ -181,7 +197,7 @@ class UbuntuGnomeSpikeTest {
         device.swipe(grabX, grabY, grabX - 60, grabY + 120, 40)
         Thread.sleep(2_000)
         Shot.save("23-ubuntu-window-dragged")
-        val wAfter = winPos(nauWid)
+        val wAfter = nauVisible()?.let { Pair(it.second, it.third) }
         Log.i(TAG, "dock-interact: dragged from=" + wBefore + " to=" + wAfter)
         assertTrue("nautilus window did not move on finger drag (before=" + wBefore + " after=" + wAfter + ")",
             wAfter != null && (Math.abs(wAfter.first - wBefore.first) > 50 || Math.abs(wAfter.second - wBefore.second) > 50))
