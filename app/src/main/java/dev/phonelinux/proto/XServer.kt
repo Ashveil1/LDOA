@@ -23,8 +23,15 @@ import kotlin.concurrent.thread
 object XServer {
     private const val TAG = "PhoneLinuxX"
     private var process: Process? = null
+    @Volatile private var gnomeSession: Pair<String, Process>? = null
     @Volatile var preparing = false
         private set
+
+    /** True when a GNOME desktop session for this distro is already alive:
+     *  re-entering the desktop then only brings the X11 activity forward
+     *  instead of racing a second gnome-session onto :0. */
+    fun gnomeSessionActive(d: Distro): Boolean =
+        gnomeSession?.let { it.first == d.id && it.second.isAlive } == true
 
     fun tmpDir(ctx: Context): File = File(ctx.filesDir, "usr/tmp")
     fun socketDir(ctx: Context): File = File(tmpDir(ctx), ".X11-unix")
@@ -91,10 +98,14 @@ object XServer {
                                 Log.i(TAG, "gnome provision exit=" + add.exitCode)
                             }
                             if (GuestUbuntu.hasGnome(rootfs)) {
-                                Log.i(TAG, "launching GNOME session")
                                 ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
                                     .edit().putBoolean("ubuntu_desktop_active", true).apply()
-                                GuestUbuntu.launchGnomeSession(ctx, rootfs)
+                                if (gnomeSessionActive(distro)) {
+                                    Log.i(TAG, "GNOME session already running - bringing desktop forward")
+                                } else {
+                                    Log.i(TAG, "launching GNOME session")
+                                    gnomeSession = distro.id to GuestUbuntu.launchGnomeSession(ctx, rootfs)
+                                }
                             } else {
                                 Log.e(TAG, "GNOME unavailable; desktop will be empty")
                             }
