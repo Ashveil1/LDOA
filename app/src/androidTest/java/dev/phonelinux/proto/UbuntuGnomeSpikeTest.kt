@@ -308,15 +308,34 @@ class UbuntuGnomeSpikeTest {
         while (proc.isAlive && System.currentTimeMillis() < deathDeadline) Thread.sleep(2_000)
         Log.i(TAG, "restart: old session alive=" + proc.isAlive)
         assertTrue("old gnome session process tree survived the kill", !proc.isAlive)
-        val proc2 = GuestUbuntu.launchGnomeSession(ctx, rootfs)
-        val shellDeadline = System.currentTimeMillis() + 300_000
-        var shellBack = false
-        while (System.currentTimeMillis() < shellDeadline) {
-            if (xwin("xwininfo -root -tree | grep -c 'gnome-shell'").trim().toIntOrNull()?.let { it > 0 } == true) {
-                shellBack = true; break
+        fun guestLogTail(): String = try {
+            java.io.File(ctx.filesDir, "guest-gnome.log").readText().takeLast(600)
+        } catch (t: Throwable) { "<unreadable: " + t.message + ">" }
+        fun waitShell(p: Process, budgetMs: Long): Boolean {
+            val deadline = System.currentTimeMillis() + budgetMs
+            while (System.currentTimeMillis() < deadline) {
+                if (xwin("xwininfo -root -tree | grep -c 'gnome-shell'").trim().toIntOrNull()?.let { it > 0 } == true) return true
+                if (!p.isAlive) return false
+                Thread.sleep(10_000)
             }
-            if (!proc2.isAlive) break
-            Thread.sleep(10_000)
+            return false
+        }
+        var proc2 = GuestUbuntu.launchGnomeSession(ctx, rootfs)
+        var shellBack = waitShell(proc2, 300_000)
+        if (!shellBack) {
+            // Run 40721333763: relaunched session produced NO shell within
+            // 300s while the host probe's later session came up in ~35s.
+            // Log the evidence, then ONE retry if the process died (the ICE
+            // lock death is a known transient race).
+            Log.i(TAG, "restart: first relaunch shellBack=false proc2.alive=" + proc2.isAlive)
+            Log.i(TAG, "restart: guest log tail: " + guestLogTail().replace("\n", " | "))
+            if (!proc2.isAlive) {
+                Log.i(TAG, "restart: first relaunch died - one retry (transient ICE race suspected)")
+                proc2 = GuestUbuntu.launchGnomeSession(ctx, rootfs)
+                shellBack = waitShell(proc2, 300_000)
+                Log.i(TAG, "restart: retry shellBack=" + shellBack + " alive=" + proc2.isAlive)
+                if (!shellBack) Log.i(TAG, "restart: retry guest log tail: " + guestLogTail().replace("\n", " | "))
+            }
         }
         Thread.sleep(20_000)
         Shot.dismissSystemDialogs(device)
