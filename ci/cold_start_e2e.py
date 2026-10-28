@@ -113,6 +113,15 @@ if not wait_marker(900):
 mtime1 = marker_mtime()
 log("install complete, marker mtime=%s" % mtime1)
 
+# Product default, verified through the SHIPPED entry point (not the test
+# harness): the app's own first-launch onCreate sets direct touch
+# (tap-to-point) when the user has never chosen a mode. Data starts empty
+# here because the instrumentation job uninstalls both APKs before us.
+prefs = runas("cat shared_prefs/%s_preferences.xml 2>&1" % PKG)
+if 'name="touchMode" value="3"' not in prefs:
+    fail("direct-touch default not written by shipped app entry; prefs=" + prefs[:600])
+log("direct-touch default present after first shipped-app launch")
+
 if not tap_desc("open-desktop", 60):
     fail("open-desktop button never appeared after install")
 log("waiting for desktop wm (first-time shell provisioning included, up to 10 min)")

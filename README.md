@@ -2,6 +2,7 @@
 
 One Android app: pick a Linux distro -> install -> use a graphical desktop.
 No commands required. Touch-first, fits phone screens, dark-first design.
+Touch defaults to direct touch (tap-to-point); trackpad mode remains available in the X session's preferences (gear icon in the on-screen key bar).
 
 Status: **prototype spike** (pre-release). This README is the working design record.
 
