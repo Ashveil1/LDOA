@@ -33,6 +33,13 @@ class DesktopClientTest {
     @Test
     fun desktop1_fullInteractionSuite(): Unit = runBlocking {
         val appCtx = ApplicationProvider.getApplicationContext<Context>()
+        // Establish own state FIRST: the lorie activity must never exist in
+        // this process before touchMode=3 is on disk. (Root-cause question
+        // from runs 8302b1e/772fadb: a pref written AFTER the activity is
+        // running may not apply live - the probe at the end of this method
+        // characterizes that instead of asserting on a guess.)
+        appCtx.getSharedPreferences(appCtx.packageName + "_preferences", Context.MODE_PRIVATE)
+            .edit().putString("touchMode", "3").commit()
         val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
         val installer = DistroInstaller(appCtx)
         val distro = Distros.ALPINE
@@ -173,8 +180,7 @@ class DesktopClientTest {
         // pointer position after each via xdotool. Identical reads would
         // mean the pref did not take effect (trackpad clicks land wherever
         // the pointer already was).
-        appCtx.getSharedPreferences(appCtx.packageName + "_preferences", Context.MODE_PRIVATE)
-            .edit().putString("touchMode", "3").commit()
+        // touchMode=3 was committed at method top, before any activity start.
         Thread.sleep(1_500)
 
         val xBinds = listOf(XServer.socketDir(appCtx).absolutePath to "/tmp/.X11-unix")
@@ -397,6 +403,31 @@ class DesktopClientTest {
 
         } // jwm-only interaction phase
 
+        // Live-pref probe (parent directive: qualify, don't speculate): does
+        // a touchMode change apply to a RUNNING lorie session, or only at
+        // activity start? Probe = switch pref, tap a fixed point, read the X
+        // pointer. Trackpad mode = pointer stays put; direct = pointer moves
+        // to the tap. IME letterbox from the typing phase does not affect
+        // the distinction. No assertion: this is behavior characterization.
+        run {
+            fun probe(mode: String): String {
+                appCtx.getSharedPreferences(appCtx.packageName + "_preferences", Context.MODE_PRIVATE)
+                    .edit().putString("touchMode", mode).commit()
+                Thread.sleep(1_500)
+                device.click(400, 600)
+                Thread.sleep(800)
+                return GuestDesktop.guestShell(appCtx, rootfs,
+                    "export DISPLAY=:0; xdotool getmouselocation --shell 2>/dev/null",
+                    listOf(XServer.socketDir(appCtx).absolutePath to "/tmp/.X11-unix"))
+                    .replace("
+", " ")
+            }
+            val direct = probe("3")
+            val track = probe("1")
+            val direct2 = probe("3")
+            android.util.Log.i("PHONEDIAG", "live pref probe: direct=[" + direct + "] trackpad=[" + track + "] directAgain=[" + direct2 + "]")
+        }
+
         } finally {
             // Leave a lighter system for later tests even when an assertion
             // above throws (a live desktop session feeds launcher ANR storms).
@@ -414,6 +445,8 @@ class DesktopClientTest {
     @Test
     fun desktop2_sessionRestartPersists(): Unit = runBlocking {
         val appCtx = ApplicationProvider.getApplicationContext<Context>()
+        appCtx.getSharedPreferences(appCtx.packageName + "_preferences", Context.MODE_PRIVATE)
+            .edit().putString("touchMode", "3").commit()
         val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
         val installer = DistroInstaller(appCtx)
         val distro = Distros.ALPINE
