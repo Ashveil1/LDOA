@@ -74,6 +74,11 @@ jobs:
             if [ "$(cat ci/launcher-suppression.conf 2>/dev/null || echo on)" = "on" ]; then adb -s emulator-5554 shell am force-stop com.google.android.apps.nexuslauncher || true; echo "launcher suppression: ON (emulator flake workaround)"; else echo "launcher suppression: OFF - normal Pixel launcher active (shipping-path qualification)"; fi
             ./gradlew connectedDebugAndroidTest --info 2>&1 | tee /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
             grep -q "BUILD SUCCESSFUL" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
+            # Host-driven cold-start E2E (parent directive): install the APK
+            # on this RUNNING emulator, drive the real UI, am force-stop,
+            # relaunch - the app-process-kill path in-process tests cannot
+            # cover. Runs only when instrumentation passed.
+            if [ ! -f /tmp/PHONELINUX_TESTS_FAILED ]; then python3 ci/cold_start_e2e.py emulator-5554 || touch /tmp/PHONELINUX_TESTS_FAILED; else echo "cold-start E2E skipped: instrumentation failed"; fi
             adb -s emulator-5554 logcat -d > /tmp/shotlog.txt || true
             mkdir -p screenshots
             python3 .github/scripts/extract_shots.py /tmp/shotlog.txt screenshots || true
@@ -89,6 +94,58 @@ jobs:
         if: always()
         with:
           name: ui-journey-screenshots
+          path: |
+            screenshots/
+            /tmp/shotlog.txt
+
+  # ARM64 qualification lane: "ARM package compatibility != ARM execution".
+  # Public-repo macos-14 runners are Apple Silicon, and android-emulator-
+  # runner supports arm64-v8a images there: host AND guest are aarch64 with
+  # no translation - our arm64-v8a proot and the aarch64 rootfs run natively.
+  # No new accounts or spend (public repo minutes). Experimental lane: it
+  # does not gate the ubuntu lane while it stabilizes.
+  emulator-test-arm64:
+    runs-on: macos-14
+    needs: build
+    continue-on-error: true
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install NDK + bison for vendored :lorie X server
+        run: |
+          brew install bison
+          echo "/opt/homebrew/opt/bison/bin" >> "$GITHUB_PATH"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;29.0.14206865" "platforms;android-35" >/dev/null
+      - name: Run spike instrumentation on emulator (arm64-v8a, native ARM execution)
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: arm64-v8a
+          profile: pixel_6
+          script: |
+            adb -s emulator-5554 logcat -G 16M || true
+            adb -s emulator-5554 logcat -c || true
+            adb -s emulator-5554 shell settings put global anr_show_background 0 || true
+            if [ "$(cat ci/launcher-suppression.conf 2>/dev/null || echo on)" = "on" ]; then adb -s emulator-5554 shell am force-stop com.google.android.apps.nexuslauncher || true; echo "launcher suppression: ON (emulator flake workaround)"; else echo "launcher suppression: OFF - normal Pixel launcher active (shipping-path qualification)"; fi
+            ./gradlew connectedDebugAndroidTest --info 2>&1 | tee /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
+            grep -q "BUILD SUCCESSFUL" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
+            adb -s emulator-5554 logcat -d > /tmp/shotlog.txt || true
+            mkdir -p screenshots
+            python3 .github/scripts/extract_shots.py /tmp/shotlog.txt screenshots || true
+            find screenshots -type f | sort || true
+            if [ -f /tmp/PHONELINUX_TESTS_FAILED ]; then exit 1; fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-journey-screenshots-arm64
           path: |
             screenshots/
             /tmp/shotlog.txt

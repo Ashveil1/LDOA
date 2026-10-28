@@ -57,14 +57,28 @@ object XServer {
             val ctx = activity.applicationContext
             try {
                 start(ctx)
-                // experimental: prove guest GUI life with xclock until the
-                // XFCE session profile lands
+                // The desktop entry point must launch the DESKTOP the tests
+                // prove (jwm + pcmanfm + st), not the old xclock smoke -
+                // otherwise the shipped app does less than the CI evidence.
                 val installer = DistroInstaller(ctx)
                 val distro = Distros.ALPINE
                 if (installer.isInstalled(distro)) {
                     val rootfs = installer.rootfsDir(distro)
-                    if (!GuestDesktop.hasXclock(rootfs)) GuestDesktop.provisionXclock(ctx, rootfs)
-                    if (GuestDesktop.hasXclock(rootfs)) GuestDesktop.launchXclock(ctx, rootfs)
+                    if (!GuestDesktop.hasDesktopShell(rootfs)) {
+                        Log.i(TAG, "desktop shell not provisioned; installing jwm/pcmanfm/st")
+                        var add = GuestDesktop.provisionDesktopShell(ctx, rootfs)
+                        if (add.exitCode != 0) {
+                            Thread.sleep(5_000)
+                            add = GuestDesktop.provisionDesktopShell(ctx, rootfs)
+                        }
+                        Log.i(TAG, "desktop shell provision exit=" + add.exitCode)
+                    }
+                    if (GuestDesktop.hasDesktopShell(rootfs)) {
+                        Log.i(TAG, "launching full desktop session")
+                        GuestDesktop.launchDesktopSession(ctx, rootfs)
+                    } else {
+                        Log.e(TAG, "desktop shell unavailable; desktop will be empty")
+                    }
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "X server start failed", t)

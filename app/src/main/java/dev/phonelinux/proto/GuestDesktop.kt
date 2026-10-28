@@ -138,6 +138,31 @@ object GuestDesktop {
 
     /** Launch the full desktop session: wm first, then desktop icons, then
      *  the panel; all against the embedded X server. */
+    /** Kill every guest process tagged with the desktop session marker.
+     *  Returns the number killed, or -1 if the scan itself failed. A plain
+     *  Process.destroy() only kills proot's root; the X clients it spawned
+     *  (wm, terminal, fm, user-launched apps) survive as orphans, which is
+     *  how a leftover xclock showed up across a restart in run cd5dc6d. */
+    fun killDesktopClients(ctx: Context, rootfs: File): Int = desktopClientScan(ctx, rootfs, kill = true)
+
+    /** Count guest processes still tagged with the desktop session marker. */
+    fun desktopClientCount(ctx: Context, rootfs: File): Int = desktopClientScan(ctx, rootfs, kill = false)
+
+    private fun desktopClientScan(ctx: Context, rootfs: File, kill: Boolean): Int {
+        val action = if (kill) "kill -9 \"${'$'}pid\" 2>/dev/null; " else ""
+        val out = try {
+            guestShell(ctx, rootfs, """
+                n=0
+                for p in /proc/[0-9]*; do
+                  pid=${'$'}{p#/proc/}
+                  if tr '\0' '\n' < "${'$'}p/environ" 2>/dev/null | grep -q '^PLINUX_SESSION=desktop$'; then $action n=${'$'}((n+1)); fi
+                done
+                echo count=${'$'}n
+                """.trimIndent())
+        } catch (t: Throwable) { "" }
+        return Regex("count=(\\d+)").find(out)?.groupValues?.get(1)?.toIntOrNull() ?: -1
+    }
+
     fun launchDesktopSession(ctx: Context, rootfs: File): Process {
         File(rootfs, "root/.config/tint2").mkdirs()
         File(rootfs, "root/.config/tint2/tint2rc").writeText(TINT2RC + "\n")
@@ -172,6 +197,10 @@ object GuestDesktop {
             """
             #!/bin/sh
             export DISPLAY=:0 HOME=/root XDG_RUNTIME_DIR=/tmp/xdg
+            # Teardown tag: every client this session spawns inherits it,
+            # so a real close can kill the WHOLE session (killDesktopClients)
+            # instead of leaking stray client windows across a restart.
+            export PLINUX_SESSION=desktop
             mkdir -p /tmp/xdg
             # Terminal emulators die if getpwuid(getuid()) fails: st's
             # execsh() calls die("who are you?") with child stderr on the

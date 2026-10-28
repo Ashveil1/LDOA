@@ -393,6 +393,7 @@ class DesktopClientTest {
             // Leave a lighter system for later tests even when an assertion
             // above throws (a live desktop session feeds launcher ANR storms).
             session.destroy()
+            try { GuestDesktop.killDesktopClients(appCtx, rootfs) } catch (t: Throwable) { }
         }
     }
 
@@ -453,13 +454,14 @@ class DesktopClientTest {
             // orphan proot children, and leftovers would fake the restart.
             session.destroy()
             Thread.sleep(2_000)
-            GuestDesktop.guestOk(appCtx, rootfs,
-                "pkill -x jwm; pkill -x openbox; pkill -x icewm; pkill -x fluxbox; pkill -x st; pkill -x xterm; pkill pcmanfm; pkill tint2; true")
-            Thread.sleep(2_000)
-            val leftovers = GuestDesktop.guestOk(appCtx, rootfs,
-                "pgrep -x jwm || pgrep -x openbox || pgrep -x st || pgrep -x xterm")
-            android.util.Log.i("PHONEDIAG", "restart teardown: leftovers=" + leftovers)
-            assertTrue("session destroy left guest processes alive - teardown is broken, a real close would leak", !leftovers)
+            // Marker-based full-session kill: destroy() alone leaves orphan
+            // X clients (a leftover xclock crossed a restart in run cd5dc6d);
+            // a real close must take down the WHOLE session.
+            val killed = GuestDesktop.killDesktopClients(appCtx, rootfs)
+            Thread.sleep(1_000)
+            val left = GuestDesktop.desktopClientCount(appCtx, rootfs)
+            android.util.Log.i("PHONEDIAG", "restart teardown: killed=" + killed + " leftoverClients=" + left)
+            assertTrue("session close left " + left + " guest clients alive (killed " + killed + ") - teardown is broken, a real close would leak", left == 0)
             assertTrue("distro marker lost after session destroy - install is not persistent",
                 installer.isInstalled(distro))
 
