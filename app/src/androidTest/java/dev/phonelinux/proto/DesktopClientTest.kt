@@ -282,26 +282,58 @@ class DesktopClientTest {
         assertTrue("menu Terminal item did not launch a new st (count before=" + stCountBefore + " after=" + stCountAfter + ")",
             stCountAfter > stCountBefore)
 
-        // 4. Resize st by dragging the jwm frame's bottom-right corner
-        // (frame = client + 4px borders / 27px title) and verify the
-        // geometry changed.
+        // 4. Resize via touch. The jwm frame rect and title buttons are
+        // MEASURED (parent-window query), never assumed.
         fun stGeom(): IntArray? {
             val out = xwin("xwininfo -id " + stWid + " -stats | grep -E 'Absolute upper-left|Width:|Height:' | awk '{print ${'$'}NF}'")
             val n = out.lines().mapNotNull { it.trim().toIntOrNull() }
             return if (n.size >= 4) intArrayOf(n[0], n[1], n[2], n[3]) else null
         }
-        val gResize = stGeom()
-        android.util.Log.i("PHONEDIAG", "st geometry before resize: " + gResize?.toList())
-        assertTrue("st geometry unreadable for resize test", gResize != null)
-        val gr = gResize!!
-        val corner = devFor(gr[0] + gr[2] + 2.0, gr[1] + gr[3] + 2.0)
-        device.swipe(corner.first, corner.second, corner.first - 120, corner.second - 100, 40)
+        fun frameGeom(): IntArray? {
+            val p = xwin("xwininfo -id " + stWid + " | grep 'Parent window id'")
+            val pw = Regex("0x[0-9a-fA-F]+").find(p)?.value ?: return null
+            val out = xwin("xwininfo -id " + pw + " -stats | grep -E 'Absolute upper-left|Width:|Height:' | awk '{print ${'$'}NF}'")
+            val n = out.lines().mapNotNull { it.trim().toIntOrNull() }
+            return if (n.size >= 4) intArrayOf(n[0], n[1], n[2], n[3]) else null
+        }
+        // 4a. Maximize: tap the jwm title-bar maximize button (right side
+        // of the title: close at -13, maximize at -36, minimize at -59
+        // from the frame's right edge) and expect a big geometry change.
+        val gHome0 = stGeom()
+        val fHome0 = frameGeom()
+        android.util.Log.i("PHONEDIAG", "resize: client=" + gHome0?.toList() + " frame=" + fHome0?.toList())
+        assertTrue("st frame unreadable for resize tests", gHome0 != null && fHome0 != null)
+        val gh = gHome0!!; val fh = fHome0!!
+        val maxBtn0 = devFor(fh[0] + fh[2] - 36.0, fh[1] + 13.0)
+        device.click(maxBtn0.first, maxBtn0.second)
         Thread.sleep(2_000)
-        val gResized = stGeom()
-        android.util.Log.i("PHONEDIAG", "st geometry after resize: " + gResized?.toList())
-        assertTrue("st did not resize on corner drag (before=" + gr.toList() + " after=" + gResized?.toList() + ")",
-            gResized != null &&
-                (Math.abs(gResized[2] - gr[2]) > 40 || Math.abs(gResized[3] - gr[3]) > 40))
+        Shot.save("11b-st-maximized")
+        val gMax = stGeom()
+        android.util.Log.i("PHONEDIAG", "after maximize tap: " + gMax?.toList() + " btn dev=" + maxBtn0)
+        assertTrue("st did not maximize on title-button tap (before=" + gh.toList() + " after=" + gMax?.toList() + ") - possible mis-tap onto close if window is gone",
+            gMax != null && gMax[2] > gh[2] + 100 && gMax[3] > gh[3] + 100)
+        // 4b. Restore: tap the same button again, expect ~original size.
+        val fMax = frameGeom()!!
+        val maxBtn1 = devFor(fMax[0] + fMax[2] - 36.0, fMax[1] + 13.0)
+        device.click(maxBtn1.first, maxBtn1.second)
+        Thread.sleep(2_000)
+        val gRest = stGeom()
+        android.util.Log.i("PHONEDIAG", "after restore tap: " + gRest?.toList())
+        assertTrue("st did not restore on second maximize-button tap (after=" + gRest?.toList() + ")",
+            gRest != null && Math.abs(gRest[2] - gh[2]) < 60 && Math.abs(gRest[3] - gh[3]) < 60)
+        val gr2 = gRest!!
+        // 4c. Free resize: drag the measured frame corner with drag()
+        // (long-press semantics; swipe() produced a no-op in run
+        // bd799a0 despite a verified on-border grab point).
+        val fr = frameGeom()!!
+        val corner = devFor(fr[0] + fr[2] - 2.0, fr[1] + fr[3] - 2.0)
+        device.drag(corner.first, corner.second, corner.first - 120, corner.second - 100, 40)
+        Thread.sleep(2_000)
+        val gFree = stGeom()
+        android.util.Log.i("PHONEDIAG", "free resize: corner dev=" + corner + " before=" + gr2.toList() + " after=" + gFree?.toList())
+        assertTrue("st did not resize on corner drag (frame=" + fr.toList() + " before=" + gr2.toList() + " after=" + gFree?.toList() + ")",
+            gFree != null &&
+                (Math.abs(gFree[2] - gr2[2]) > 40 || Math.abs(gFree[3] - gr2[3]) > 40))
 
         // 5. Offscreen recovery: drag st right until its controls leave
         // the screen, then drag it back by the still-visible title strip
