@@ -23,9 +23,9 @@ class UbuntuTerminalUiTest {
         val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
         Shot.dismissSystemDialogs(device)
         device.pressHome()
-        // Deterministic start: a prior test may have left the app on any
-        // screen; force-stop so the picker is guaranteed.
-        device.executeShellCommand("am force-stop dev.phonelinux.proto")
+        // NOTE: no force-stop here - instrumentation runs IN the app
+        // process; am force-stop dev.phonelinux.proto kills the test itself
+        // ("Instrumentation run failed due to Process crashed", run eaaf47f).
         device.executeShellCommand(
             "am start -n dev.phonelinux.proto/.MainActivity -a android.intent.action.MAIN")
 
