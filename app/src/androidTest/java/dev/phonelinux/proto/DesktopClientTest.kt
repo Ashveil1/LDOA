@@ -413,10 +413,23 @@ class DesktopClientTest {
         val tb2 = devFor(900.0, go[1] - 13.0)
         device.swipe(tb2.first, tb2.second, tb2.first + (20 - go[0]), tb2.second, 40)
         Thread.sleep(2_000)
-        val gBack = stGeom()
+        // Effect-verified recovery: a fast swipe can drop motion deltas
+        // (run 40675110535: aimed x0=20, landed x0=181, controls 3px past
+        // the panel edge). Re-drag by the remaining delta until the
+        // controls are truly onscreen; every attempt is logged.
+        var gBack = stGeom()
+        var recAttempts = 0
+        while (gBack != null && gBack[0] + gBack[2] + 8 > 1080 && recAttempts < 3) {
+            recAttempts++
+            val grab = devFor((gBack[0] + gBack[2] - 100).toDouble(), gBack[1] - 13.0)
+            device.swipe(grab.first, grab.second, grab.first + (20 - gBack[0]), grab.second, 60)
+            Thread.sleep(2_000)
+            gBack = stGeom()
+            android.util.Log.i("PHONEDIAG", "recovery drag attempt " + recAttempts + ": back=" + gBack?.toList())
+        }
         Shot.save("12-st-recovered")
-        android.util.Log.i("PHONEDIAG", "recovery drag: off=" + go.toList() + " back=" + gBack?.toList())
-        assertTrue("st controls not recovered onscreen (off=" + go.toList() + " back=" + gBack?.toList() + ")",
+        android.util.Log.i("PHONEDIAG", "recovery drag: off=" + go.toList() + " back=" + gBack?.toList() + " attempts=" + recAttempts)
+        assertTrue("st controls not recovered onscreen (off=" + go.toList() + " back=" + gBack?.toList() + " attempts=" + recAttempts + ")",
             gBack != null && gBack[0] + gBack[2] + 8 <= 1080)
 
         // 6. White-stripe experiment: the band inside st exists only
