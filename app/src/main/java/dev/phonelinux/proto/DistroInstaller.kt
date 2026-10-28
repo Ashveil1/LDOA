@@ -227,6 +227,12 @@ class DistroInstaller(private val ctx: Context) {
             // window from other processes.
             val rootCanon = dest.canonicalPath
             val canonDest = rootCanon + File.separator
+            // Directory modes are applied AFTER the whole tree exists
+            // (children must be extracted before parents get their final
+            // restrictive modes). Privilege bits are masked off: sticky is
+            // kept (/tmp semantics), setuid/setgid are never honored from
+            // an archive.
+            val dirModes = mutableListOf<Pair<File, Int>>()
             while (e != null) {
                 val out = File(dest, e.name)
                 fun blocked(reason: String, entryName: String): Nothing =
@@ -246,7 +252,11 @@ class DistroInstaller(private val ctx: Context) {
                     }
                 }
                 when {
-                    e.isDirectory -> out.mkdirs()
+                    e.isDirectory -> {
+                        out.mkdirs()
+                        val m = e.mode and 0x3FF // 0o1777: rwx-all + sticky; setuid/setgid masked off
+                        if (m != 0) dirModes.add(out to m)
+                    }
                     e.isSymbolicLink -> {
                         out.parentFile?.mkdirs()
                         out.delete()
@@ -266,6 +276,11 @@ class DistroInstaller(private val ctx: Context) {
                     }
                 }
                 e = tar.nextTarEntry
+            }
+            // Deepest first so a restrictive parent never blocks a child chmod.
+            for ((dir, m) in dirModes.sortedByDescending { it.first.absolutePath.length }) {
+                try { android.system.Os.chmod(dir.absolutePath, m) }
+                catch (t: Throwable) { Log.w(TAG, "chmod ${m.toString(8)} ${dir.name}: ${t.message}") }
             }
         }
     }
