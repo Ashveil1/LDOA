@@ -64,7 +64,7 @@ class UbuntuGnomeSpikeTest {
 
         // X server + GNOME session.
         XServer.start(ctx)
-        val proc = GuestUbuntu.launchGnomeSession(ctx, rootfs)
+        val proc = XServer.launchOrReuseGnomeSession(ctx, d, rootfs)
 
         // Evidence window: poll guest-gnome.log for launch markers, up to 10 min.
         val logFile = File(ctx.filesDir, "guest-gnome.log")
@@ -360,7 +360,7 @@ class UbuntuGnomeSpikeTest {
             }
             return props.contains("GNOME Shell") && cmd.contains("gnome-shell")
         }
-        val proc2 = GuestUbuntu.launchGnomeSession(ctx, rootfs)
+        val proc2 = XServer.launchOrReuseGnomeSession(ctx, d, rootfs)
         val shellDeadline = System.currentTimeMillis() + 90_000
         var shellBack = false
         while (System.currentTimeMillis() < shellDeadline && proc2.isAlive) {
@@ -417,12 +417,12 @@ class UbuntuGnomeSpikeTest {
         // Supplementary signal only: the GATE is the workflow's host-side
         // force-stop + relaunch probe (manual install, no AGP teardown)
         // with a fresh session marker and post-settle pixels.
-        device.pressBack() // leave the X11 surface -> MainActivity resumes
-        Thread.sleep(2_000)
-        device.setOrientationLandscape()
-        Thread.sleep(3_000)
-        device.setOrientationNatural()
-        device.waitForIdle(3_000)
+        val launchCountBefore = logFile.readText().lineSequence()
+            .count { it.contains("gnome-launch: trying gnome-session") }
+        val scenario = androidx.test.core.app.ActivityScenario.launch(MainActivity::class.java)
+        Thread.sleep(5_000)
+        scenario.recreate()
+        Thread.sleep(5_000)
         val reenterDeadline = System.currentTimeMillis() + 120_000
         var reentered = false
         while (System.currentTimeMillis() < reenterDeadline) {
@@ -435,6 +435,10 @@ class UbuntuGnomeSpikeTest {
         assertTrue("cold-start re-enter: no live GNOME session after MainActivity recreation",
             reentered)
         assertTrue("relaunched session died during re-enter", proc2.isAlive)
+        val launchCountAfter = logFile.readText().lineSequence()
+            .count { it.contains("gnome-launch: trying gnome-session") }
+        assertEquals("MainActivity recreation started a duplicate session", launchCountBefore, launchCountAfter)
+        scenario.close()
         Log.i(TAG, "UBUNTU-COLDSTART-REENTER-OK recreated MainActivity re-entered the running desktop, no second session")
         // Full-log mirroring: the artifact file pull has proven unreliable
         // (0-byte guest-gnome.log in run eaaf47f); logcat (shotlog.txt) is

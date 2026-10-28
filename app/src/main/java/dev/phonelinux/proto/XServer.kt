@@ -33,6 +33,18 @@ object XServer {
     fun gnomeSessionActive(d: Distro): Boolean =
         gnomeSession?.let { it.first == d.id && it.second.isAlive } == true
 
+    /** Single tracked launch path shared by desktop entry and restart tests. */
+    @Synchronized
+    fun launchOrReuseGnomeSession(ctx: Context, distro: Distro, rootfs: File): Process {
+        val current = gnomeSession
+        if (current != null && current.first == distro.id && current.second.isAlive) {
+            Log.i(TAG, "GNOME session already running - bringing desktop forward")
+            return current.second
+        }
+        Log.i(TAG, "launching GNOME session")
+        return GuestUbuntu.launchGnomeSession(ctx, rootfs).also { gnomeSession = distro.id to it }
+    }
+
     fun tmpDir(ctx: Context): File = File(ctx.filesDir, "usr/tmp")
     fun socketDir(ctx: Context): File = File(tmpDir(ctx), ".X11-unix")
 
@@ -100,12 +112,7 @@ object XServer {
                             if (GuestUbuntu.hasGnome(rootfs)) {
                                 ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
                                     .edit().putBoolean("ubuntu_desktop_active", true).apply()
-                                if (gnomeSessionActive(distro)) {
-                                    Log.i(TAG, "GNOME session already running - bringing desktop forward")
-                                } else {
-                                    Log.i(TAG, "launching GNOME session")
-                                    gnomeSession = distro.id to GuestUbuntu.launchGnomeSession(ctx, rootfs)
-                                }
+                                launchOrReuseGnomeSession(ctx, distro, rootfs)
                             } else {
                                 Log.e(TAG, "GNOME unavailable; desktop will be empty")
                             }
