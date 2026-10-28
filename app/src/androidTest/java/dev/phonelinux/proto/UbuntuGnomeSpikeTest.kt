@@ -197,6 +197,7 @@ class UbuntuGnomeSpikeTest {
             }
             if (nauWid != null) break
         }
+        Thread.sleep(10_000) // mapped geometry can precede the first painted frame
         Shot.save("22-ubuntu-dock-files-opened")
         assertTrue("finger press on the dock Files icon did not open a nautilus window (2 positions tried)", nauWid != null)
 
@@ -335,20 +336,24 @@ class UbuntuGnomeSpikeTest {
         // Bind the X window manager's identity to its actual process.
         // xwininfo names the shell 'GNOME Shell', not 'gnome-shell'. A
         // case-insensitive grep alone cannot establish a live manager.
+        var lastIdentityEvidence = ""
         fun shellIdentity(): Boolean {
             val wm = xwin("xprop -root _NET_SUPPORTING_WM_CHECK")
-            val id = Regex("0x[0-9a-fA-F]+").find(wm)?.value ?: return false
-            val props = xwin("xprop -id " + id + " _NET_WM_NAME _NET_WM_PID")
+            val id = Regex("0x[0-9a-fA-F]+").find(wm)?.value
+            val props = if (id != null) xwin("xprop -id " + id + " _NET_WM_NAME _NET_WM_PID WM_NAME") else "<no WM id>"
             val pid = Regex("_NET_WM_PID\\(CARDINAL\\) = (\\d+)").find(props)?.groupValues?.get(1)
-                ?: return false
-            val cmd = try { File("/proc/" + pid + "/cmdline").readText().replace('\u0000', ' ') }
-                catch (_: Throwable) { return false }
-            val valid = props.contains("GNOME Shell") && cmd.contains("gnome-shell")
-            if (valid) Log.i(TAG, "restart: live WM id=" + id + " pid=" + pid + " cmd=" + cmd)
-            return valid
+            val cmd = if (pid != null) try {
+                File("/proc/" + pid + "/cmdline").readText().replace('\u0000', ' ')
+            } catch (t: Throwable) { "<cmdline error: " + t.javaClass.simpleName + ">" } else "<no WM pid>"
+            val evidence = (wm + " | " + props + " | cmd=" + cmd).replace("\n", " | ")
+            if (evidence != lastIdentityEvidence) {
+                Log.i(TAG, "restart: WM identity evidence: " + evidence)
+                lastIdentityEvidence = evidence
+            }
+            return props.contains("GNOME Shell") && cmd.contains("gnome-shell")
         }
         val proc2 = GuestUbuntu.launchGnomeSession(ctx, rootfs)
-        val shellDeadline = System.currentTimeMillis() + 300_000
+        val shellDeadline = System.currentTimeMillis() + 90_000
         var shellBack = false
         while (System.currentTimeMillis() < shellDeadline && proc2.isAlive) {
             if (shellIdentity()) { shellBack = true; break }
@@ -360,7 +365,10 @@ class UbuntuGnomeSpikeTest {
         Shot.dismissSystemDialogs(device)
         Shot.save("24-ubuntu-gnome-restarted")
         assertTrue("relaunched gnome session process died", proc2.isAlive)
-        assertTrue("GNOME window manager identity/process missing after restart", shellBack)
+        Log.i(TAG, "restart: root tree before interaction: " + xwin("xwininfo -root -tree").replace("\n", " | ").take(3500))
+        Log.i(TAG, "restart: shell processes: " + xwin("pgrep -af gnome-shell || true").replace("\n", " | "))
+        // Collect independent post-restart interaction even if a metadata
+        // field is missing. Identity stays a final gate, never waived.
 
         // Qualify interaction AFTER restart, not just a live shell marker.
         device.click(540, 1200)
@@ -385,6 +393,7 @@ class UbuntuGnomeSpikeTest {
         Log.i(TAG, "restart: finger drag (" + rw.x + "," + rw.y + ") -> " + moved?.let { it.x.toString() + "," + it.y })
         assertTrue("Files did not follow finger drag after restart", moved != null &&
             Math.abs(moved.x - rw.x + 60) < 30 && Math.abs(moved.y - rw.y - 120) < 30)
+        assertTrue("GNOME window manager identity/process missing after restart: " + lastIdentityEvidence, shellBack)
         Log.i(TAG, "UBUNTU-GNOME-RESTART-OK FIRST launch; live WM identity + finger Files launch + continuous drag")
 
         // 5. COLD-START decision path: the plinux_desktop pref was set when
