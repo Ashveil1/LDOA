@@ -105,6 +105,11 @@ jobs:
   # No new accounts or spend (public repo minutes). Experimental lane: it
   # does not gate the ubuntu lane while it stabilizes.
   emulator-test-arm64:
+    # GATED to manual dispatch: hosted macos-14 runners do NOT expose
+    # Hypervisor.framework (HVF error: HV_UNSUPPORTED, run 772fadb), and an
+    # arm64 Android image cannot boot without hardware acceleration. Kept
+    # for reproduction; not a per-push lane until ARM-capable runners exist.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-14
     needs: build
     continue-on-error: true

@@ -8,8 +8,10 @@ import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.UiDevice
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertTrue
+import org.junit.FixMethodOrder
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.junit.runners.MethodSorters
 import java.io.File
 
 /**
@@ -20,10 +22,16 @@ import java.io.File
  * (inspected as a CI artifact).
  */
 @RunWith(AndroidJUnit4::class)
+// NAME_ASCENDING enforces desktop1_ before desktop2_: the restart test leaves
+// the lorie activity + X service running with the DEFAULT (trackpad) touch
+// mode, and the interaction suite's direct-touch calibration then reads a
+// stale pref (runs 8302b1e: tapA==tapB; 772fadb: drag no-op). The restart
+// test itself is tap-free (process-verified), so it is safe to run after.
+@FixMethodOrder(MethodSorters.NAME_ASCENDING)
 class DesktopClientTest {
 
     @Test
-    fun guestXclockDrawsThroughEmbeddedServer(): Unit = runBlocking {
+    fun desktop1_fullInteractionSuite(): Unit = runBlocking {
         val appCtx = ApplicationProvider.getApplicationContext<Context>()
         val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
         val installer = DistroInstaller(appCtx)
@@ -404,7 +412,7 @@ class DesktopClientTest {
     // own test boundary and their own result message. Self-contained: does
     // its own install/X/shell setup so JUnit method order cannot break it.
     @Test
-    fun desktopSessionRestartPersists(): Unit = runBlocking {
+    fun desktop2_sessionRestartPersists(): Unit = runBlocking {
         val appCtx = ApplicationProvider.getApplicationContext<Context>()
         val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
         val installer = DistroInstaller(appCtx)
@@ -480,6 +488,7 @@ class DesktopClientTest {
             }
         } finally {
             session.destroy()
+            try { GuestDesktop.killDesktopClients(appCtx, rootfs) } catch (t: Throwable) { }
         }
     }
 }
