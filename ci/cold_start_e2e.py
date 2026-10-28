@@ -158,7 +158,12 @@ log("install complete, marker mtime=%s" % mtime1)
 # (tap-to-point) when the user has never chosen a mode. Data starts empty
 # here because the instrumentation job uninstalls both APKs before us.
 prefs = runas("cat shared_prefs/%s_preferences.xml 2>&1" % PKG)
-if 'name="touchMode" value="3"' not in prefs:
+# SharedPreferences XML stores a string pref as ELEMENT TEXT:
+#   <string name="touchMode">3</string>
+# not a value= attribute (that is the <int>/<long> form). Run 40632372282
+# showed the shipped app wrote the pref correctly and only this harness
+# string check was wrong.
+if '<string name="touchMode">3</string>' not in prefs:
     fail("direct-touch default not written by shipped app entry; prefs=" + prefs[:600])
 log("direct-touch default present after first shipped-app launch")
 
