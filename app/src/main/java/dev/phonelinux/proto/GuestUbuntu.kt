@@ -129,6 +129,7 @@ object GuestUbuntu {
         val pb = ProcessBuilder(
             File(nd, "libproot.so").absolutePath,
             "--link2symlink",
+            "-v", "5", // investigation: log syscall virtualization + failures
             "-0", // fake root: GNOME session components + dbus expect euid 0
             "-r", rootfs.absolutePath,
             "-b", "/dev", "-b", "/proc", "-b", "/sys",

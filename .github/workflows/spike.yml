@@ -142,7 +142,9 @@ jobs:
             adb -s emulator-5554 shell settings put global anr_show_background 0 || true
             ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=dev.phonelinux.proto.UbuntuGnomeSpikeTest --info 2>&1 | tee /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
             grep -q "BUILD SUCCESSFUL" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
-            adb -s emulator-5554 shell run-as dev.phonelinux.proto cat files/guest-gnome.log > guest-gnome.log 2>/dev/null || true
+            adb -s emulator-5554 shell run-as dev.phonelinux.proto ls -la files/ || true
+            adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/guest-gnome.log > guest-gnome.log || echo "GNOME-LOG-PULL-FAILED rc=$?"
+            wc -c guest-gnome.log || true
             adb -s emulator-5554 logcat -d > /tmp/shotlog.txt || true
             mkdir -p screenshots
             python3 .github/scripts/extract_shots.py /tmp/shotlog.txt screenshots || true

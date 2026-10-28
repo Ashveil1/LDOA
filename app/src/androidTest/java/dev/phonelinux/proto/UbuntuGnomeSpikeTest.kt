@@ -101,5 +101,12 @@ class UbuntuGnomeSpikeTest {
         Log.i(TAG, "gnome log tail2: " + (if (logFile.isFile) logFile.readText().takeLast(1500) else "<missing>"))
         assertTrue("gnome session died during the render window", proc.isAlive)
         Log.i(TAG, "UBUNTU-GNOME-SESSION-ALIVE (visual Ubuntu appearance is judged on artifact screenshots)")
+        // Full-log mirroring: the artifact file pull has proven unreliable
+        // (0-byte guest-gnome.log in run eaaf47f); logcat (shotlog.txt) is
+        // the collection path that works. Chunk to stay under logcat limits.
+        if (logFile.isFile) {
+            val full = logFile.readText()
+            full.chunked(900).forEachIndexed { i, c -> Log.i(TAG, "gnome-full[$i]: $c") }
+        }
     }
 }
