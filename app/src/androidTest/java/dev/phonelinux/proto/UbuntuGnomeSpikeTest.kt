@@ -250,8 +250,20 @@ class UbuntuGnomeSpikeTest {
         fun fingerDrag(from: Pair<Int, Int>) {
             val down = android.os.SystemClock.uptimeMillis()
             fun event(action: Int, x: Float, y: Float) {
-                val e = android.view.MotionEvent.obtain(down, android.os.SystemClock.uptimeMillis(), action, x, y, 0)
-                e.source = android.view.InputDevice.SOURCE_TOUCHSCREEN
+                // The short obtain() overload leaves toolType UNKNOWN.
+                // Lorie dispatches touch only for TOOL_TYPE_FINGER, so set
+                // both source AND pointer tool type, like UiDevice does.
+                val props = android.view.MotionEvent.PointerProperties().apply {
+                    id = 0; toolType = android.view.MotionEvent.TOOL_TYPE_FINGER
+                }
+                val coords = android.view.MotionEvent.PointerCoords().apply {
+                    this.x = x; this.y = y; pressure = 1f; size = 1f
+                }
+                val e = android.view.MotionEvent.obtain(down,
+                    android.os.SystemClock.uptimeMillis(), action, 1,
+                    arrayOf(props), arrayOf(coords), 0, 0, 1f, 1f, 0, 0,
+                    android.view.InputDevice.SOURCE_TOUCHSCREEN, 0)
+                check(e.getToolType(0) == android.view.MotionEvent.TOOL_TYPE_FINGER)
                 try { instr.sendPointerSync(e) } finally { e.recycle() }
             }
             event(android.view.MotionEvent.ACTION_DOWN, from.first.toFloat(), from.second.toFloat())
