@@ -389,51 +389,94 @@ class DesktopClientTest {
 
         } // jwm-only interaction phase
 
-        // Restart-persistence phase: the user-visible "close and come back"
-        // path. Destroy the desktop session, prove the guest is actually
-        // down (destroy() may orphan proot children - leftovers would fake
-        // a restart), then relaunch through the same launcher call the app
-        // uses and verify wm + terminal return with NO reinstall (rootfs,
-        // /root/.jwmrc and installed packages all persisted on disk). Runs
-        // AFTER the typing phase: its IME letterboxes the X viewport, so
-        // the restart screenshot is process-verified, not tap-verified.
-        session.destroy()
-        Thread.sleep(2_000)
-        GuestDesktop.guestOk(appCtx, rootfs,
-            "pkill -x jwm; pkill -x openbox; pkill -x icewm; pkill -x fluxbox; pkill -x st; pkill -x xterm; pkill pcmanfm; pkill tint2; true")
-        Thread.sleep(2_000)
-        val leftovers = GuestDesktop.guestOk(appCtx, rootfs,
-            "pgrep -x jwm || pgrep -x openbox || pgrep -x st || pgrep -x xterm")
-        android.util.Log.i("PHONEDIAG", "restart teardown: leftovers=" + leftovers)
-        assertTrue("session destroy left guest processes alive - teardown is broken, a real close would leak", !leftovers)
-        assertTrue("distro marker lost after session destroy - install is not persistent",
-            installer.isInstalled(distro))
-        val session2 = GuestDesktop.launchDesktopSession(appCtx, rootfs)
-        try {
-            Thread.sleep(25_000)
-            var wmBack = false
-            var termBack = false
-            val rsDeadline = System.currentTimeMillis() + 90_000
-            while (System.currentTimeMillis() < rsDeadline) {
-                wmBack = GuestDesktop.guestOk(appCtx, rootfs,
-                    "pgrep -x jwm || pgrep -x openbox || pgrep -x icewm || pgrep -x fluxbox")
-                termBack = GuestDesktop.guestOk(appCtx, rootfs, "pgrep -x xterm || pgrep -x st")
-                if (wmBack && termBack) break
-                Thread.sleep(3_000)
-            }
-            val rsLogRaw = try { device.executeShellCommand("run-as dev.phonelinux.proto tail -c 2000 files/guest-desktop.log 2>&1") } catch (t: Throwable) { "" }
-            val rsLog = rsLogRaw.map { c -> if (c.code in 32..126 || c == '\n') c else '?' }.joinToString("")
-            android.util.Log.i("PHONEDIAG", "restart phase: wmBack=" + wmBack + " termBack=" + termBack + " session2Alive=" + session2.isAlive)
-            Shot.save("16-desktop-restart")
-            assertTrue("desktop did not return after session restart (wmBack=" + wmBack + " termBack=" + termBack + " session2Alive=" + session2.isAlive + "). Desktop log:\n" + rsLog,
-                wmBack && termBack && session2.isAlive)
-        } finally {
-            session2.destroy()
-        }
-
         } finally {
             // Leave a lighter system for later tests even when an assertion
             // above throws (a live desktop session feeds launcher ANR storms).
+            session.destroy()
+        }
+    }
+
+    // Restart persistence, the user-visible "close and come back" path, as
+    // its OWN test: the giant desktop test fills its result payload near the
+    // harness gRPC cap (run cd5dc6d: 4.28MB > 4MB overflow on result
+    // reporting with every test green), so volume-heavy phases get their
+    // own test boundary and their own result message. Self-contained: does
+    // its own install/X/shell setup so JUnit method order cannot break it.
+    @Test
+    fun desktopSessionRestartPersists(): Unit = runBlocking {
+        val appCtx = ApplicationProvider.getApplicationContext<Context>()
+        val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+        val installer = DistroInstaller(appCtx)
+        val distro = Distros.ALPINE
+        if (!installer.isInstalled(distro)) {
+            assertTrue("distro install failed", installer.install(distro) { })
+        }
+        val rootfs = installer.rootfsDir(distro)
+
+        XServer.start(appCtx)
+        val sock = File(XServer.socketDir(appCtx), "X0").absolutePath
+        val deadline = System.currentTimeMillis() + 60_000
+        var up = false
+        while (System.currentTimeMillis() < deadline) {
+            val ls = try { device.executeShellCommand("run-as dev.phonelinux.proto ls $sock 2>&1") } catch (t: Throwable) { "" }
+            if (ls.trim() == sock) { up = true; break }
+            Thread.sleep(1_000)
+        }
+        assertTrue("X socket never appeared", up)
+
+        if (!GuestDesktop.hasDesktopShell(rootfs)) {
+            var add = GuestDesktop.provisionDesktopShell(appCtx, rootfs)
+            if (add.exitCode != 0) {
+                Thread.sleep(5_000)
+                add = GuestDesktop.provisionDesktopShell(appCtx, rootfs)
+            }
+            assertTrue("apk add desktop shell failed (exit " + add.exitCode + ")\n" + (add.stdout + add.stderr).takeLast(1200), add.exitCode == 0)
+        }
+        assertTrue("desktop shell missing after provisioning", GuestDesktop.hasDesktopShell(rootfs))
+
+        val session = GuestDesktop.launchDesktopSession(appCtx, rootfs)
+        try {
+            appCtx.startActivity(
+                Intent(appCtx, com.termux.x11.MainActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+            Thread.sleep(25_000)
+            fun desktopUp(): Boolean =
+                GuestDesktop.guestOk(appCtx, rootfs, "pgrep -x jwm || pgrep -x openbox || pgrep -x icewm || pgrep -x fluxbox") &&
+                    GuestDesktop.guestOk(appCtx, rootfs, "pgrep -x xterm || pgrep -x st")
+            var w = System.currentTimeMillis() + 90_000
+            var up1 = false
+            while (System.currentTimeMillis() < w) { if (desktopUp()) { up1 = true; break }; Thread.sleep(3_000) }
+            assertTrue("desktop never came up before restart test", up1 && session.isAlive)
+
+            // Destroy, then prove the guest is actually down: destroy() may
+            // orphan proot children, and leftovers would fake the restart.
+            session.destroy()
+            Thread.sleep(2_000)
+            GuestDesktop.guestOk(appCtx, rootfs,
+                "pkill -x jwm; pkill -x openbox; pkill -x icewm; pkill -x fluxbox; pkill -x st; pkill -x xterm; pkill pcmanfm; pkill tint2; true")
+            Thread.sleep(2_000)
+            val leftovers = GuestDesktop.guestOk(appCtx, rootfs,
+                "pgrep -x jwm || pgrep -x openbox || pgrep -x st || pgrep -x xterm")
+            android.util.Log.i("PHONEDIAG", "restart teardown: leftovers=" + leftovers)
+            assertTrue("session destroy left guest processes alive - teardown is broken, a real close would leak", !leftovers)
+            assertTrue("distro marker lost after session destroy - install is not persistent",
+                installer.isInstalled(distro))
+
+            val session2 = GuestDesktop.launchDesktopSession(appCtx, rootfs)
+            try {
+                Thread.sleep(25_000)
+                w = System.currentTimeMillis() + 90_000
+                var up2 = false
+                while (System.currentTimeMillis() < w) { if (desktopUp()) { up2 = true; break }; Thread.sleep(3_000) }
+                android.util.Log.i("PHONEDIAG", "restart phase: desktopBack=" + up2 + " session2Alive=" + session2.isAlive)
+                Shot.save("16-desktop-restart")
+                val rsLog = try { device.executeShellCommand("run-as dev.phonelinux.proto tail -c 2000 files/guest-desktop.log 2>&1") } catch (t: Throwable) { "" }
+                assertTrue("desktop did not return after session restart (session2Alive=" + session2.isAlive + "). Desktop log:\n" + rsLog, up2 && session2.isAlive)
+            } finally {
+                session2.destroy()
+            }
+        } finally {
             session.destroy()
         }
     }
