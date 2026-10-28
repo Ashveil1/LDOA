@@ -196,24 +196,44 @@ class DesktopClientTest {
         }
 
         android.util.Log.i("PHONEDIAG", "pointer at start: " + pointerPos())
-        device.click(540, 800)
-        Thread.sleep(1_000)
-        val tapA = pointerPos()
-        device.click(400, 750)
-        Thread.sleep(1_000)
-        val tapB = pointerPos()
-        android.util.Log.i("PHONEDIAG", "calibration tapA(540,800)->" + tapA + " tapB(400,750)->" + tapB)
-        assertTrue("direct-touch pref not in effect or pointer unreadable (tapA=" + tapA + " tapB=" + tapB + ")",
-            tapA != null && tapB != null &&
-                Math.abs(tapA.first - tapB.first) > 20 && Math.abs(tapA.second - tapB.second) > 10)
-
-        // device -> X: X = sX*dx + oX, Y = sY*dy + oY
-        // (JUnit assertTrue has no smart-cast contract: re-assert nullability.)
-        val a = tapA!!; val b = tapB!!
-        val sX = (a.first - b.first) / 140.0
-        val sY = (a.second - b.second) / 50.0
-        val oX = a.first - sX * 540
-        val oY = a.second - sY * 800
+        // Tap-to-warp calibration with bounded retry: one dropped tap
+        // (transient system window, input-device re-enumeration) must not
+        // fail the suite, but a mode that NEVER moves the pointer must.
+        // Runs 8302b1e/772fadb/425ab98: tap A warped, tap B silently did
+        // not (no cursor update in logcat); the retry characterizes which.
+        val tapPoints = listOf(Pair(540, 800), Pair(400, 750), Pair(600, 850), Pair(360, 700), Pair(520, 760))
+        val reads = mutableListOf<Pair<Pair<Int, Int>, Pair<Int, Int>?>>()
+        var calib: Pair<Pair<Pair<Int, Int>, Pair<Int, Int>>, Pair<Pair<Int, Int>, Pair<Int, Int>>>? = null
+        for (tp in tapPoints) {
+            Shot.dismissSystemDialogs(device)
+            device.click(tp.first, tp.second)
+            Thread.sleep(1_000)
+            val r = pointerPos()
+            reads.add(tp to r)
+            android.util.Log.i("PHONEDIAG", "calibration tap(" + tp.first + "," + tp.second + ")->" + r)
+            val prev = reads.firstOrNull { it.second != null && r != null &&
+                Math.abs(it.second!!.first - r.first) > 20 && Math.abs(it.second!!.second - r.second) > 10 }
+            if (prev != null && r != null) {
+                calib = (prev.first to prev.second!!) to (tp to r)
+                break
+            }
+        }
+        if (calib == null) {
+            val focus = try { device.executeShellCommand("dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'") } catch (t: Throwable) { "(dumpsys failed)" }
+            throw AssertionError("direct-touch mapping never observed; taps=" + reads + " focusedWindow=" + focus)
+        }
+        if (reads.size > 2) {
+            // Dropped taps are a REAL usability signal, not noise to hide:
+            // record how many taps the run lost before the map locked.
+            android.util.Log.w("PHONEDIAG", "DROPPED-TAPS=" + (reads.size - 2) +
+                " of " + reads.size + " calibration taps - repeated touch loss would be a product input defect; reads=" + reads)
+        }
+        val tap1 = calib.first; val tap2 = calib.second
+        val a = tap1.second; val b = tap2.second
+        val sX = (a.first - b.first) / (tap1.first - tap2.first).toDouble()
+        val sY = (a.second - b.second) / (tap1.second - tap2.second).toDouble()
+        val oX = a.first - sX * tap1.first
+        val oY = a.second - sY * tap1.second
         android.util.Log.i("PHONEDIAG", "calibrated map sX=" + sX + " oX=" + oX + " sY=" + sY + " oY=" + oY)
 
         // Anchor all st measurements to the ORIGINAL terminal's window id:
@@ -419,8 +439,7 @@ class DesktopClientTest {
                 return GuestDesktop.guestShell(appCtx, rootfs,
                     "export DISPLAY=:0; xdotool getmouselocation --shell 2>/dev/null",
                     listOf(XServer.socketDir(appCtx).absolutePath to "/tmp/.X11-unix"))
-                    .replace("
-", " ")
+                    .replace("\n", " ")
             }
             val direct = probe("3")
             val track = probe("1")

@@ -213,12 +213,23 @@ class UiFlowTest {
             if (t != null && t.contains(needle.take(6))) break
             Thread.sleep(300)
         }
-        val send = device.wait(Until.findObject(By.desc("terminal-send")), 5_000)
+        var send = device.wait(Until.findObject(By.desc("terminal-send")), 5_000)
         assertNotNull("send button for: " + cmd, send)
         val enableDeadline = System.currentTimeMillis() + 5_000
-        while (System.currentTimeMillis() < enableDeadline && !send.isEnabled) Thread.sleep(300)
-        assertTrue("send button never enabled for: " + cmd, send.isEnabled)
-        send.click()
+        var sendEnabled = false
+        while (System.currentTimeMillis() < enableDeadline) {
+            // Re-query on staleness: the Compose row recomposes when the
+            // field text lands and the held node goes stale mid-poll
+            // (runs 8302b1e/425ab98: StaleObjectException at this poll).
+            try { if (send.isEnabled) { sendEnabled = true; break } }
+            catch (e: androidx.test.uiautomator.StaleObjectException) { }
+            Thread.sleep(300)
+            send = device.findObject(By.desc("terminal-send")) ?: send
+        }
+        assertTrue("send button never enabled for: " + cmd, sendEnabled)
+        try { send.click() } catch (e: androidx.test.uiautomator.StaleObjectException) {
+            device.findObject(By.desc("terminal-send")).click()
+        }
         // Input behavior: Run must clear the field.
         val clearDeadline = System.currentTimeMillis() + 5_000
         var cleared = false
