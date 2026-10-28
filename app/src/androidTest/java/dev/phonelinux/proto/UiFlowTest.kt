@@ -249,8 +249,13 @@ class UiFlowTest {
         var ok = false
         while (System.currentTimeMillis() < deadline) {
             Shot.dismissSystemDialogs(device)
-            val n = device.findObject(By.desc("terminal-output"))
-            if (n != null && n.text != null && n.text.contains(needle)) { ok = true; break }
+            try {
+                val n = device.findObject(By.desc("terminal-output"))
+                if (n != null && n.text != null && n.text.contains(needle)) { ok = true; break }
+            } catch (e: androidx.test.uiautomator.StaleObjectException) {
+                // node vanished mid-read (ANR-storm churn, run 70d796c) - the
+                // poll loop retries with a fresh node on the next pass.
+            }
             Thread.sleep(1_000)
         }
         assertTrue("output for '" + cmd + "' never contained '" + needle + "'", ok)

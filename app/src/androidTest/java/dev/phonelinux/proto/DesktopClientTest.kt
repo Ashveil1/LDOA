@@ -330,12 +330,23 @@ class DesktopClientTest {
         assertTrue("menu popup geometry unparsable: " + newLines[0], gm != null)
         val g0 = gm!!.groupValues
         val itemDev = devFor(g0[3].toInt() + g0[1].toInt() / 2.0, g0[4].toInt() + 14.0)
-        device.click(itemDev.first, itemDev.second)
-        Thread.sleep(4_000)
+        var stCountAfter = -1
+        for (attempt in 1..3) {
+            Shot.dismissSystemDialogs(device)
+            Thread.sleep(500)
+            device.click(itemDev.first, itemDev.second)
+            Thread.sleep(4_000)
+            stCountAfter = xwin("xwininfo -root -tree | grep -c st-256color").trim().toIntOrNull() ?: -1
+            if (stCountAfter > stCountBefore) break
+            android.util.Log.i("PHONEDIAG", "menu-launch attempt " + attempt + ": st count before=" + stCountBefore + " after=" + stCountAfter)
+            // menu closes on the failed tap; reopen for the retry
+            Shot.dismissSystemDialogs(device)
+            device.click(menuBtn.first, menuBtn.second)
+            Thread.sleep(2_000)
+        }
         Shot.save("11-menu-launched-terminal")
-        val stCountAfter = xwin("xwininfo -root -tree | grep -c st-256color").trim().toIntOrNull() ?: -1
         android.util.Log.i("PHONEDIAG", "menu-launch: st count before=" + stCountBefore + " after=" + stCountAfter + " itemTap dev=" + itemDev)
-        assertTrue("menu Terminal item did not launch a new st (count before=" + stCountBefore + " after=" + stCountAfter + ")",
+        assertTrue("menu Terminal item did not launch a new st after 3 attempts (count before=" + stCountBefore + " after=" + stCountAfter + ")",
             stCountAfter > stCountBefore)
 
         // 4. Resize via touch. The jwm frame rect and title buttons are
