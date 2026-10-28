@@ -203,9 +203,9 @@ class UbuntuGnomeSpikeTest {
         // (config change) re-runs its cold-start effect with a fresh VM ->
         // openDesktop must fire and find the session ALREADY RUNNING
         // (idempotent: bring forward, no second gnome-session on :0).
-        // (A true process-kill cold start is host territory, but AGP
-        // uninstalls the app+data after the task, so the honest in-process
-        // proof is the recreated-activity decision path + pref survival.)
+        // Supplementary signal only: the GATE is the workflow's host-side
+        // force-stop + relaunch probe (manual install, no AGP teardown)
+        // with a fresh session marker and post-settle pixels.
         device.pressBack() // leave the X11 surface -> MainActivity resumes
         Thread.sleep(2_000)
         device.setOrientationLandscape()
