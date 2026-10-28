@@ -129,7 +129,8 @@ class UbuntuGnomeSpikeTest {
          *  the frame carries no "nautilus" name - the visible CSD window
          *  is found via its ("nautilus" "Nautilus") class in the full
          *  tree, so walk -tree and filter by map state + size. */
-        fun nauVisible(): Triple<String, Int, Int>? {
+        class NauWin(val id: String, val x: Int, val y: Int, val w: Int, val h: Int)
+        fun nauVisible(): NauWin? {
             for (id in windowIds("nautilus")) {
                 val st = xwin("xwininfo -id " + id + " -stats")
                 val map = Regex("Map State: (\\w+)").find(st)?.groupValues?.get(1)
@@ -138,10 +139,22 @@ class UbuntuGnomeSpikeTest {
                 if (map == "IsViewable" && w > 200 && h > 200) {
                     val x = Regex("Absolute upper-left X:\\s+(-?\\d+)").find(st)?.groupValues?.get(1)?.toIntOrNull() ?: 0
                     val y = Regex("Absolute upper-left Y:\\s+(-?\\d+)").find(st)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-                    return Triple(id, x, y)
+                    return NauWin(id, x, y, w, h)
                 }
             }
             return null
+        }
+
+        /** GTK CSD windows draw a large input-transparent drop shadow INSIDE
+         *  the X window: run 40695193086 measured visible top-left at
+         *  xwininfo pos + (63,55). Grabbing without the extents lands in the
+         *  shadow zone and moves nothing. _GTK_FRAME_EXTENTS corrects it. */
+        fun frameExtents(id: String): List<Int> {
+            val out = xwin("xprop -id " + id + " _GTK_FRAME_EXTENTS _NET_FRAME_EXTENTS 2>/dev/null || true")
+            val nums = Regex("-?\\d+").findAll(out.replace(Regex("_NET_FRAME_EXTENTS.*"), ""))
+                .map { it.value.toInt() }.toList()
+            Log.i(TAG, "dock-interact: frame extents for " + id + ": " + out.replace("\n", " | ").take(160))
+            return if (nums.size >= 4) nums.take(4) else listOf(0, 0, 0, 0)
         }
 
         // Dismiss the screen-lock notification banner (top center) so it
@@ -177,7 +190,7 @@ class UbuntuGnomeSpikeTest {
             val openDeadline = System.currentTimeMillis() + 90_000
             while (System.currentTimeMillis() < openDeadline) {
                 val vis = nauVisible()
-                if (vis != null && vis.first !in beforeIds) { nauWid = vis.first; break }
+                if (vis != null && vis.id !in beforeIds) { nauWid = vis.id; break }
                 val proc = xwin("pgrep -x nautilus || true").trim()
                 if (proc.isNotEmpty()) Log.i(TAG, "dock-interact: nautilus process alive pid=" + proc + " (no visible window yet)")
                 Thread.sleep(3_000)
@@ -187,9 +200,10 @@ class UbuntuGnomeSpikeTest {
         Shot.save("22-ubuntu-dock-files-opened")
         assertTrue("finger press on the dock Files icon did not open a nautilus window (2 positions tried)", nauWid != null)
 
-        val wBefore = nauVisible()?.let { Pair(it.second, it.third) }
-        Log.i(TAG, "dock-interact: nautilus visible wid=" + nauWid + " pos=" + wBefore)
-        assertTrue("nautilus window geometry unreadable", wBefore != null)
+        val winBefore = nauVisible()
+        val wBefore = winBefore?.let { Pair(it.x, it.y) }
+        Log.i(TAG, "dock-interact: nautilus visible wid=" + nauWid + " geom=" + (winBefore?.let { it.x.toString() + "," + it.y + " " + it.w + "x" + it.h }))
+        assertTrue("nautilus window geometry unreadable", winBefore != null)
 
         // X-to-device coordinate mapping: UNKNOWN a priori (run 40686393933
         // grabbed wallpaper - guest (216,111) was not the headerbar in
@@ -206,29 +220,38 @@ class UbuntuGnomeSpikeTest {
             val y = Regex("Y=(-?\\d+)").find(out)?.groupValues?.get(1)?.toIntOrNull()
             return if (x != null && y != null) Pair(x, y) else null
         }
-        val p1 = probeX(300, 900)
-        val p2 = probeX(700, 1500)
-        Log.i(TAG, "dock-interact: mapping probes dev(300,900)->" + p1 + " dev(700,1500)->" + p2)
+        val p1 = probeX(300, 1200)
+        val p2 = probeX(700, 1700)
+        Log.i(TAG, "dock-interact: mapping probes dev(300,1200)->" + p1 + " dev(700,1700)->" + p2)
         fun mapToDevice(x: Int, y: Int): Pair<Int, Int>? {
             if (p1 == null || p2 == null) return null
             val ax = (700 - 300).toDouble() / (p2.first - p1.first)
             val bx = 300 - ax * p1.first
-            val ay = (1500 - 900).toDouble() / (p2.second - p1.second)
-            val by = 900 - ay * p1.second
+            val ay = (1700 - 1200).toDouble() / (p2.second - p1.second)
+            val by = 1200 - ay * p1.second
             return Pair((ax * x + bx).toInt(), (ay * y + by).toInt())
         }
-        // Headerbar (CSD) drag: grab inside the window top area, off-center
-        // to avoid the path bar/search button, move up-left modestly.
-        val grab = mapToDevice(wBefore!!.first + 150, wBefore.second + 25)
+        // Headerbar (CSD) drag: grab the RIGHT side of the visible
+        // headerbar (empty stretch between the path bar and the view
+        // buttons), corrected by _GTK_FRAME_EXTENTS so the finger lands on
+        // the visible bar, not the input-transparent shadow margin.
+        val fe = frameExtents(nauWid!!)
+        val visX = winBefore!!.x + fe[0]
+        val visY = winBefore.y + fe[2]
+        val visW = winBefore.w - fe[0] - fe[1]
+        val grabGuestX = visX + visW - 200
+        val grabGuestY = visY + 20
+        val grab = mapToDevice(grabGuestX, grabGuestY)
         assertTrue("X-to-device mapping unavailable for drag (probes=" + p1 + "," + p2 + ")", grab != null)
-        Log.i(TAG, "dock-interact: drag grab guest(" + (wBefore.first + 150) + "," + (wBefore.second + 25) + ") -> dev " + grab)
+        Log.i(TAG, "dock-interact: drag grab guest(" + grabGuestX + "," + grabGuestY + ") vis=(" + visX + "," + visY + " w=" + visW + ") -> dev " + grab)
         device.swipe(grab!!.first, grab.second, grab.first - 60, grab.second + 120, 40)
         Thread.sleep(2_000)
         Shot.save("23-ubuntu-window-dragged")
-        val wAfter = nauVisible()?.let { Pair(it.second, it.third) }
+        val wAfter = nauVisible()?.let { Pair(it.x, it.y) }
         Log.i(TAG, "dock-interact: dragged from=" + wBefore + " to=" + wAfter)
         assertTrue("nautilus window did not move on finger drag (before=" + wBefore + " after=" + wAfter + ")",
-            wAfter != null && (Math.abs(wAfter.first - wBefore.first) > 50 || Math.abs(wAfter.second - wBefore.second) > 50))
+            wAfter != null && wBefore != null &&
+                (Math.abs(wAfter.first - wBefore.first) > 50 || Math.abs(wAfter.second - wBefore.second) > 50))
         Log.i(TAG, "UBUNTU-GNOME-INTERACTION-OK dock tap opened Files; finger drag moved the window")
 
         // 4. RESTART persistence: kill the whole session, relaunch, the
