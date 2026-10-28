@@ -2,10 +2,10 @@
 # Dispatch-only: never runs on push. Answers, with evidence:
 #   1. actual host arch + KVM presence
 #   2. whether Google's Android emulator package exists for linux-arm64
-#      (research says NO - verify, don't assume)
 #   3. HOST-LEVEL partial evidence only: our exact pinned Ubuntu Base 24.04.5
-#      arm64 rootfs executing under the runner's own proot (real aarch64 guest
-#      execution of the tarball; NOT our packaged Android proot, NOT Android).
+#      arm64 rootfs executing on real aarch64 (chroot = kernel-native;
+#      distro proot attempt kept as diagnostic after round-1 segfault).
+#      NOT our packaged Android proot, NOT an Android runtime.
 name: arm-probe
 on:
   workflow_dispatch:
@@ -27,11 +27,17 @@ jobs:
           mkdir -p /tmp/sdk/cmdline-tools && unzip -q /tmp/cmdtools.zip -d /tmp/sdk/cmdline-tools && mv /tmp/sdk/cmdline-tools/cmdline-tools /tmp/sdk/cmdline-tools/latest
           yes | /tmp/sdk/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null 2>&1 || true
           /tmp/sdk/cmdline-tools/latest/bin/sdkmanager --list 2>/dev/null | grep -i 'emulator' || echo "PROBE-EMULATOR: no emulator package listed for this host"
-      - name: Pinned Ubuntu Base arm64 rootfs under host proot (host-level evidence only)
+      - name: Pinned Ubuntu Base arm64 rootfs - host-level execution evidence
         run: |
-          sudo apt-get install -y -qq proot >/dev/null
+          sudo apt-get install -y -qq proot >/dev/null 2>&1 || true
+          proot --version || true
           cd /tmp
           curl -sSL -o ubuntu-base.tar.gz http://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz
           echo "a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2  ubuntu-base.tar.gz" | sha256sum -c - || { echo "PROBE-ROOTFS: sha256 mismatch"; exit 1; }
-          mkdir rootfs && tar -xzf ubuntu-base.tar.gz -C rootfs
-          proot -0 -R /tmp/rootfs /bin/bash -c 'uname -m; head -2 /etc/os-release; apt-get update -qq 2>&1 | tail -2 && echo PROBE-APT: apt-get update OK on aarch64 guest'
+          rm -rf rootfs && mkdir rootfs && tar -xzf ubuntu-base.tar.gz -C rootfs
+          sudo cp -L /etc/resolv.conf rootfs/etc/resolv.conf || true
+          sudo mount --bind /dev rootfs/dev
+          sudo mount --bind /proc rootfs/proc
+          sudo mount --bind /sys rootfs/sys
+          sudo chroot /tmp/rootfs /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/bash -c 'uname -m && head -2 /etc/os-release && apt-get update -qq 2>&1 | tail -3 && echo PROBE-CHROOT-APT: OK' || echo "PROBE-CHROOT-APT: FAILED rc=$?"
+          proot -0 -r /tmp/rootfs -b /dev -b /proc -b /sys /bin/bash -c 'uname -m && echo PROBE-PROOT: OK' || echo "PROBE-PROOT: failed rc=$?"
