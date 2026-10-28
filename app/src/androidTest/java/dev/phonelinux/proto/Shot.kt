@@ -95,19 +95,29 @@ object Shot {
 
         val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
         val total = (b64.length + CHUNK - 1) / CHUNK
+        // The sendStatus backup channel rides UTP's per-test result event;
+        // a test with many shots exceeded gRPC's 4MB message cap and failed
+        // the whole task AFTER 9/9 tests passed (run 40678896241). Logcat is
+        // the proven channel (every artifact set complete), so sendStatus is
+        // opt-in via -e shot_send_status true for non-UTP lanes.
+        val sendStatus = "true" == instr.arguments.getString("shot_send_status")
         var seq = 0
         while (seq < total) {
             val end = minOf((seq + 1) * CHUNK, b64.length)
             val chunk = b64.substring(seq * CHUNK, end)
             android.util.Log.i("PHONESHOT", name + "|" + String.format("%04d|%04d|", seq, total) + chunk)
-            val bundle = Bundle()
-            bundle.putString("shot_b64_" + name + "_" + String.format("%04d", seq), chunk)
-            instr.sendStatus(2, bundle)
+            if (sendStatus) {
+                val bundle = Bundle()
+                bundle.putString("shot_b64_" + name + "_" + String.format("%04d", seq), chunk)
+                instr.sendStatus(2, bundle)
+            }
             seq++
         }
-        val done = Bundle()
-        done.putString("shot_b64_" + name + "_count", total.toString())
-        instr.sendStatus(2, done)
+        if (sendStatus) {
+            val done = Bundle()
+            done.putString("shot_b64_" + name + "_count", total.toString())
+            instr.sendStatus(2, done)
+        }
         android.util.Log.i("PHONESHOT", name + " exported: " + bytes.size + " bytes, " + total + " chunks")
     }
 }
