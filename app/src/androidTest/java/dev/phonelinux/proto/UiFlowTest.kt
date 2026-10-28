@@ -229,22 +229,32 @@ class UiFlowTest {
             send = device.findObject(By.desc("terminal-send")) ?: send
         }
         assertTrue("send button never enabled for: " + cmd, sendEnabled)
-        try { send.click() } catch (e: androidx.test.uiautomator.StaleObjectException) {
-            // A system dialog (launcher ANR) can hide the whole app tree:
-            // the bare re-find then returns null and NPEs (run 1a81e3d).
-            Shot.dismissSystemDialogs(device)
-            val send2 = device.wait(Until.findObject(By.desc("terminal-send")), 10_000)
-            assertTrue("send button never re-found after stale node", send2 != null)
-            send2!!.click()
-        }
-        // Input behavior: Run must clear the field.
-        val clearDeadline = System.currentTimeMillis() + 5_000
+        // Input behavior: Run must clear the field. The click can also be
+        // swallowed whole by an ANR dialog (run fa391df: click "succeeded",
+        // field never cleared, next shot shows a healthy app) - so verify
+        // the EFFECT and re-click with dismissal, bounded 3 attempts.
         var cleared = false
-        while (System.currentTimeMillis() < clearDeadline) {
-            if (field.text.isNullOrEmpty()) { cleared = true; break }
-            Thread.sleep(300)
+        for (attempt in 1..3) {
+            try { send.click() } catch (e: androidx.test.uiautomator.StaleObjectException) {
+                // A system dialog (launcher ANR) can hide the whole app tree:
+                // the bare re-find then returns null and NPEs (run 1a81e3d).
+                Shot.dismissSystemDialogs(device)
+                val send2 = device.wait(Until.findObject(By.desc("terminal-send")), 10_000)
+                assertTrue("send button never re-found after stale node", send2 != null)
+                send2!!.click()
+            }
+            val clearDeadline = System.currentTimeMillis() + 5_000
+            while (System.currentTimeMillis() < clearDeadline) {
+                try { if (field.text.isNullOrEmpty()) { cleared = true; break } }
+                catch (e: androidx.test.uiautomator.StaleObjectException) { }
+                Thread.sleep(300)
+            }
+            if (cleared) break
+            android.util.Log.i("PHONEDIAG", "run click attempt " + attempt + " did not clear the field - dismissing + retry")
+            Shot.dismissSystemDialogs(device)
+            send = device.wait(Until.findObject(By.desc("terminal-send")), 5_000) ?: send
         }
-        assertTrue("input field not cleared after Run", cleared)
+        assertTrue("input field not cleared after Run (3 attempts)", cleared)
         val deadline = System.currentTimeMillis() + 90_000
         var ok = false
         while (System.currentTimeMillis() < deadline) {
