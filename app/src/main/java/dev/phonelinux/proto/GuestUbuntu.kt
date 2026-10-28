@@ -142,6 +142,17 @@ object GuestUbuntu {
             chmod u+s /usr/lib/dbus-1.0/dbus-daemon-launch-helper 2>/dev/null
             mkdir -p /run/dbus
             dbus-daemon --system --fork 2>/dev/null || service dbus start 2>/dev/null
+            # FRESH session bus per launch: a killed session's bus address
+            # lingers in the X root window (_DBUS_SESSION_BUS_* properties)
+            # while the X server keeps running, and the next session then
+            # gets "Connection refused" on the dead address - shell never
+            # starts (evidence: run 40729917335, proc alive, no shell 300s;
+            # the host probe's fresh-X session came up in ~35s). Clear the
+            # stale properties and launch our own bus for this session.
+            xprop -root -remove _DBUS_SESSION_BUS_ADDRESS 2>/dev/null
+            xprop -root -remove _DBUS_SESSION_BUS_PID 2>/dev/null
+            eval $(dbus-launch --sh-syntax) 2>&1
+            echo "gnome-launch: session bus ${'$'}DBUS_SESSION_BUS_ADDRESS"
             echo "gnome-launch: trying gnome-session --session=ubuntu (top bar + ubuntu-dock + yaru)"
             gnome-session --session=ubuntu 2>&1 &
             GSPID=${'$'}!
