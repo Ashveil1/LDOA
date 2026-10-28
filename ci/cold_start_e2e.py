@@ -41,6 +41,23 @@ def log(msg):
 
 def fail(msg):
     log("FAIL: " + msg)
+    # Evidence at the failure moment: UI tree + pixels + app log tail.
+    try:
+        xml = dump_xml()
+        os.makedirs("screenshots", exist_ok=True)
+        open("screenshots/coldstart-failure-ui.xml", "w").write(xml)
+        log("failure UI tree saved (" + str(len(xml)) + " bytes)")
+    except Exception as e:
+        log("failure UI dump failed: " + str(e))
+    try:
+        shot("coldstart-failure")
+    except Exception as e:
+        log("failure screencap failed: " + str(e))
+    try:
+        tail = shell("logcat -d -t 80 -s PhoneLinuxX PhoneLinuxSpike AndroidRuntime", 30).stdout
+        open("screenshots/coldstart-failure-logcat.txt", "w").write(tail)
+    except Exception as e:
+        log("failure logcat failed: " + str(e))
     sys.exit(1)
 
 
@@ -102,9 +119,32 @@ r = adb("install", "-r", APK, timeout=300)
 if "Success" not in r.stdout + r.stderr:
     fail("adb install: %s %s" % (r.stdout.strip(), r.stderr.strip()))
 
+def tap_first_match(patterns, timeout_s):
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        xml = dump_xml()
+        for pat in patterns:
+            m = re.search(pat, xml)
+            if m:
+                x1, y1, x2, y2 = map(int, m.groups())
+                shell("input tap %d %d" % ((x1 + x2) // 2, (y1 + y2) // 2))
+                return pat
+        time.sleep(2)
+    return ""
+
+
 log("cold start #1: launch app")
 shell("am start -n %s/.MainActivity" % PKG)
 time.sleep(6)
+# First launch requests POST_NOTIFICATIONS up front (MainActivity.onCreate,
+# SDK>=33): the system permission dialog covers the picker. Answer it like a
+# user would, then the picker is reachable. (Run 40629958216: install button
+# never appeared with the dialog unanswered.)
+hit = tap_first_match([
+    r'<node[^>]*resource-id="[^"]*permission_allow_button"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
+    r'<node[^>]*text="Allow"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
+], 30)
+log("permission dialog handled: " + (hit if hit else "no dialog shown"))
 if not tap_desc("install-distro", 60):
     fail("install button never appeared")
 log("waiting for distro install marker (up to 15 min)")
