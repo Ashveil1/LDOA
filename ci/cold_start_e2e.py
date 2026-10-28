@@ -96,7 +96,10 @@ def wait_marker(timeout_s):
 def wait_chosen_wm(timeout_s):
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        m = re.search(r"chosen-wm=(\w+)", runas("tail -c 3000 %s 2>&1" % DESKLOG))
+        # 16KB, not 3KB: after chosen-wm the session script + gtk/dbus client
+        # startup noise can append several KB within one 10s poll cycle and
+        # push the marker out of a small tail window (spurious timeout).
+        m = re.search(r"chosen-wm=(\w+)", runas("tail -c 16384 %s 2>&1" % DESKLOG))
         if m:
             return m.group(1)
         time.sleep(10)
