@@ -1,0 +1,37 @@
+# Bounded probe of the free Linux ARM runner route (user-requested).
+# Dispatch-only: never runs on push. Answers, with evidence:
+#   1. actual host arch + KVM presence
+#   2. whether Google's Android emulator package exists for linux-arm64
+#      (research says NO - verify, don't assume)
+#   3. HOST-LEVEL partial evidence only: our exact pinned Ubuntu Base 24.04.5
+#      arm64 rootfs executing under the runner's own proot (real aarch64 guest
+#      execution of the tarball; NOT our packaged Android proot, NOT Android).
+name: arm-probe
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - name: Host facts
+        run: |
+          uname -m
+          lscpu | head -8
+          ls -la /dev/kvm 2>/dev/null || echo "PROBE-KVM: absent"
+      - name: Android emulator availability on linux-arm64
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq unzip openjdk-17-jre-headless >/dev/null
+          curl -sSL -o /tmp/cmdtools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          mkdir -p /tmp/sdk/cmdline-tools && unzip -q /tmp/cmdtools.zip -d /tmp/sdk/cmdline-tools && mv /tmp/sdk/cmdline-tools/cmdline-tools /tmp/sdk/cmdline-tools/latest
+          yes | /tmp/sdk/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null 2>&1 || true
+          /tmp/sdk/cmdline-tools/latest/bin/sdkmanager --list 2>/dev/null | grep -i 'emulator' || echo "PROBE-EMULATOR: no emulator package listed for this host"
+      - name: Pinned Ubuntu Base arm64 rootfs under host proot (host-level evidence only)
+        run: |
+          sudo apt-get install -y -qq proot >/dev/null
+          cd /tmp
+          curl -sSL -o ubuntu-base.tar.gz http://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz
+          echo "a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2  ubuntu-base.tar.gz" | sha256sum -c - || { echo "PROBE-ROOTFS: sha256 mismatch"; exit 1; }
+          mkdir rootfs && tar -xzf ubuntu-base.tar.gz -C rootfs
+          proot -0 -R /tmp/rootfs /bin/bash -c 'uname -m; head -2 /etc/os-release; apt-get update -qq 2>&1 | tail -2 && echo PROBE-APT: apt-get update OK on aarch64 guest'
