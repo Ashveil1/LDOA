@@ -230,10 +230,10 @@ class DesktopClientTest {
         }
         val tap1 = calib.first; val tap2 = calib.second
         val a = tap1.second; val b = tap2.second
-        val sX = (a.first - b.first) / (tap1.first - tap2.first).toDouble()
-        val sY = (a.second - b.second) / (tap1.second - tap2.second).toDouble()
-        val oX = a.first - sX * tap1.first
-        val oY = a.second - sY * tap1.second
+        val sX = (a.first - b.first) / (tap1.first.first - tap2.first.first).toDouble()
+        val sY = (a.second - b.second) / (tap1.first.second - tap2.first.second).toDouble()
+        val oX = a.first - sX * tap1.first.first
+        val oY = a.second - sY * tap1.first.second
         android.util.Log.i("PHONEDIAG", "calibrated map sX=" + sX + " oX=" + oX + " sY=" + sY + " oY=" + oY)
 
         // Anchor all st measurements to the ORIGINAL terminal's window id:
