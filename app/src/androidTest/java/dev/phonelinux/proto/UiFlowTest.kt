@@ -211,8 +211,10 @@ class UiFlowTest {
         field.setText(cmd)
         val typeDeadline = System.currentTimeMillis() + 8_000
         while (System.currentTimeMillis() < typeDeadline) {
-            val t = field.text
-            if (t != null && t.contains(needle.take(6))) break
+            try {
+                val t = field.text
+                if (t != null && t.contains(needle.take(6))) break
+            } catch (e: androidx.test.uiautomator.StaleObjectException) { }
             Thread.sleep(300)
         }
         var send = device.wait(Until.findObject(By.desc("terminal-send")), 5_000)
