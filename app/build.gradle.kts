@@ -15,6 +15,10 @@ android {
         versionCode = 1
         versionName = "0.1.0-spike"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // Ship only ABIs with a complete native set (proot + loaders +
+        // lorie); the armeabi-v7a/x86 builds lack proot and would install
+        // fine but fail at runtime. Better: no install on those devices.
+        ndk { abiFilters += setOf("arm64-v8a", "x86_64") }
     }
 
     buildTypes {

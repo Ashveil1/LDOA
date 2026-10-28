@@ -64,11 +64,14 @@ jobs:
             # builds never show these. Foreground (our app) ANRs still show.
             adb -s emulator-5554 shell settings put global anr_show_background 0 || true
             # The Pixel Launcher wedges under our desktop-test CPU load and
-            # then ANR-dialog-storms over the app, flaking UI tests. It is
-            # not needed during instrumentation; force-stop it for the run.
+            # then ANR-dialog-storms over the app, flaking UI tests.
             # (Observed: repeated "Application Not Responding:
-            # com.google.android.apps.nexuslauncher" in logcat.)
-            adb -s emulator-5554 shell am force-stop com.google.android.apps.nexuslauncher || true
+            # com.google.android.apps.nexuslauncher" in logcat.) Real user
+            # devices run a normal launcher, so suppression is a SHIPPING
+            # CAVEAT: ci/launcher-suppression.conf gates it ("on" suppresses
+            # for flake-free iteration, "off" qualifies the normal-launcher
+            # shipping path).
+            if [ "$(cat ci/launcher-suppression.conf 2>/dev/null || echo on)" = "on" ]; then adb -s emulator-5554 shell am force-stop com.google.android.apps.nexuslauncher || true; echo "launcher suppression: ON (emulator flake workaround)"; else echo "launcher suppression: OFF - normal Pixel launcher active (shipping-path qualification)"; fi
             ./gradlew connectedDebugAndroidTest --info 2>&1 | tee /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
             grep -q "BUILD SUCCESSFUL" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
             adb -s emulator-5554 logcat -d > /tmp/shotlog.txt || true
