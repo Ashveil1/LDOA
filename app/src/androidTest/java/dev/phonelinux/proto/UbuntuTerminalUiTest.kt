@@ -32,13 +32,17 @@ class UbuntuTerminalUiTest {
         device.waitForIdle(2_000)
         Shot.dismissSystemDialogs(device)
 
-        val installBtn = device.wait(Until.findObject(By.desc("install-ubuntu")), 20_000)
-        assertNotNull("install-ubuntu button (picker must show the Ubuntu card)", installBtn)
-        shot(device, "20-ubuntu-picker")
-        installBtn.click()
-
-        val openBtn = device.wait(Until.findObject(By.desc("open-terminal-ubuntu")), 120_000)
-        assertNotNull("open-terminal-ubuntu clickable after install", openBtn)
+        // Ubuntu may already be installed (UbuntuBaseSpikeTest installs it in
+        // the same run): then the card shows open-terminal-ubuntu, no Install.
+        var openBtn = device.wait(Until.findObject(By.desc("open-terminal-ubuntu")), 5_000)
+        if (openBtn == null) {
+            val installBtn = device.wait(Until.findObject(By.desc("install-ubuntu")), 20_000)
+            assertNotNull("install-ubuntu button (picker must show the Ubuntu card)", installBtn)
+            shot(device, "20-ubuntu-picker")
+            installBtn.click()
+            openBtn = device.wait(Until.findObject(By.desc("open-terminal-ubuntu")), 120_000)
+        }
+        assertNotNull("open-terminal-ubuntu clickable", openBtn)
         shot(device, "21-ubuntu-installed")
         openBtn.click()
         assertNotNull("terminal input", device.wait(Until.findObject(By.desc("terminal-input")), 20_000))

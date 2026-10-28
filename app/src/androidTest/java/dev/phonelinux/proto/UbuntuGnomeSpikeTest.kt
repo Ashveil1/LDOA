@@ -25,7 +25,7 @@ class UbuntuGnomeSpikeTest {
     private val TAG = "PHONELINUX_UBUNTU"
 
     @Test
-    fun ubuntuGnomeSessionStarts() = runBlocking {
+    fun ubuntuGnomeSessionStarts(): Unit = runBlocking {
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
         val d = Distros.UBUNTU
         val installer = DistroInstaller(ctx)
