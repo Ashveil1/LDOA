@@ -289,22 +289,17 @@ class DesktopClientTest {
             val n = out.lines().mapNotNull { it.trim().toIntOrNull() }
             return if (n.size >= 4) intArrayOf(n[0], n[1], n[2], n[3]) else null
         }
-        fun frameGeom(): IntArray? {
-            val p = xwin("xwininfo -id " + stWid + " | grep 'Parent window id'")
-            val pw = Regex("0x[0-9a-fA-F]+").find(p)?.value ?: return null
-            val out = xwin("xwininfo -id " + pw + " -stats | grep -E 'Absolute upper-left|Width:|Height:' | awk '{print ${'$'}NF}'")
-            val n = out.lines().mapNotNull { it.trim().toIntOrNull() }
-            return if (n.size >= 4) intArrayOf(n[0], n[1], n[2], n[3]) else null
-        }
-        // 4a. Maximize: tap the jwm title-bar maximize button (right side
-        // of the title: close at -13, maximize at -36, minimize at -59
-        // from the frame's right edge) and expect a big geometry change.
+        // Frame offsets measured from the window tree: border 4px,
+        // title 27px -> frame = client + (-4, -27, +8, +31). Title
+        // buttons right-aligned: close at frame-right -13, maximize -36.
+        // 4a. Maximize: tap the title-bar maximize button and expect a
+        // big geometry change.
         val gHome0 = stGeom()
-        val fHome0 = frameGeom()
-        android.util.Log.i("PHONEDIAG", "resize: client=" + gHome0?.toList() + " frame=" + fHome0?.toList())
-        assertTrue("st frame unreadable for resize tests", gHome0 != null && fHome0 != null)
-        val gh = gHome0!!; val fh = fHome0!!
-        val maxBtn0 = devFor(fh[0] + fh[2] - 36.0, fh[1] + 13.0)
+        android.util.Log.i("PHONEDIAG", "resize: client=" + gHome0?.toList() +
+            " parentLine=" + xwin("xwininfo -id " + stWid + " | grep 'Parent window id'").trim())
+        assertTrue("st geometry unreadable for resize tests", gHome0 != null)
+        val gh = gHome0!!
+        val maxBtn0 = devFor(gh[0] + gh[2] + 4.0 - 36.0, gh[1] - 14.0)
         device.click(maxBtn0.first, maxBtn0.second)
         Thread.sleep(2_000)
         Shot.save("11b-st-maximized")
@@ -313,8 +308,8 @@ class DesktopClientTest {
         assertTrue("st did not maximize on title-button tap (before=" + gh.toList() + " after=" + gMax?.toList() + ") - possible mis-tap onto close if window is gone",
             gMax != null && gMax[2] > gh[2] + 100 && gMax[3] > gh[3] + 100)
         // 4b. Restore: tap the same button again, expect ~original size.
-        val fMax = frameGeom()!!
-        val maxBtn1 = devFor(fMax[0] + fMax[2] - 36.0, fMax[1] + 13.0)
+        val gm2 = gMax!!
+        val maxBtn1 = devFor(gm2[0] + gm2[2] + 4.0 - 36.0, gm2[1] - 14.0)
         device.click(maxBtn1.first, maxBtn1.second)
         Thread.sleep(2_000)
         val gRest = stGeom()
@@ -325,13 +320,12 @@ class DesktopClientTest {
         // 4c. Free resize: drag the measured frame corner with drag()
         // (long-press semantics; swipe() produced a no-op in run
         // bd799a0 despite a verified on-border grab point).
-        val fr = frameGeom()!!
-        val corner = devFor(fr[0] + fr[2] - 2.0, fr[1] + fr[3] - 2.0)
+        val corner = devFor(gr2[0] + gr2[2] + 2.0, gr2[1] + gr2[3] + 2.0)
         device.drag(corner.first, corner.second, corner.first - 120, corner.second - 100, 40)
         Thread.sleep(2_000)
         val gFree = stGeom()
         android.util.Log.i("PHONEDIAG", "free resize: corner dev=" + corner + " before=" + gr2.toList() + " after=" + gFree?.toList())
-        assertTrue("st did not resize on corner drag (frame=" + fr.toList() + " before=" + gr2.toList() + " after=" + gFree?.toList() + ")",
+        assertTrue("st did not resize on corner drag (before=" + gr2.toList() + " after=" + gFree?.toList() + ")",
             gFree != null &&
                 (Math.abs(gFree[2] - gr2[2]) > 40 || Math.abs(gFree[3] - gr2[3]) > 40))
 
