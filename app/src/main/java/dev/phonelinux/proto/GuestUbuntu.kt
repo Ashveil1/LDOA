@@ -81,27 +81,34 @@ object GuestUbuntu {
             export PLINUX_SESSION=desktop
             mkdir -p /tmp/xdg
             chmod 0700 /tmp/xdg
-            # EVIDENCE: dump the session definition + live gsettings values so
-            # the missing-dock/wallpaper cause is read from the guest, not
-            # guessed. Runs beside the session start, prints into the same log.
-            ( sleep 40
+            # EVIDENCE + BOUNDED FIX ATTEMPT: dump session state, then
+            # explicitly enable the ubuntu dock (enabled-extensions=@as []
+            # in run f81bd1a; wallpaper+top bar already render). Logged so
+            # the settled shot ties the dock's presence to this action.
+            ( sleep 25
               echo "=== gnome-diag begin ==="
               echo "XDG_CURRENT_DESKTOP=${'$'}XDG_CURRENT_DESKTOP"
-              echo "-- ubuntu.session --"
-              cat /usr/share/gnome-session/sessions/ubuntu.session 2>&1
-              echo "-- gsettings --"
+              echo "-- shell mode (before) --"
+              gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Properties.Get org.gnome.Shell Mode 2>&1
+              echo "-- enabled-extensions (before) --"
               gsettings get org.gnome.shell enabled-extensions 2>&1
+              echo "-- extensions on disk --"
+              ls /usr/share/gnome-shell/extensions/ 2>&1
+              echo "-- gnome-extensions list --"
+              gnome-extensions list 2>&1
+              echo "-- FIX ATTEMPT: enable ubuntu-dock --"
+              gsettings set org.gnome.shell enabled-extensions "['ubuntu-dock@ubuntu.com']" 2>&1; echo "gsettings-set rc=${'$'}?"
+              gnome-extensions enable ubuntu-dock@ubuntu.com 2>&1; echo "ext-enable rc=${'$'}?"
+              sleep 15
+              echo "-- enabled-extensions (after) --"
+              gsettings get org.gnome.shell enabled-extensions 2>&1
+              echo "-- shell mode (after) --"
+              gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Properties.Get org.gnome.Shell Mode 2>&1
+              echo "-- look --"
               gsettings get org.gnome.desktop.background picture-uri 2>&1
               gsettings get org.gnome.desktop.interface gtk-theme 2>&1
-              echo "-- backgrounds --"
-              ls /usr/share/backgrounds/ 2>&1 | head -20
-              echo "-- schema overrides --"
-              ls /usr/share/glib-2.0/schemas/ 2>&1 | grep -i override
-              echo "compiled-ubuntu-key-hits: ${'$'}(grep -c -a -i ubuntu /usr/share/glib-2.0/schemas/gschemas.compiled 2>/dev/null)"
               echo "-- gsd processes --"
               pgrep -a -f gsd 2>&1 || echo "no gsd processes"
-              echo "-- gnome-shell mode --"
-              gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Properties.Get org.gnome.Shell Mode 2>&1
               echo "=== gnome-diag end ==="
             ) &
             # Same identity fix as the Alpine session: GNOME components call
@@ -152,7 +159,6 @@ object GuestUbuntu {
         val pb = ProcessBuilder(
             File(nd, "libproot.so").absolutePath,
             "--link2symlink",
-            "-v", "5", // investigation: log syscall virtualization + failures
             "-0", // fake root: GNOME session components + dbus expect euid 0
             "-r", rootfs.absolutePath,
             "-b", "/dev", "-b", "/proc", "-b", "/sys",
