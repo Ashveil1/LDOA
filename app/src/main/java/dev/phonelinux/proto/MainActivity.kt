@@ -14,6 +14,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -41,10 +42,12 @@ private val TextDim = Color(0xFF9AA6C8)
 enum class Screen { PICKER, TERMINAL }
 
 class SpikeViewModel : ViewModel() {
-    var state by mutableStateOf<InstallState>(InstallState.NotInstalled)
+    val states: SnapshotStateMap<String, InstallState> = mutableStateMapOf()
     var log by mutableStateOf("")
     var busy by mutableStateOf(false)
     var screen by mutableStateOf(Screen.PICKER)
+
+    fun stateFor(d: Distro): InstallState = states[d.id] ?: InstallState.NotInstalled
 
     var terminal by mutableStateOf<TerminalSession?>(null)
     var termText by mutableStateOf("")
@@ -55,9 +58,9 @@ class SpikeViewModel : ViewModel() {
         busy = true
         val installer = DistroInstaller(ctx.applicationContext)
         viewModelScope.launch {
-            val ok = installer.install(d) { state = it }
+            val ok = installer.install(d) { states[d.id] = it }
             busy = false
-            log += if (ok) "[ok] ${d.displayName} installed\n" else "[fail] install failed\n"
+            log += if (ok) "[ok] ${d.displayName} installed\n" else "[fail] ${d.displayName} install failed\n"
         }
     }
 
@@ -103,26 +106,28 @@ class MainActivity : ComponentActivity() {
         if (!touchPrefs.contains("touchMode")) {
             touchPrefs.edit().putString("touchMode", "3").apply()
         }
-        val distro = Distros.ALPINE
+        val distros = Distros.ALL
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(
                 primary = Accent, secondary = Accent2, background = BgTop, surface = CardBg)) {
                 val vm: SpikeViewModel = viewModel()
                 LaunchedEffect(Unit) {
-                    if (DistroInstaller(applicationContext).isInstalled(distro)) {
-                        vm.state = InstallState.Installed
+                    for (d in distros) {
+                        if (DistroInstaller(applicationContext).isInstalled(d)) {
+                            vm.states[d.id] = InstallState.Installed
+                        }
                     }
                 }
                 Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(BgTop, BgBottom)))) {
                     when (vm.screen) {
-                        Screen.PICKER -> PickerScreen(distro, vm,
-                            onPrimary = {
-                                when (vm.state) {
-                                    InstallState.Installed -> vm.openTerminal(this@MainActivity, distro)
-                                    else -> vm.install(this@MainActivity, distro)
+                        Screen.PICKER -> PickerScreen(distros, vm,
+                            onPrimary = { d ->
+                                when (vm.stateFor(d)) {
+                                    InstallState.Installed -> vm.openTerminal(this@MainActivity, d)
+                                    else -> vm.install(this@MainActivity, d)
                                 }
                             },
-                            onDesktop = { XServer.openDesktop(this@MainActivity) })
+                            onDesktop = { d -> XServer.openDesktop(this@MainActivity, d) })
                         Screen.TERMINAL -> TerminalScreen(vm, onBack = { vm.closeTerminal() })
                     }
                 }
@@ -132,20 +137,23 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun PickerScreen(d: Distro, vm: SpikeViewModel, onPrimary: () -> Unit, onDesktop: () -> Unit) {
+private fun PickerScreen(distros: List<Distro>, vm: SpikeViewModel, onPrimary: (Distro) -> Unit, onDesktop: (Distro) -> Unit) {
     Column(Modifier.fillMaxSize().statusBarsPadding().padding(20.dp)) {
         Text("Phone Linux", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
         Text("prototype - terminal build", color = TextDim, fontSize = 13.sp)
         Spacer(Modifier.height(24.dp))
-        DistroCard(d, vm, onPrimary)
-        if (vm.state == InstallState.Installed) {
+        for (d in distros) {
+            DistroCard(d, vm.stateFor(d), vm.busy, onPrimary = { onPrimary(d) })
+            if (vm.stateFor(d) == InstallState.Installed) {
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = { onDesktop(d) },
+                    modifier = Modifier.fillMaxWidth().semantics { contentDescription = "open-desktop-" + d.id }
+                ) { Text("Open " + d.displayName + " desktop (experimental)", color = Accent) }
+            }
             Spacer(Modifier.height(12.dp))
-            OutlinedButton(
-                onClick = onDesktop,
-                modifier = Modifier.fillMaxWidth().semantics { contentDescription = "open-desktop" }
-            ) { Text("Open desktop (experimental)", color = Accent) }
         }
-        Spacer(Modifier.height(20.dp))
+        Spacer(Modifier.height(8.dp))
         Text("Output", color = TextDim, fontSize = 13.sp)
         Spacer(Modifier.height(6.dp))
         Box(Modifier.fillMaxSize().clip(RoundedCornerShape(14.dp)).background(Color(0xFF0A0E1A)).padding(12.dp)) {
@@ -156,8 +164,7 @@ private fun PickerScreen(d: Distro, vm: SpikeViewModel, onPrimary: () -> Unit, o
 }
 
 @Composable
-private fun DistroCard(d: Distro, vm: SpikeViewModel, onPrimary: () -> Unit) {
-    val s = vm.state
+private fun DistroCard(d: Distro, s: InstallState, busy: Boolean, onPrimary: () -> Unit) {
     val border by animateColorAsState(if (s == InstallState.Installed) Accent2 else Accent, label = "b")
     Column(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(CardBg).padding(18.dp)
@@ -185,9 +192,9 @@ private fun DistroCard(d: Distro, vm: SpikeViewModel, onPrimary: () -> Unit) {
         }
         Spacer(Modifier.height(10.dp))
         Button(
-            onClick = onPrimary, enabled = !vm.busy,
+            onClick = onPrimary, enabled = !busy,
             modifier = Modifier.fillMaxWidth().semantics {
-                contentDescription = if (s == InstallState.Installed) "open-terminal" else "install-distro"
+                contentDescription = if (s == InstallState.Installed) "open-terminal-" + d.id else "install-" + d.id
             },
             colors = ButtonDefaults.buttonColors(containerColor = border)
         ) {

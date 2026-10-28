@@ -14,6 +14,9 @@ import java.net.URL
 import java.security.MessageDigest
 import java.util.zip.GZIPInputStream
 
+/** Guest package manager - decides post-extract provisioning details. */
+enum class PkgMgr { APK, APT }
+
 /** One installable distro userland. Only pinned, checksummed sources. */
 data class Distro(
     val id: String,
@@ -22,7 +25,9 @@ data class Distro(
     val url: String,
     val sha256: String,
     val sizeBytes: Long,
-    val apkArch: String
+    val pkgMgr: PkgMgr,
+    /** APK only: guest arch pin for /etc/apk/arch. */
+    val apkArch: String? = null
 )
 
 object Distros {
@@ -38,6 +43,7 @@ object Distros {
         url = "$ALPINE_BASE/aarch64/alpine-minirootfs-$ALPINE_VER-aarch64.tar.gz",
         sha256 = "ead8a4b37867bd19e7417dd078748e2312c0aea364403d96758d63ea8ff261ea",
         sizeBytes = 3_850_365L,
+        pkgMgr = PkgMgr.APK,
         apkArch = "aarch64"
     )
     private val ALPINE_X86_64 = ALPINE_ARM64.copy(
@@ -50,6 +56,35 @@ object Distros {
     /** Distro matching this device's primary ABI. */
     val ALPINE: Distro
         get() = if (android.os.Build.SUPPORTED_ABIS.firstOrNull() == "x86_64") ALPINE_X86_64 else ALPINE_ARM64
+
+    // Ubuntu Base 24.04.5 (official cdimage; sha256 from the release dir's
+    // SHA256SUMS, fetched 2026-10-28). APT userland; the GNOME desktop is
+    // provisioned on first desktop open (B: standard Ubuntu layout,
+    // feasibility still unproven on our lorie stack).
+    private const val UBUNTU_VER = "24.04.5"
+    private const val UBUNTU_BASE = "https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release"
+
+    private val UBUNTU_ARM64 = Distro(
+        id = "ubuntu",
+        displayName = "Ubuntu",
+        description = "Ubuntu 24.04 userland, GNOME desktop (experimental, large download).",
+        url = "$UBUNTU_BASE/ubuntu-base-$UBUNTU_VER-base-arm64.tar.gz",
+        sha256 = "a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2",
+        sizeBytes = 29_900_000L, // approx; real length comes from Content-Length
+        pkgMgr = PkgMgr.APT
+    )
+    private val UBUNTU_X86_64 = UBUNTU_ARM64.copy(
+        url = "$UBUNTU_BASE/ubuntu-base-$UBUNTU_VER-base-amd64.tar.gz",
+        sha256 = "e77b6f10c2590cef872b33ee9f635a0e3fd1f57fb074c0e52b5c7f56147a0c86",
+        sizeBytes = 30_000_000L // approx
+    )
+
+    val UBUNTU: Distro
+        get() = if (android.os.Build.SUPPORTED_ABIS.firstOrNull() == "x86_64") UBUNTU_X86_64 else UBUNTU_ARM64
+
+    /** All distros shown in the picker, in display order. */
+    val ALL: List<Distro>
+        get() = listOf(ALPINE, UBUNTU)
 }
 
 sealed interface InstallState {
@@ -105,10 +140,16 @@ class DistroInstaller(private val ctx: Context) {
                 root.deleteRecursively() // never leave a half-extracted rootfs
                 throw t
             }
-            // guest DNS (Android has no /etc/resolv.conf to inherit)
+            // guest DNS (Android has no /etc/resolv.conf to inherit).
+            // delete() first: ubuntu-base ships resolv.conf as a symlink into
+            // /run/systemd/resolve/, and writing through a dangling symlink
+            // fails; deleting the link and writing a plain file is right for
+            // both distros (alpine has none, so delete() is a no-op there).
             File(root, "etc").mkdirs()
+            File(root, "etc/resolv.conf").delete()
             File(root, "etc/resolv.conf").writeText("nameserver 1.1.1.1\nnameserver 8.8.8.8\n")
-            // Pin the guest package arch to THIS rootfs' arch: apk derives its
+            // Pin the guest package arch to THIS rootfs' arch (APK distros
+            // only): apk derives its
             // target arch (and therefore which signing keys must match) from
             // uname unless /etc/apk/arch exists, and proot passes uname through
             // from the host kernel. Rootfs arch and host arch always match in
@@ -117,8 +158,10 @@ class DistroInstaller(private val ctx: Context) {
             // aarch64 indexes whose signatures the x86_64 key set cannot
             // verify (UNTRUSTED signature), and the binaries would not run
             // anyway.
-            File(root, "etc/apk").mkdirs()
-            File(root, "etc/apk/arch").writeText(d.apkArch + "\n")
+            if (d.pkgMgr == PkgMgr.APK) {
+                File(root, "etc/apk").mkdirs()
+                File(root, "etc/apk/arch").writeText(requireNotNull(d.apkArch) + "\n")
+            }
             File(root, ".install-complete").writeText("${d.url}\n${d.sha256}\n")
             onState(InstallState.Installed)
             Log.i(TAG, "installed ${d.id} -> $root")

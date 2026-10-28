@@ -47,10 +47,10 @@ class UiFlowTest {
         shot(device, "01-picker")
 
         // 2. install if needed (button desc flips to open-terminal when done)
-        val installBtn = device.wait(Until.findObject(By.desc("install-distro")), 5_000)
+        val installBtn = device.wait(Until.findObject(By.desc("install-alpine")), 5_000)
         if (installBtn != null) {
             installBtn.click()
-            val done = device.wait(Until.hasObject(By.desc("open-terminal")), 240_000)
+            val done = device.wait(Until.hasObject(By.desc("open-terminal-alpine")), 240_000)
             assertNotNull("install completed (open-terminal button)", done)
         }
         shot(device, "02-installed")
@@ -61,7 +61,7 @@ class UiFlowTest {
         Shot.dismissSystemDialogs(device)
         // After install the card recomposes several times while state settles;
         // a short findObject window can lose the button mid-recomposition.
-        val openBtn = device.wait(Until.findObject(By.desc("open-terminal")), 120_000)
+        val openBtn = device.wait(Until.findObject(By.desc("open-terminal-alpine")), 120_000)
         assertNotNull("open-terminal clickable", openBtn)
         openBtn.click()
         val termInput = device.wait(Until.findObject(By.desc("terminal-input")), 20_000)
@@ -195,7 +195,7 @@ class UiFlowTest {
             val fieldDeadline = System.currentTimeMillis() + 90_000
             while (System.currentTimeMillis() < fieldDeadline && field == null) {
                 Shot.dismissSystemDialogs(device)
-                val reopen = device.wait(Until.findObject(By.desc("open-terminal")), 2_000)
+                val reopen = device.wait(Until.findObject(By.desc("open-terminal-alpine")), 2_000)
                 if (reopen != null) {
                     android.util.Log.i("PHONEDIAG", "runCommand: terminal screen lost, re-opening for: " + cmd)
                     reopen.click()

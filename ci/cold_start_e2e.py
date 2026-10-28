@@ -148,7 +148,7 @@ hit = tap_first_match([
     r'<node[^>]*text="Allow"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
 ], 30)
 log("permission dialog handled: " + (hit if hit else "no dialog shown"))
-if not tap_desc("install-distro", 60):
+if not tap_desc("install-alpine", 60):
     fail("install button never appeared")
 log("waiting for distro install marker (up to 15 min)")
 if not wait_marker(900):
@@ -170,7 +170,7 @@ if '<string name="touchMode">3</string>' not in prefs:
     fail("direct-touch default not written by shipped app entry; prefs=" + prefs[:600])
 log("direct-touch default present after first shipped-app launch")
 
-if not tap_desc("open-desktop", 60):
+if not tap_desc("open-desktop-alpine", 60):
     fail("open-desktop button never appeared after install")
 log("waiting for desktop wm (first-time shell provisioning included, up to 10 min)")
 wm = wait_chosen_wm(600)
@@ -183,7 +183,9 @@ shot("17-cold-desktop")
 log("am force-stop: app process death (X server + guests share the app uid)")
 shell("am force-stop " + PKG)
 time.sleep(5)
-survivors = shell("pgrep -f 'phonelinux|CmdEntryPoint' || true").stdout.strip()
+# Log survivor pids AND cmdlines (run 40635190073: one pid survived
+# force-stop - the bare pid was not identifiable from the log).
+survivors = shell("pgrep -f 'phonelinux|CmdEntryPoint' | while read p; do echo -n \"$p: \"; tr '\\0' ' ' < /proc/$p/cmdline; echo; done || true").stdout.strip()
 log("uid processes after force-stop: [%s]" % survivors)
 
 log("cold start #2: relaunch - must NOT reinstall")
@@ -191,7 +193,7 @@ shell("am start -n %s/.MainActivity" % PKG)
 time.sleep(6)
 # Truncate the desktop log so a chosen-wm line below proves a FRESH launch.
 runas("sh -c '> %s'" % DESKLOG)
-if not tap_desc("open-desktop", 90):
+if not tap_desc("open-desktop-alpine", 90):
     fail("open-desktop button missing after relaunch - installed state did not restore")
 log("waiting for desktop to return (packages cached - should be fast)")
 wm2 = wait_chosen_wm(300)
@@ -204,4 +206,10 @@ mtime2 = marker_mtime()
 log("marker mtime before=%s after=%s" % (mtime1, mtime2))
 if mtime1 != "NA" and mtime2 != "NA" and mtime2 != mtime1:
     fail("install marker mtime changed - a REINSTALL happened on relaunch")
+# Evidence: the relaunch session's own desktop log (truncated before
+# relaunch, so this is the fresh session only).
+try:
+    open("screenshots/guest-desktop-coldstart.log", "w").write(runas("cat %s 2>&1" % DESKLOG))
+except Exception as e:
+    log("desktop log save failed: " + str(e))
 log("PASS: cold install -> desktop -> process kill -> desktop returns without reinstall")

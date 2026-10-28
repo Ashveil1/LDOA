@@ -50,7 +50,7 @@ object XServer {
         Log.i(TAG, "X server spawned; log=$log")
     }
 
-    fun openDesktop(activity: Activity) {
+    fun openDesktop(activity: Activity, distro: Distro) {
         if (preparing) return
         preparing = true
         thread(name = "xserver-start") {
@@ -61,23 +61,42 @@ object XServer {
                 // prove (jwm + pcmanfm + st), not the old xclock smoke -
                 // otherwise the shipped app does less than the CI evidence.
                 val installer = DistroInstaller(ctx)
-                val distro = Distros.ALPINE
                 if (installer.isInstalled(distro)) {
                     val rootfs = installer.rootfsDir(distro)
-                    if (!GuestDesktop.hasDesktopShell(rootfs)) {
-                        Log.i(TAG, "desktop shell not provisioned; installing jwm/pcmanfm/st")
-                        var add = GuestDesktop.provisionDesktopShell(ctx, rootfs)
-                        if (add.exitCode != 0) {
-                            Thread.sleep(5_000)
-                            add = GuestDesktop.provisionDesktopShell(ctx, rootfs)
+                    when (distro.pkgMgr) {
+                        PkgMgr.APK -> {
+                            if (!GuestDesktop.hasDesktopShell(rootfs)) {
+                                Log.i(TAG, "desktop shell not provisioned; installing jwm/pcmanfm/st")
+                                var add = GuestDesktop.provisionDesktopShell(ctx, rootfs)
+                                if (add.exitCode != 0) {
+                                    Thread.sleep(5_000)
+                                    add = GuestDesktop.provisionDesktopShell(ctx, rootfs)
+                                }
+                                Log.i(TAG, "desktop shell provision exit=" + add.exitCode)
+                            }
+                            if (GuestDesktop.hasDesktopShell(rootfs)) {
+                                Log.i(TAG, "launching full desktop session")
+                                GuestDesktop.launchDesktopSession(ctx, rootfs)
+                            } else {
+                                Log.e(TAG, "desktop shell unavailable; desktop will be empty")
+                            }
                         }
-                        Log.i(TAG, "desktop shell provision exit=" + add.exitCode)
-                    }
-                    if (GuestDesktop.hasDesktopShell(rootfs)) {
-                        Log.i(TAG, "launching full desktop session")
-                        GuestDesktop.launchDesktopSession(ctx, rootfs)
-                    } else {
-                        Log.e(TAG, "desktop shell unavailable; desktop will be empty")
+                        PkgMgr.APT -> {
+                            // Ubuntu: GNOME (B). Feasibility on our lorie
+                            // stack is unproven; guest-gnome.log is the
+                            // evidence trail.
+                            if (!GuestUbuntu.hasGnome(rootfs)) {
+                                Log.i(TAG, "GNOME not provisioned; apt install gnome-shell et al")
+                                val add = GuestUbuntu.provisionGnome(ctx, rootfs)
+                                Log.i(TAG, "gnome provision exit=" + add.exitCode)
+                            }
+                            if (GuestUbuntu.hasGnome(rootfs)) {
+                                Log.i(TAG, "launching GNOME session")
+                                GuestUbuntu.launchGnomeSession(ctx, rootfs)
+                            } else {
+                                Log.e(TAG, "GNOME unavailable; desktop will be empty")
+                            }
+                        }
                     }
                 }
             } catch (t: Throwable) {
