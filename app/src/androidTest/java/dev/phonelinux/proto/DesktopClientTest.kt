@@ -306,7 +306,9 @@ class DesktopClientTest {
         val gMax = stGeom()
         android.util.Log.i("PHONEDIAG", "after maximize tap: " + gMax?.toList() + " btn dev=" + maxBtn0)
         assertTrue("st did not maximize on title-button tap (before=" + gh.toList() + " after=" + gMax?.toList() + ") - possible mis-tap onto close if window is gone",
-            gMax != null && gMax[2] > gh[2] + 100 && gMax[3] > gh[3] + 100)
+            // Width only grows to screen-minus-borders (+60 from the
+            // default 1004), height is the big axis (+1368 observed).
+            gMax != null && gMax[2] > gh[2] + 40 && gMax[3] > gh[3] + 100)
         // 4b. Restore: tap the same button again, expect ~original size.
         val gm2 = gMax!!
         val maxBtn1 = devFor(gm2[0] + gm2[2] + 4.0 - 36.0, gm2[1] - 14.0)
