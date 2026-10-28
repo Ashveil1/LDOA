@@ -221,15 +221,16 @@ class UbuntuGnomeSpikeTest {
             val y = Regex("Y=(-?\\d+)").find(out)?.groupValues?.get(1)?.toIntOrNull()
             return if (x != null && y != null) Pair(x, y) else null
         }
-        val p1 = probeX(300, 1200)
-        val p2 = probeX(700, 1700)
+        var p1 = probeX(300, 1200)
+        var p2 = probeX(700, 1700)
         Log.i(TAG, "dock-interact: mapping probes dev(300,1200)->" + p1 + " dev(700,1700)->" + p2)
         fun mapToDevice(x: Int, y: Int): Pair<Int, Int>? {
-            if (p1 == null || p2 == null) return null
-            val ax = (700 - 300).toDouble() / (p2.first - p1.first)
-            val bx = 300 - ax * p1.first
-            val ay = (1700 - 1200).toDouble() / (p2.second - p1.second)
-            val by = 1200 - ay * p1.second
+            val first = p1 ?: return null
+            val second = p2 ?: return null
+            val ax = (700 - 300).toDouble() / (second.first - first.first)
+            val bx = 300 - ax * first.first
+            val ay = (1700 - 1200).toDouble() / (second.second - first.second)
+            val by = 1200 - ay * first.second
             return Pair((ax * x + bx).toInt(), (ay * y + by).toInt())
         }
         // Headerbar (CSD) drag: grab the RIGHT side of the visible
@@ -313,6 +314,8 @@ class UbuntuGnomeSpikeTest {
         // relaunch never owned the display.
         // The proot PARENTS carry the rootfs path in their cmdline (guest
         // children do not): find them, kill their whole trees.
+        val oldShellPids = xwin("pgrep -x gnome-shell || true").trim().lines().filter { it.toIntOrNull() != null }.toSet()
+        Log.i(TAG, "restart: pre-kill shell pids=" + oldShellPids)
         var killedRoots = 0
         java.io.File("/proc").listFiles()?.forEach { dir ->
             val cpid = dir.name.toIntOrNull() ?: return@forEach
@@ -341,10 +344,15 @@ class UbuntuGnomeSpikeTest {
             val wm = xwin("xprop -root _NET_SUPPORTING_WM_CHECK")
             val id = Regex("0x[0-9a-fA-F]+").find(wm)?.value
             val props = if (id != null) xwin("xprop -id " + id + " _NET_WM_NAME _NET_WM_PID WM_NAME") else "<no WM id>"
-            val pid = Regex("_NET_WM_PID\\(CARDINAL\\) = (\\d+)").find(props)?.groupValues?.get(1)
-            val cmd = if (pid != null) try {
-                File("/proc/" + pid + "/cmdline").readText().replace('\u0000', ' ')
-            } catch (t: Throwable) { "<cmdline error: " + t.javaClass.simpleName + ">" } else "<no WM pid>"
+            // Mutter does not publish _NET_WM_PID on this support window
+            // (5ce37e3). Require the named supporting window AND a new live
+            // exact-name shell process, excluding every pre-kill PID.
+            val newPids = xwin("pgrep -x gnome-shell || true").trim().lines()
+                .filter { it.toIntOrNull() != null && it !in oldShellPids }
+            val cmd = newPids.map { pid ->
+                try { pid + ":" + File("/proc/" + pid + "/cmdline").readText().replace('\u0000', ' ') }
+                catch (t: Throwable) { pid + ":<cmdline error>" }
+            }.joinToString(" | ")
             val evidence = (wm + " | " + props + " | cmd=" + cmd).replace("\n", " | ")
             if (evidence != lastIdentityEvidence) {
                 Log.i(TAG, "restart: WM identity evidence: " + evidence)
@@ -385,9 +393,14 @@ class UbuntuGnomeSpikeTest {
         assertTrue("finger press did not reopen Files after restart", reopened != null)
         val rw = reopened!!
         val re = frameExtents(rw.id)
+        p1 = probeX(300, 1200)
+        p2 = probeX(700, 1700)
+        Log.i(TAG, "restart: fresh mapping probes " + p1 + " and " + p2)
         val rg = mapToDevice(rw.x + re[0] + rw.w - re[0] - re[1] - 200, rw.y + re[2] + 20)
         assertTrue("restart drag mapping missing", rg != null)
+        Log.i(TAG, "restart: drag geom=" + rw.x + "," + rw.y + " " + rw.w + "x" + rw.h + " extents=" + re + " target=" + rg)
         fingerDrag(rg!!)
+        Log.i(TAG, "restart: pointer after drag=" + xwin("xdotool getmouselocation --shell").replace("\n", " | "))
         val moved = nauVisible()
         Shot.save("24c-ubuntu-restart-dragged")
         Log.i(TAG, "restart: finger drag (" + rw.x + "," + rw.y + ") -> " + moved?.let { it.x.toString() + "," + it.y })
