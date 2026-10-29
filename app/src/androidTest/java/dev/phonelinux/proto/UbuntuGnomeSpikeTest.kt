@@ -340,14 +340,33 @@ class UbuntuGnomeSpikeTest {
                 check(e.getToolType(0) == android.view.MotionEvent.TOOL_TYPE_FINGER)
                 try { instr.sendPointerSync(e) } finally { e.recycle() }
             }
+            fun dragDiag(phase: String) {
+                // Ground the drag in X-level facts: where the server
+                // thinks the pointer is and which window has focus.
+                // Discriminates test-geometry misses from an input path
+                // that never moved the pointer. Missing tools log as
+                // such, never silently.
+                Log.i(TAG, "dock-interact: drag-diag[" + phase + "] pointer: " +
+                    xwin("(xdotool getmouselocation --shell 2>/dev/null || xinput --query-pointer 2>/dev/null || echo NO-POINTER-TOOL) | tr '\n' ' '").trim().take(140))
+                Log.i(TAG, "dock-interact: drag-diag[" + phase + "] active window: " +
+                    xwin("xdotool getactivewindow getwindowname 2>/dev/null || echo NA").trim().take(90))
+            }
+            dragDiag("pre-down")
             event(android.view.MotionEvent.ACTION_DOWN, from.first.toFloat(), from.second.toFloat())
             android.os.SystemClock.sleep(600)
+            dragDiag("down")
+            Shot.save("22d-ubuntu-drag-down")
             for (step in 1..30) {
                 event(android.view.MotionEvent.ACTION_MOVE,
                     from.first - 60f * step / 30, from.second + 120f * step / 30)
                 android.os.SystemClock.sleep(25)
+                if (step == 15) {
+                    dragDiag("mid")
+                    Shot.save("22e-ubuntu-drag-mid")
+                }
             }
             event(android.view.MotionEvent.ACTION_UP, from.first - 60f, from.second + 120f)
+            dragDiag("up")
             Thread.sleep(8_000)
         }
         fingerDrag(grab!!)

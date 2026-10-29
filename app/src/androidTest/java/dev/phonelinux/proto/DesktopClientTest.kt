@@ -268,6 +268,21 @@ class DesktopClientTest {
                 device.findObject(androidx.test.uiautomator.By.textContains("isn't responding")) == null &&
                 device.findObject(androidx.test.uiautomator.By.textContains("Not Responding")) == null)
         }
+        // Bounded recheck for long steps: the launcher ANR dialog can
+        // RE-POST every ~6s while the process stays hung (run 40937099472:
+        // fresh dialog windows 19:21:08 -> 19:24:48+), so a guard before a
+        // gesture leaves a re-post window during the settle. Each dismissal
+        // is counted and logged; repeats stay visible, never hidden.
+        var anrReposts = 0
+        fun anrRecheck(stage: String) {
+            val t = device.findObject(androidx.test.uiautomator.By.textContains("isn't responding"))
+                ?: device.findObject(androidx.test.uiautomator.By.textContains("Not Responding"))
+            if (t != null) {
+                anrReposts++
+                android.util.Log.i("PHONEDIAG", "anr-recheck[" + stage + "]: re-posted ANR dialog dismissed (total re-posts=" + anrReposts + ")")
+                Shot.dismissSystemDialogs(device)
+            }
+        }
 
         // 1. Tap the JWM menu button (tray = 1080x34+0+1978, button at the
         // left end ~X(20,1995)). jwm menus are override-redirect popups: a
@@ -448,13 +463,17 @@ class DesktopClientTest {
         val grabGx = minOf(go[0] + go[2] - 100, minOf(go[0] + go[2], 1080) - 40)
         assertTrue("st titlebar not visibly grabbable (off=" + go.toList() + ")", grabGx > go[0] + 20)
         val tb2 = devFor(grabGx.toDouble(), go[1] - 13.0)
+        anrGuard("st-recovery")
         device.drag(tb2.first, tb2.second, tb2.first + (20 - go[0]), tb2.second, 40)
-        Thread.sleep(2_000)
+        Thread.sleep(1_000)
+        anrRecheck("st-recovery-settle")
+        Thread.sleep(1_000)
         val gBack = stGeom()
         Shot.save("12-st-recovered")
         android.util.Log.i("PHONEDIAG", "recovery drag: off=" + go.toList() + " back=" + gBack?.toList())
         assertTrue("st controls not recovered onscreen in one attempt (off=" + go.toList() + " back=" + gBack?.toList() + ")",
             gBack != null && gBack[0] + gBack[2] + 8 <= 1080)
+        android.util.Log.i("PHONEDIAG", "st-recovery outcome: cumulative ANR re-posts dismissed in desktop1=" + anrReposts)
 
         // 6. White-stripe experiment: the band inside st exists only
         // after the calibration taps (absent pre-interaction, run
