@@ -425,9 +425,15 @@ class UbuntuGnomeSpikeTest {
                 !File(rootfs, "root/LDOA-proof-created").exists())
         Log.i(TAG, "UBUNTU-FILEOPS-OK UI folder create and rename independently verified")
 
-        // --- Finger-gesture qualification (user-approved map 2026-10-29,
-        // option A: tap = click, hold = right-click, one-finger drag native,
-        // two-finger drag = wheel scroll, individual toggles). Runtime-
+        // --- Finger-gesture qualification, SIMULATED_TOUCH (touchMode=2,
+        // forced every launch by MainActivity; the stock
+        // SimulatedTouchInputStrategy owns the map here): tap = left click,
+        // one-finger hold = BUTTON_LEFT press-hold (drag), two-finger tap =
+        // right click, two-finger drag = wheel scroll. The direct-mode
+        // (NullInputStrategy) LDOA patch paths - GTK press-and-hold and the
+        // LDOA-2FTAP-FIRE two-finger-tap injection - are NOT active in this
+        // mode; earlier arm proofs (runs 40851575540/40852753808) were
+        // direct-mode and do not qualify mode 2. Runtime-
         // verified against the real desktop, never assumed from client docs:
         // menus are proven by their actual items and position (AT-SPI),
         // scroll by visible content movement plus the injected event stream
@@ -667,6 +673,41 @@ for i in range(d.childCount):
             send(android.view.MotionEvent.ACTION_UP, arrayOf(p1), (cx1 + dx).toFloat(), (cy1 + dy).toFloat(), 0f, 0f)
         }
 
+        // Clean two-finger tap (no MOVE: movement cancels the tap). In
+        // SIMULATED_TOUCH (touchMode=2, forced every launch by
+        // MainActivity) the stock SimulatedTouchInputStrategy maps a
+        // two-finger tap to onTap(BUTTON_RIGHT) -> one injected
+        // right-click; the LDOA-2FTAP-FIRE patch path is gated on the
+        // DIRECT (NullInputStrategy) mode and never runs here.
+        fun twoFingerTap(cx1: Int, cy1: Int, cx2: Int, cy2: Int) {
+            val down = android.os.SystemClock.uptimeMillis()
+            val p1 = android.view.MotionEvent.PointerProperties().apply {
+                id = 0; toolType = android.view.MotionEvent.TOOL_TYPE_FINGER
+            }
+            val p2 = android.view.MotionEvent.PointerProperties().apply {
+                id = 1; toolType = android.view.MotionEvent.TOOL_TYPE_FINGER
+            }
+            fun c(x: Float, y: Float) = android.view.MotionEvent.PointerCoords().apply {
+                this.x = x; this.y = y; pressure = 1f; size = 1f
+            }
+            fun send(action: Int, pts: Array<android.view.MotionEvent.PointerProperties>,
+                     ax: Float, ay: Float, bx: Float, by: Float) {
+                val coords = if (pts.size == 1) arrayOf(c(ax, ay)) else arrayOf(c(ax, ay), c(bx, by))
+                val e = android.view.MotionEvent.obtain(down,
+                    android.os.SystemClock.uptimeMillis(), action, pts.size, pts, coords,
+                    0, 0, 1f, 1f, 0, 0, android.view.InputDevice.SOURCE_TOUCHSCREEN, 0)
+                try { instr.sendPointerSync(e) } finally { e.recycle() }
+            }
+            val idx1 = 1 shl android.view.MotionEvent.ACTION_POINTER_INDEX_SHIFT
+            send(android.view.MotionEvent.ACTION_DOWN, arrayOf(p1), cx1.toFloat(), cy1.toFloat(), 0f, 0f)
+            send(android.view.MotionEvent.ACTION_POINTER_DOWN or idx1, arrayOf(p1, p2),
+                cx1.toFloat(), cy1.toFloat(), cx2.toFloat(), cy2.toFloat())
+            android.os.SystemClock.sleep(150)
+            send(android.view.MotionEvent.ACTION_POINTER_UP or idx1, arrayOf(p1, p2),
+                cx1.toFloat(), cy1.toFloat(), cx2.toFloat(), cy2.toFloat())
+            send(android.view.MotionEvent.ACTION_UP, arrayOf(p1), cx1.toFloat(), cy1.toFloat(), 0f, 0f)
+        }
+
         val nwg = nauVisible()
         assertTrue("Files window missing before gesture tests", nwg != null)
         val nwgP = nwg!!
@@ -676,27 +717,32 @@ for i in range(d.childCount):
         val bgTarget = mapToDevice(bgGuestX, bgGuestY)
         assertTrue("no device mapping for long-press target", bgTarget != null)
 
-        // (a) STATIONARY HOLD, RIGHT-CLICK ON RELEASE, surface 1: Files
-        // background. The proof is the menu itself: real Nautilus menu items
-        // appear near the hold point that were not there before, forming
-        // exactly one contiguous menu in exactly one new menu window, opened
-        // by exactly one injected pointer right-click on :0 - no duplicate
-        // from a native client long-press plus our injection.
+        // (a) TWO-FINGER TAP = RIGHT-CLICK, surface 1: Files background
+        // (SIMULATED_TOUCH contract). The proof is the menu itself: real
+        // Nautilus menu items appear near the tap point that were not there
+        // before, forming exactly one contiguous menu in exactly one new
+        // menu window, opened by exactly one injected pointer right-click
+        // on :0. Gated on actual button-3 delivery + menu, never on a
+        // patch-marker log tag.
         val bgProbes = listOf("new folder", "paste", "select all", "properties",
             "open in terminal", "sort", "undo", "redo", "restore", "empty trash")
         val baselineBgNames = menuHits(parseAts(atspi()), bgProbes)
-        Log.i(TAG, "longpress-bg: baseline item names=" + baselineBgNames)
+        Log.i(TAG, "2ftap-bg: baseline item names=" + baselineBgNames)
         val menuBeforeIds = rootChildIds()
+        Log.i(TAG, "2ftap-bg: effective touchMode pref=" +
+            ctx.getSharedPreferences(ctx.packageName + "_preferences",
+                android.content.Context.MODE_PRIVATE).getString("touchMode", null) +
+            " (2 = SIMULATED_TOUCH; right-click via stock onTap(BUTTON_RIGHT), no LDOA-2FTAP-FIRE in this mode)")
         probeStart("menu")
-        longPress(bgTarget!!)
+        twoFingerTap(bgTarget!!.first - 40, bgTarget!!.second, bgTarget!!.first + 40, bgTarget!!.second)
         // Fast window-level signal first (the atspi dump can take 10-30s
         // per call, so a short atspi-only wait misses a slow dump).
         val menuWin = awaitMenuWindow(menuBeforeIds, 15_000)
         val menuProbe = probeStop("menu")
-        Shot.save("23d-ubuntu-longpress-menu")
+        Shot.save("23d-ubuntu-2ftap-menu")
         val menuNodes = awaitMenu(bgProbes, baselineBgNames, 35_000)
         val injected3 = buttonPresses(menuProbe, 3)
-        Log.i(TAG, "longpress-bg: menuWin=" + menuWin + " rightClickInjections=" +
+        Log.i(TAG, "2ftap-bg: menuWin=" + menuWin + " rightClickInjections=" +
             injected3 + " probeBytes=" + menuProbe.length +
             " probeTail=" + menuProbe.takeLast(300).replace("\n", " | ") +
             " atspiNull=" + (menuNodes == null))
@@ -714,17 +760,17 @@ for i in range(d.childCount):
             // the verdict unchanged.
             val xlist = xwin("xinput list 2>/dev/null | head -24 || true").replace("\n", " | ")
             val mloc = xwin("xdotool getmouselocation 2>/dev/null || true").replace("\n", " | ")
-            Log.i(TAG, "longpress-bg DIAG: xinput list=" + xlist)
-            Log.i(TAG, "longpress-bg DIAG: mouse=" + mloc + " probeBytes=" + menuProbe.length +
+            Log.i(TAG, "2ftap-bg DIAG: xinput list=" + xlist)
+            Log.i(TAG, "2ftap-bg DIAG: mouse=" + mloc + " probeBytes=" + menuProbe.length +
                 " probeHead=" + menuProbe.take(300).replace("\n", " | "))
             probeStart("hc")
             xwin("xdotool mousemove " + bgGuestX + " " + bgGuestY + " click 3 2>/dev/null || true")
             Thread.sleep(3_000)
             val hcProbe = probeStop("hc")
-            Log.i(TAG, "longpress-bg DIAG: health-check probe button3=" + buttonPresses(hcProbe, 3) +
+            Log.i(TAG, "2ftap-bg DIAG: health-check probe button3=" + buttonPresses(hcProbe, 3) +
                 " motion=" + hcProbe.contains("Motion") + " hcBytes=" + hcProbe.length)
             val xdWin = (rootChildIds() - menuBeforeIds).sorted()
-            Log.i(TAG, "longpress-bg DIAG: xdotool right-click at the same point -> new windows=" + xdWin +
+            Log.i(TAG, "2ftap-bg DIAG: xdotool right-click at the same point -> new windows=" + xdWin +
                 " plausible=" + xdWin.filter { plausibleMenuGeom(it) })
             if (xdWin.any { plausibleMenuGeom(it) }) {
                 Shot.save("23d2b-xdotool-menu")
@@ -732,7 +778,7 @@ for i in range(d.childCount):
                 Thread.sleep(1_000)
             }
         }
-        assertTrue("hold on Files background produced no menu window " +
+        assertTrue("two-finger tap on Files background produced no menu window (SIMULATED_TOUCH) " +
             "(atspi items=" + (menuNodes?.let { menuHits(it, bgProbes) - baselineBgNames } ?: "dump-pending") +
             ", probeTail=" + menuProbe.takeLast(300).replace("\n", " | ") + ")",
             menuWin != null || menuNodes != null)
@@ -742,21 +788,21 @@ for i in range(d.childCount):
             injected3 == 1)
         val mwX = Regex("Absolute upper-left X:\\s+(-?\\d+)").find(menuWin!!.second)?.groupValues?.get(1)?.toIntOrNull() ?: -10000
         val mwY = Regex("Absolute upper-left Y:\\s+(-?\\d+)").find(menuWin.second)?.groupValues?.get(1)?.toIntOrNull() ?: -10000
-        assertTrue("menu window opened far from the hold point (menu at " + mwX + "," + mwY +
-            " vs hold " + bgGuestX + "," + bgGuestY + ")",
+        assertTrue("menu window opened far from the two-finger tap point (menu at " + mwX + "," + mwY +
+            " vs tap " + bgGuestX + "," + bgGuestY + ")",
             Math.abs(mwX - bgGuestX) <= 400 && Math.abs(mwY - bgGuestY) <= 400)
         assertTrue("menu opened but atspi saw no items - GTK4 a11y blindness " +
             "or a truncated dump; item names are required proof", menuNodes != null)
         val bgNew = menuHits(menuNodes!!, bgProbes) - baselineBgNames
         val hitIdx = menuNodes.mapIndexedNotNull { idx, n -> if (n.name in bgNew) idx else null }
         val spread = if (hitIdx.isEmpty()) -1 else hitIdx.last() - hitIdx.first()
-        Log.i(TAG, "longpress-bg: new menu items=" + bgNew + " idxSpread=" + spread)
+        Log.i(TAG, "2ftap-bg: new menu items=" + bgNew + " idxSpread=" + spread)
         assertTrue("context menu items not identifiable (found=" + bgNew + ")", bgNew.size >= 2)
         assertTrue("menu items not contiguous - more than one menu? (spread=" + spread + ")",
             spread in 0..(bgNew.size * 4))
         device.pressKeyCode(android.view.KeyEvent.KEYCODE_ESCAPE)
         assertTrue("context menu did not close on Escape", awaitNoMenu(bgProbes, baselineBgNames, 4_000))
-        Log.i(TAG, "UBUNTU-LONGPRESS-RIGHTCLICK-OK Files background menu: " + bgNew)
+        Log.i(TAG, "UBUNTU-2FTAP-RIGHTCLICK-OK Files background menu: " + bgNew)
 
         // (b) No spurious right-click: a one-finger drag and a plain tap on
         // the desktop background (outside every window) must open nothing.

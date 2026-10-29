@@ -254,6 +254,80 @@ class DesktopClientTest {
         // environment recovery before critical X gestures: dismiss only
         // allowlisted system ANRs via the shared helper, log the count,
         // assert the path is clear; anything else stays up and fails.
+        var anrReposts = 0
+        var anrSeen = 0
+        var anrRecoveryUsed = false
+        fun anrDialogUp(): Boolean =
+            device.findObject(androidx.test.uiautomator.By.textContains("isn't responding")) != null ||
+                device.findObject(androidx.test.uiautomator.By.textContains("Not Responding")) != null
+        fun isDisposableEmulator(): Boolean {
+            val qemu = device.executeShellCommand("getprop ro.kernel.qemu").trim()
+            val hw = device.executeShellCommand("getprop ro.hardware").trim()
+            return qemu == "1" || hw.contains("goldfish") || hw.contains("ranchu")
+        }
+        // Bounded environment recovery for the re-posting launcher ANR
+        // storm (run 40937099472: fresh dialog every ~6s for minutes,
+        // defeating point-in-time guards). Disposable emulator ONLY, known
+        // nexuslauncher ANR ONLY, ONCE per test, loudly logged, counts
+        // preserved. Recovery is VERIFIED: the launcher may not self-
+        // restart, so if pidof stays empty the known component is started
+        // explicitly (and logged); a 10s quiet window must stay clean.
+        // Persistent storm after the single recovery fails the test as
+        // untreated - no loop.
+        fun anrEnvRecover(stage: String) {
+            assertTrue("re-posted ANR on a non-emulator; environment recovery refused (untreated)",
+                isDisposableEmulator())
+            val attr = device.executeShellCommand(
+                "dumpsys window windows | grep -m1 'Application Not Responding' || true").trim()
+            assertTrue("re-posted ANR is not the known nexuslauncher case, refusing recovery: " + attr,
+                attr.contains("com.google.android.apps.nexuslauncher"))
+            anrRecoveryUsed = true
+            android.util.Log.i("PHONEDIAG", "ENVIRONMENT-RECOVERY-BEGIN[" + stage +
+                "]: force-stop com.google.android.apps.nexuslauncher (disposable emulator, anrSeen=" + anrSeen + ")")
+            device.executeShellCommand("am force-stop com.google.android.apps.nexuslauncher")
+            var pid = ""
+            var dl = System.currentTimeMillis() + 20_000
+            while (System.currentTimeMillis() < dl) {
+                pid = device.executeShellCommand("pidof com.google.android.apps.nexuslauncher").trim()
+                if (pid.isNotEmpty()) break
+                Thread.sleep(1_000)
+            }
+            if (pid.isEmpty()) {
+                android.util.Log.i("PHONEDIAG", "ENVIRONMENT-RECOVERY[" + stage +
+                    "]: launcher did not self-restart; explicitly starting known component")
+                device.executeShellCommand(
+                    "am start -n com.google.android.apps.nexuslauncher/.NexusLauncherActivity")
+                dl = System.currentTimeMillis() + 10_000
+                while (System.currentTimeMillis() < dl) {
+                    pid = device.executeShellCommand("pidof com.google.android.apps.nexuslauncher").trim()
+                    if (pid.isNotEmpty()) break
+                    Thread.sleep(1_000)
+                }
+            }
+            var quiet = true
+            val qEnd = System.currentTimeMillis() + 10_000
+            while (System.currentTimeMillis() < qEnd) {
+                if (anrDialogUp()) { quiet = false; break }
+                Thread.sleep(1_000)
+            }
+            android.util.Log.i("PHONEDIAG", "ENVIRONMENT-RECOVERY-END[" + stage +
+                "]: launcherPid=" + pid + " quietWindowClean=" + quiet)
+            assertTrue("environment recovery failed (untreated ANR storm): launcherPid=" + pid +
+                " quietWindowClean=" + quiet, pid.isNotEmpty() && quiet)
+        }
+        fun anrRecheck(stage: String) {
+            if (anrDialogUp()) {
+                anrReposts++
+                anrSeen++
+                if (anrSeen >= 2 && !anrRecoveryUsed) {
+                    anrEnvRecover(stage)
+                } else {
+                    android.util.Log.i("PHONEDIAG", "anr-recheck[" + stage + "]: re-posted ANR dialog dismissed (total re-posts=" + anrReposts + ")")
+                    Shot.dismissSystemDialogs(device)
+                }
+            }
+        }
+
         fun anrGuard(stage: String) {
             var dismissed = 0
             while (dismissed < 3) {
@@ -263,7 +337,26 @@ class DesktopClientTest {
                 Shot.dismissSystemDialogs(device)
                 dismissed++
             }
+            anrSeen += dismissed
             android.util.Log.i("PHONEDIAG", "anr-guard[" + stage + "]: allowlisted dialogs dismissed=" + dismissed)
+            // A dismissal is not proof the storm is over: the dialog
+            // re-posts within seconds while the launcher stays hung
+            // (20:18:30 dismissed -> 20:18:33 re-created, run 40945787051).
+            // Watch a bounded window after any dismissal; a re-post is
+            // treated as the storm case and goes to recovery, not another
+            // silent dismiss cycle.
+            if (dismissed > 0 && !anrRecoveryUsed) {
+                val wEnd = System.currentTimeMillis() + 8_000
+                while (System.currentTimeMillis() < wEnd) {
+                    Thread.sleep(1_000)
+                    if (anrDialogUp()) {
+                        anrSeen++
+                        android.util.Log.i("PHONEDIAG", "anr-guard[" + stage + "]: ANR re-posted inside post-dismiss window (anrSeen=" + anrSeen + ")")
+                        anrEnvRecover(stage)
+                        break
+                    }
+                }
+            }
             assertTrue("system ANR dialog still up before " + stage,
                 device.findObject(androidx.test.uiautomator.By.textContains("isn't responding")) == null &&
                 device.findObject(androidx.test.uiautomator.By.textContains("Not Responding")) == null)
@@ -273,16 +366,6 @@ class DesktopClientTest {
         // fresh dialog windows 19:21:08 -> 19:24:48+), so a guard before a
         // gesture leaves a re-post window during the settle. Each dismissal
         // is counted and logged; repeats stay visible, never hidden.
-        var anrReposts = 0
-        fun anrRecheck(stage: String) {
-            val t = device.findObject(androidx.test.uiautomator.By.textContains("isn't responding"))
-                ?: device.findObject(androidx.test.uiautomator.By.textContains("Not Responding"))
-            if (t != null) {
-                anrReposts++
-                android.util.Log.i("PHONEDIAG", "anr-recheck[" + stage + "]: re-posted ANR dialog dismissed (total re-posts=" + anrReposts + ")")
-                Shot.dismissSystemDialogs(device)
-            }
-        }
 
         // 1. Tap the JWM menu button (tray = 1080x34+0+1978, button at the
         // left end ~X(20,1995)). jwm menus are override-redirect popups: a
@@ -473,7 +556,8 @@ class DesktopClientTest {
         android.util.Log.i("PHONEDIAG", "recovery drag: off=" + go.toList() + " back=" + gBack?.toList())
         assertTrue("st controls not recovered onscreen in one attempt (off=" + go.toList() + " back=" + gBack?.toList() + ")",
             gBack != null && gBack[0] + gBack[2] + 8 <= 1080)
-        android.util.Log.i("PHONEDIAG", "st-recovery outcome: cumulative ANR re-posts dismissed in desktop1=" + anrReposts)
+        android.util.Log.i("PHONEDIAG", "st-recovery outcome: cumulative ANR re-posts dismissed in desktop1=" + anrReposts +
+            " anrSeen=" + anrSeen + " environmentRecoveryUsed=" + anrRecoveryUsed)
 
         // 6. White-stripe experiment: the band inside st exists only
         // after the calibration taps (absent pre-interaction, run
