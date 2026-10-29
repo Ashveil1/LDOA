@@ -63,6 +63,11 @@ class SessionServiceTest {
         awaitTrue(10_000, "ongoing session notification posted") {
             nm.activeNotifications.any { it.id == SessionService.NOTIF_ID }
         }
+        // Pixel evidence: the notification as the user sees it in the shade.
+        device.openNotification()
+        Thread.sleep(1_500)
+        Shot.save("50-session-notification")
+        device.pressBack()
     }
 
     @Test
@@ -72,6 +77,11 @@ class SessionServiceTest {
         assertFalse("no auto wakelock", SessionService.isWakelockHeld())
         toggleWakelock()
         awaitTrue(5_000, "wakelock held after user toggle on") { SessionService.isWakelockHeld() }
+        // Pixel evidence: notification text reflects the held wakelock.
+        device.openNotification()
+        Thread.sleep(1_500)
+        Shot.save("51-session-notification-wakelock-on")
+        device.pressBack()
         toggleWakelock()
         awaitTrue(5_000, "wakelock released after user toggle off") { !SessionService.isWakelockHeld() }
     }
@@ -85,6 +95,10 @@ class SessionServiceTest {
         ctx.startService(Intent(ctx, SessionService::class.java).setAction(SessionService.ACTION_STOP))
         awaitTrue(15_000, "service stopped after user stop") { !SessionService.isRunning() }
         assertFalse("user stop must release the wakelock", SessionService.isWakelockHeld())
+        val nm = ctx.getSystemService(NotificationManager::class.java)
+        awaitTrue(10_000, "notification gone after user stop") {
+            nm.activeNotifications.none { it.id == SessionService.NOTIF_ID }
+        }
     }
 
     @Test
@@ -99,6 +113,10 @@ class SessionServiceTest {
         fake.destroy()
         awaitTrue(15_000, "service stops when the tracked session exits") { !SessionService.isRunning() }
         assertFalse("session end must release the wakelock", SessionService.isWakelockHeld())
+        val nm = ctx.getSystemService(NotificationManager::class.java)
+        awaitTrue(10_000, "notification gone after session end") {
+            nm.activeNotifications.none { it.id == SessionService.NOTIF_ID }
+        }
         XServer.sessionProcess = null
     }
 }

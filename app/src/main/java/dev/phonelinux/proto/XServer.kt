@@ -30,6 +30,14 @@ object XServer {
      *  Tracked so the lifecycle service can watch session end and
      *  stopDesktopMode can tear the session down by identity. */
     @Volatile var sessionProcess: Process? = null
+
+    /** Launch-CONFIRMED process identities for verified teardown. Captured
+     *  when this launch's readiness gate passes (the bus pidfile exists by
+     *  then): an identity read at stop time cannot guard a PID reused
+     *  after the session died (custom-worker review lesson, Phase A
+     *  patch 3/8). */
+    @Volatile private var sessionRootIdent: PIdent? = null
+    @Volatile private var sessionBusIdent: PIdent? = null
     @Volatile private var gnomeSession: Pair<String, Process>? = null
     @Volatile var preparing = false
         private set
@@ -163,7 +171,10 @@ object XServer {
                                 var grace = 0
                                 while (grace < 8 && p.isAlive) { Thread.sleep(1_000); grace++ }
                                 launched = p.isAlive
-                                if (launched) sessionProcess = p
+                                if (launched) {
+                                    sessionProcess = p
+                                    sessionRootIdent = pidOf(p)?.let { identityOf(it) }
+                                }
                                 if (!launched) failure = "Desktop session died within " + grace + "s of launch"
                             } else if (failure == null) {
                                 failure = "Desktop shell unavailable after install; desktop would be empty"
@@ -205,6 +216,12 @@ object XServer {
                                         .edit().putBoolean("ubuntu_desktop_active", true).apply()
                                     launched = true
                                     sessionProcess = p
+                                    sessionRootIdent = pidOf(p)?.let { identityOf(it) }
+                                    sessionBusIdent = sessionBusPid(ctx)?.let { bp ->
+                                        identityOf(bp).also { found ->
+                                            if (found == null) Log.w(TAG, "bus pid " + bp + " unreadable at launch-confirm; stop will skip the bus")
+                                        }
+                                    }
                                 } else {
                                     val tail = if (gnomeLog.isFile && gnomeLog.length() > logBase)
                                         gnomeLog.readText().substring(logBase.toInt().coerceAtMost((gnomeLog.length()).toInt())).takeLast(1500)
@@ -250,15 +267,29 @@ object XServer {
      * the same rule. Leftovers are logged, never hidden.
      */
     fun stopDesktopMode(ctx: Context) {
-        val root = sessionProcess
-        val rootPid = root?.let { pidOf(it) }
-        val busPid = sessionBusPid(ctx)
-        if (rootPid != null) {
-            val left = killTreeVerified(rootPid, busPid)
-            if (left.isNotEmpty()) Log.w(TAG, "stopDesktopMode: leftover pids after verified teardown: " + left)
+        val rootIdent = sessionRootIdent
+        val busIdent = sessionBusIdent
+        val idents = LinkedHashMap<Int, PIdent>()
+        if (rootIdent != null) {
+            val cur = identityOf(rootIdent.pid)
+            if (cur != null && cur.start == rootIdent.start && cur.uid == rootIdent.uid) {
+                // Root identity matches THIS launch: walk its live tree.
+                for (pid in treeOf(rootIdent.pid, scanProc())) identityOf(pid)?.let { idents[pid] = it }
+            } else {
+                Log.i(TAG, "stopDesktopMode: session root already exited or its PID was reused - tree walk skipped " +
+                    "(reparented non-bus leftovers are L2 orphan-handling scope, not silently killed)")
+            }
+        } else {
+            Log.i(TAG, "stopDesktopMode: no launch-captured root identity - tree walk skipped")
         }
+        if (busIdent != null) idents[busIdent.pid] = busIdent
+        val left = killIdentsVerified(idents)
+        if (left.isNotEmpty()) Log.w(TAG, "stopDesktopMode: leftover pids after verified teardown: " + left)
+        val root = sessionProcess
         if (root != null) { try { root.destroy() } catch (t: Throwable) { } }
         sessionProcess = null
+        sessionRootIdent = null
+        sessionBusIdent = null
         val xs = process
         if (xs != null) { try { xs.destroy() } catch (t: Throwable) { }; process = null }
         ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
@@ -316,15 +347,13 @@ object XServer {
         return PIdent(pid, info.start, uid)
     }
 
-    /** TERM the snapshot tree (+ explicitly captured identities such as
-     *  the reparented session bus), verify, KILL survivors, verify empty.
-     *  Before EVERY signal the PID's current (starttime, uid) must match
-     *  the captured identity. Returns surviving pids (empty = clean). */
-    private fun killTreeVerified(root: Int, busPid: Int?): List<Int> {
-        val all0 = scanProc()
-        val idents = HashMap<Int, PIdent>()
-        for (pid in treeOf(root, all0)) identityOf(pid)?.let { idents[pid] = it }
-        if (busPid != null) identityOf(busPid)?.let { idents[it.pid] = it }
+    /** TERM the captured identities (launch-confirmed root tree + the
+     *  launch-confirmed reparented session bus), verify, KILL survivors,
+     *  verify empty. Before EVERY signal the PID's current (starttime,
+     *  uid) must match the LAUNCH-captured identity - a stale pidfile or
+     *  reused PID is never signaled. Returns surviving pids (empty =
+     *  clean). */
+    private fun killIdentsVerified(idents: Map<Int, PIdent>): List<Int> {
         fun signal(sig: Int) {
             for (id in idents.values) {
                 val cur = identityOf(id.pid)
