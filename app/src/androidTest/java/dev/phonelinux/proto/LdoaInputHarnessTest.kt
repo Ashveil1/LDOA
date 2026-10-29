@@ -80,6 +80,26 @@ class LdoaInputHarnessTest {
         Thread.sleep(60_000)
         Shot.dismissSystemDialogs(device)
         assertTrue("gnome session died during the render window", proc.isAlive)
+        // Desktop readiness: bare gnome-shell (the gnome-session fallback)
+        // can take minutes to map the dock - run e98aa13 tapped at ~2 min
+        // and hit unrendered wallpaper. Poll the X tree for shell windows
+        // before trusting tap coordinates.
+        fun xwinEarly(cmd: String): String {
+            val r = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c", "export DISPLAY=:0; " + cmd),
+                extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"))
+            return r.stdout
+        }
+        val readyDeadline = System.currentTimeMillis() + 240_000
+        var shellWins = 0
+        while (System.currentTimeMillis() < readyDeadline) {
+            shellWins = xwinEarly("xwininfo -root -tree 2>/dev/null | grep -ci 'gnome-shell' || true")
+                .trim().toIntOrNull() ?: 0
+            if (shellWins >= 3) break
+            Thread.sleep(10_000)
+        }
+        Log.i(TAG, "harness: desktop readiness shell-windows=" + shellWins)
+        Log.i(TAG, "harness: window tree at readiness: " +
+            xwinEarly("xwininfo -root -children | tail -8").replace("\n", " | "))
 
         fun xwin(cmd: String): String {
             val r = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c", "export DISPLAY=:0; " + cmd),
@@ -144,16 +164,21 @@ class LdoaInputHarnessTest {
         Thread.sleep(2_000)
         val beforeIds = windowIds("nautilus")
         var nauWid: String? = null
-        for (tapY in listOf(194, 264)) {
-            device.swipe(30, tapY, 32, tapY, 25)
-            Log.i(TAG, "harness: pressed Files candidate (30,$tapY)")
-            val openDeadline = System.currentTimeMillis() + 90_000
-            while (System.currentTimeMillis() < openDeadline) {
-                val vis = nauVisible()
-                if (vis != null && vis.id !in beforeIds) { nauWid = vis.id; break }
-                Thread.sleep(3_000)
+        for (round in 1..3) {
+            for (tapY in listOf(194, 264)) {
+                device.swipe(30, tapY, 32, tapY, 25)
+                Log.i(TAG, "harness: pressed Files candidate (30,$tapY) round $round")
+                val openDeadline = System.currentTimeMillis() + 120_000
+                while (System.currentTimeMillis() < openDeadline) {
+                    val vis = nauVisible()
+                    if (vis != null && vis.id !in beforeIds) { nauWid = vis.id; break }
+                    Thread.sleep(3_000)
+                }
+                if (nauWid != null) break
             }
             if (nauWid != null) break
+            Log.i(TAG, "harness: window tree after failed round " + round + ": " +
+                xwin("xwininfo -root -children | tail -10").replace("\n", " | "))
         }
         Thread.sleep(8_000)
         assertTrue("harness: Files window did not open", nauWid != null)
