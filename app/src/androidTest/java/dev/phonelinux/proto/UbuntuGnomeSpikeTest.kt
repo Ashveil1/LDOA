@@ -290,9 +290,31 @@ class UbuntuGnomeSpikeTest {
 
         // Real Files operations through the desktop UI, not guest mkdir.
         // Guest filesystem reads below verify the effects independently.
-        val ctrl = android.view.KeyEvent.META_CTRL_ON
-        device.pressKeyCode(android.view.KeyEvent.KEYCODE_N, ctrl or android.view.KeyEvent.META_SHIFT_ON)
-        Thread.sleep(2_000)
+        // Modifier chords need REAL modifier key events: lorie forwards
+        // each Android key event separately to the X server, so one
+        // KeyEvent that only CARRIES meta state never presses Control/
+        // Shift in the server and the chord degrades to a bare letter
+        // (run 40803712185: Ctrl+Shift+N leaked 'n' into Nautilus
+        // search-as-you-type instead of opening New Folder).
+        val ua = instr.uiAutomation
+        fun injectKey(action: Int, keyCode: Int, metaState: Int = 0) {
+            val now = android.os.SystemClock.uptimeMillis()
+            ua.injectInputEvent(android.view.KeyEvent(now, now, action, keyCode, 0, metaState), true)
+        }
+        fun chord(withShift: Boolean, keyCode: Int) {
+            injectKey(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_CTRL_LEFT)
+            if (withShift) injectKey(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_SHIFT_LEFT)
+            val meta = android.view.KeyEvent.META_CTRL_ON or
+                (if (withShift) android.view.KeyEvent.META_SHIFT_ON else 0)
+            injectKey(android.view.KeyEvent.ACTION_DOWN, keyCode, meta)
+            injectKey(android.view.KeyEvent.ACTION_UP, keyCode, meta)
+            if (withShift) injectKey(android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_SHIFT_LEFT)
+            injectKey(android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_CTRL_LEFT)
+        }
+        chord(true, android.view.KeyEvent.KEYCODE_N)
+        Thread.sleep(3_000)
+        // The dialog's default name may not be fully selected; force it.
+        chord(false, android.view.KeyEvent.KEYCODE_A)
         device.executeShellCommand("input text LDOA-proof-created")
         device.pressEnter()
         Thread.sleep(5_000)
@@ -302,7 +324,7 @@ class UbuntuGnomeSpikeTest {
         // Newly created folder is selected in Nautilus.
         device.pressKeyCode(android.view.KeyEvent.KEYCODE_F2)
         Thread.sleep(2_000)
-        device.pressKeyCode(android.view.KeyEvent.KEYCODE_A, ctrl)
+        chord(false, android.view.KeyEvent.KEYCODE_A)
         device.executeShellCommand("input text LDOA-proof-renamed")
         device.pressEnter()
         Thread.sleep(5_000)
@@ -431,7 +453,7 @@ class UbuntuGnomeSpikeTest {
         assertTrue("Files did not follow finger drag after restart", moved != null &&
             Math.abs(moved.x - rw.x + 60) < 30 && Math.abs(moved.y - rw.y - 120) < 30)
         assertTrue("renamed folder missing after session restart", File(rootfs, "root/LDOA-proof-renamed").isDirectory)
-        device.pressKeyCode(android.view.KeyEvent.KEYCODE_L, ctrl)
+        chord(false, android.view.KeyEvent.KEYCODE_L)
         device.executeShellCommand("input text /root/LDOA-proof-renamed")
         device.pressEnter()
         Thread.sleep(5_000)
