@@ -232,7 +232,14 @@ class MobileShellSpikeTest {
         val skip = (len - maxBytes).coerceAtLeast(0L)
         val text = f.inputStream().use { it.skip(skip); it.readBytes().toString(Charsets.UTF_8) }
         Log.i(TAG, name + " DUMP BEGIN (" + len + "B, last " + text.length + " chars)")
-        for (chunk in text.chunked(3000)) { Log.i(TAG, chunk); Thread.sleep(15) }
+        // Numbered chunks: logd drops are otherwise undetectable (run
+        // 40917499338 reassembly came up 1536B short of the on-device size
+        // with no way to localize the gap).
+        val dumpChunks = text.chunked(3000)
+        dumpChunks.forEachIndexed { i, c ->
+            Log.i(TAG, name + " dump[" + i + "/" + dumpChunks.size + "]: " + c)
+            Thread.sleep(15)
+        }
         Log.i(TAG, name + " DUMP END")
     }
 
