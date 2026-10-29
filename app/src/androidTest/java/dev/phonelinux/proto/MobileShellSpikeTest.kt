@@ -152,6 +152,46 @@ class MobileShellSpikeTest {
             traceChunks.forEachIndexed { ci, chunk ->
                 Log.i(TAG, "devtty trace[" + ci + "/" + traceChunks.size + "]: " + chunk)
             }
+            // Gate-1 ctty matrix (approved test-only - NO product
+            // wiring): does a controlling terminal make xterm's
+            // /dev/tty open SUCCEED, bypassing the alarm-clobbered
+            // errno path (xterm-390 main.c:4050-4052, errno read
+            // unsaved at ~4081; alarm blocked by Android's app seccomp
+            // policy, ENOSYS injected by proot's default case)?
+            // `script` (util-linux, noble bsdutils from util-linux
+            // 2.39.3-9ubuntu6; -c/-e/-q semantics per man script(1))
+            // allocates a pty and gives its child a ctty. Every cell
+            // is timeout-bounded (124 = timed out, distinct from app
+            // output). PRE-FLIGHT checks presence/infra empirically -
+            // rootfs contents are verified, not assumed.
+            // FALSIFIER: ctty confirmed (tty/pts evidence) but xterm
+            // still dies Error 14 -> the diagnosis has a gap; STOP, no
+            // blind iteration.
+            // NOT claimed here: teardown/parentage coverage of the
+            // added script layer and line-discipline effects on logs
+            // (both are Gate-2 verification requirements, unsettled),
+            // and no usable-window or session-level property - cell
+            // outputs are exit/start facts plus ONE mapped-window
+            // observation only.
+            val preflight = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c",
+                "command -v script || echo NO_SCRIPT; ls -la /dev/ptmx 2>&1; ls /dev/pts 2>&1 | head -3"),
+                extraBinds = xtermBind, fakeRoot = true)
+            Log.i(TAG, "devtty ctty preflight: " + preflight.stdout.trim())
+            val dashCtty = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c",
+                "timeout 20s script -qec '( : < /dev/tty ) 2>/tmp/e3; echo dash_ctty_rc=${'$'}?; cat /tmp/e3; echo ctty_tty=${'$'}(tty); echo ctty_fd0=${'$'}(readlink /proc/self/fd/0)' /dev/null 2>&1; echo script_rc=${'$'}?"),
+                extraBinds = xtermBind, fakeRoot = true)
+            Log.i(TAG, "devtty ctty dash: " + dashCtty.stdout.trim())
+            val xtermCtty = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c",
+                "DISPLAY=:0 timeout 20s script -qec 'xterm -e /bin/true' /dev/null 2>&1; echo xterm_ctty_rc=${'$'}?"),
+                extraBinds = xtermBind, fakeRoot = true)
+            Log.i(TAG, "devtty ctty xterm: " + xtermCtty.stdout.trim())
+            // Mapped-window observation (still NOT usability proof):
+            // a 6-second-lived xterm under a ctty, one xwininfo count
+            // mid-life, all inside the outer timeout.
+            val xtermMap = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c",
+                "DISPLAY=:0 timeout 25s script -qec 'xterm -e sleep 6 & sleep 3; xwininfo -root -children 2>/dev/null | grep -ci xterm; wait' /dev/null 2>&1; echo xterm_map_rc=${'$'}?"),
+                extraBinds = xtermBind, fakeRoot = true)
+            Log.i(TAG, "devtty ctty xterm map: " + xtermMap.stdout.trim())
         }
         val logFile = File(ctx.filesDir, "mobile-desktop.log")
         val defaultPrefs = MobileModeSettings.read(ctx)
