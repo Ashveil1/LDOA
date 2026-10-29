@@ -73,6 +73,16 @@ class FailClosedDesktopTest {
             assertTrue("fail-closed error dialog did not appear (silent failure!)", err != null)
             Shot.save("42-failclosed-error-dialog")
 
+            // NONTRIVIAL failure, not a short-circuit: the dialog body must
+            // name the GNOME package-install failure (the apt stage that a
+            // network cut actually breaks), and the RESUMED activity must
+            // still be ours - the X11 activity provably never opened.
+            val body = device.wait(Until.findObject(By.textContains("GNOME package install failed")), 10_000)
+            assertTrue("dialog body is not the apt/network failure (short-circuit?)",
+                body != null)
+            Log.i(TAG, "failvis: dialog body = " + (body?.text ?: "").take(400))
+            assertResumedIsPickerActivity(device)
+
             // Retry: Try again re-enters the flow; still no network, so it
             // must fail VISIBLY again rather than hanging or going black.
             val retry = device.wait(Until.findObject(By.text("Try again")), 10_000)
@@ -84,11 +94,24 @@ class FailClosedDesktopTest {
             val err2 = device.wait(Until.findObject(By.text("Ubuntu desktop did not start")), 240_000)
             assertTrue("fail-closed dialog did not reappear after retry", err2 != null)
             Shot.save("43-failclosed-retry-dialog")
+            assertResumedIsPickerActivity(device)
             device.wait(Until.findObject(By.text("Close")), 10_000)?.click()
         } finally {
             device.executeShellCommand("svc wifi enable")
             device.executeShellCommand("svc data enable")
         }
         Log.i(TAG, "FAILCLOSED-VIS-OK fail-closed dialog + retry proven with pixels")
+    }
+
+    /** Foreground proof, not a code-path claim: the resumed activity must be
+     *  dev.phonelinux.proto/.MainActivity; the vendored X11 activity
+     *  (com.termux.x11.MainActivity) must NOT be on top. */
+    private fun assertResumedIsPickerActivity(device: UiDevice) {
+        val dump = device.executeShellCommand("dumpsys activity activities")
+        val resumed = dump.lineSequence()
+            .firstOrNull { it.contains("mResumedActivity") || it.contains("topResumedActivity") } ?: ""
+        Log.i(TAG, "failvis: resumed = " + resumed.trim())
+        assertTrue("X11 activity is in the foreground (fail-closed violated): " + resumed.trim(),
+            resumed.contains("dev.phonelinux.proto/.MainActivity") && !resumed.contains("termux.x11"))
     }
 }
