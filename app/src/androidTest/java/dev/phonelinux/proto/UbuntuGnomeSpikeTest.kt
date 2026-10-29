@@ -624,6 +624,27 @@ for i in range(d.childCount):
         Log.i(TAG, "longpress-bg: menuWin=" + menuWin + " rightClickInjections=" +
             buttonPresses(menuProbe, 3) + " probeTail=" + menuProbe.takeLast(300).replace("\n", " | ") +
             " atspiNull=" + (menuNodes == null))
+        if (menuWin == null) {
+            // DIAGNOSTIC ONLY (never asserted): is the X input stack able to
+            // open a menu at that point at all? xdotool uses XTEST, an
+            // independent path from the lorie mouse injection. If XTEST
+            // opens a menu, the lorie mouse path is inert; if not, the
+            // client/point refuses right-click menus.
+            val xlist = xwin("xinput list 2>/dev/null | head -24 || true").replace("\n", " | ")
+            val mloc = xwin("xdotool getmouselocation 2>/dev/null || true").replace("\n", " | ")
+            Log.i(TAG, "longpress-bg DIAG: xinput list=" + xlist)
+            Log.i(TAG, "longpress-bg DIAG: mouse=" + mloc + " probeBytes=" + menuProbe.length +
+                " probeHead=" + menuProbe.take(300).replace("\n", " | "))
+            xwin("xdotool mousemove " + bgGuestX + " " + bgGuestY + " click 3 2>/dev/null || true")
+            Thread.sleep(3_000)
+            val xdWin = (rootChildIds() - menuBeforeIds).sorted()
+            Log.i(TAG, "longpress-bg DIAG: xdotool right-click at the same point -> new windows=" + xdWin)
+            if (xdWin.isNotEmpty()) {
+                Shot.save("23d2b-xdotool-menu")
+                device.pressKeyCode(android.view.KeyEvent.KEYCODE_ESCAPE)
+                Thread.sleep(1_000)
+            }
+        }
         assertTrue("hold on Files background produced no menu window " +
             "(atspi items=" + (menuNodes?.let { menuHits(it, bgProbes) - baselineBgNames } ?: "dump-pending") +
             ", probeTail=" + menuProbe.takeLast(300).replace("\n", " | ") + ")",

@@ -427,15 +427,26 @@ class DesktopClientTest {
         // the screen, then drag it back by the still-visible title strip
         // and verify the right edge (controls) is back onscreen.
         val gHome = stGeom()!!
-        val tb = devFor(gHome[0] + 400.0, gHome[1] - 13.0)
-        // Hold-drag (long-press semantics): a fast swipe dropped the whole
-        // motion on the JWM titlebar in run 40824568558 (zero delta), while
-        // device.drag moved the same window twice that run.
-        device.drag(tb.first, tb.second, tb.first + 600, tb.second, 40)
-        Thread.sleep(2_000)
-        val gOff = stGeom()
-        android.util.Log.i("PHONEDIAG", "offscreen drag: before=" + gHome.toList() + " off=" + gOff?.toList())
-        assertTrue("st did not move offscreen (before=" + gHome.toList() + " off=" + gOff?.toList() + ")",
+        anrGuard("st-offscreen")
+        // Effect-verified hold-drag: both swipe AND drag have produced
+        // zero-delta outcomes on this step (runs 40824568558 swipe,
+        // 40827970133 drag) during Pixel Launcher ANR storm periods -
+        // injected events can be lost while the system input pipeline is
+        // jammed. Re-drag until the window actually leaves, logging every
+        // attempt; the assert still requires the final position offscreen.
+        var gOff = stGeom()
+        var offAttempts = 0
+        while ((gOff == null || gOff[0] + gOff[2] + 8 <= 1080) && offAttempts < 3) {
+            offAttempts++
+            val cur = stGeom()!!
+            val tb = devFor(cur[0] + 400.0, cur[1] - 13.0)
+            device.drag(tb.first, tb.second, tb.first + 600, tb.second, 40)
+            Thread.sleep(2_000)
+            gOff = stGeom()
+            android.util.Log.i("PHONEDIAG", "offscreen drag attempt " + offAttempts + ": geom=" + gOff?.toList())
+        }
+        android.util.Log.i("PHONEDIAG", "offscreen drag: before=" + gHome.toList() + " off=" + gOff?.toList() + " attempts=" + offAttempts)
+        assertTrue("st did not move offscreen (before=" + gHome.toList() + " off=" + gOff?.toList() + " attempts=" + offAttempts + ")",
             gOff != null && gOff[0] + gOff[2] + 8 > 1080)
         val go = gOff!!
         val tb2 = devFor(900.0, go[1] - 13.0)
