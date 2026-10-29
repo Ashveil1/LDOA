@@ -174,21 +174,94 @@ class UbuntuGnomeSpikeTest {
         // responding" ANR dialog was up at dock-tap time and the popup-clear
         // tap did not clear it; a modal dialog eats outside touches. Dismiss
         // it explicitly and VERIFY absence before any dock targeting.
+        // Counters for the bounded launcher-ANR recovery below: dismissals
+        // and the single recovery are counted and logged, never hidden.
+        var anrSeen = 0
+        var anrRecoveryUsed = false
+        fun anrDialogUp(): Boolean =
+            device.findObject(androidx.test.uiautomator.By.textContains("isn't responding")) != null ||
+                device.findObject(androidx.test.uiautomator.By.textContains("Not Responding")) != null
+        fun isDisposableEmulator(): Boolean {
+            val qemu = device.executeShellCommand("getprop ro.kernel.qemu").trim()
+            val hw = device.executeShellCommand("getprop ro.hardware").trim()
+            return qemu == "1" || hw.contains("goldfish") || hw.contains("ranchu")
+        }
+        // Bounded environment recovery for the re-posting launcher ANR
+        // storm (run 40953752639 spike: nexuslauncher ANR'd at 21:06 and
+        // re-posted the dialog every ~6s through all 4 dismiss attempts,
+        // defeating the point-in-time guard). Disposable emulator ONLY,
+        // known nexuslauncher ANR ONLY, ONCE per test, loudly logged,
+        // counts preserved. Recovery is VERIFIED: if the launcher does
+        // not self-restart, the known component is started explicitly
+        // (and logged); a 10s quiet window must stay clean. A persistent
+        // storm after the single recovery fails the test as untreated -
+        // no loop.
+        fun anrEnvRecover(stage: String) {
+            assertTrue("re-posted ANR on a non-emulator; environment recovery refused (untreated)",
+                isDisposableEmulator())
+            val attr = device.executeShellCommand(
+                "dumpsys window windows | grep -m1 'Application Not Responding' || true").trim()
+            assertTrue("re-posted ANR is not the known nexuslauncher case, refusing recovery: " + attr,
+                attr.contains("com.google.android.apps.nexuslauncher"))
+            anrRecoveryUsed = true
+            Log.i(TAG, "ENVIRONMENT-RECOVERY-BEGIN[" + stage +
+                "]: force-stop com.google.android.apps.nexuslauncher (disposable emulator, anrSeen=" + anrSeen + ")")
+            device.executeShellCommand("am force-stop com.google.android.apps.nexuslauncher")
+            var pid = ""
+            var dl = System.currentTimeMillis() + 20_000
+            while (System.currentTimeMillis() < dl) {
+                pid = device.executeShellCommand("pidof com.google.android.apps.nexuslauncher").trim()
+                if (pid.isNotEmpty()) break
+                Thread.sleep(1_000)
+            }
+            if (pid.isEmpty()) {
+                Log.i(TAG, "ENVIRONMENT-RECOVERY[" + stage +
+                    "]: launcher did not self-restart; explicitly starting known component")
+                device.executeShellCommand(
+                    "am start -n com.google.android.apps.nexuslauncher/.NexusLauncherActivity")
+                dl = System.currentTimeMillis() + 10_000
+                while (System.currentTimeMillis() < dl) {
+                    pid = device.executeShellCommand("pidof com.google.android.apps.nexuslauncher").trim()
+                    if (pid.isNotEmpty()) break
+                    Thread.sleep(1_000)
+                }
+            }
+            var quiet = true
+            val qEnd = System.currentTimeMillis() + 10_000
+            while (System.currentTimeMillis() < qEnd) {
+                if (anrDialogUp()) { quiet = false; break }
+                Thread.sleep(1_000)
+            }
+            Log.i(TAG, "ENVIRONMENT-RECOVERY-END[" + stage +
+                "]: launcherPid=" + pid + " quietWindowClean=" + quiet)
+            assertTrue("environment recovery failed (untreated ANR storm): launcherPid=" + pid +
+                " quietWindowClean=" + quiet, pid.isNotEmpty() && quiet)
+        }
         fun anrPresent(): Boolean = device.executeShellCommand(
             "dumpsys window windows | grep -m1 'Application Not Responding' || true"
         ).contains("Application Not Responding")
-        fun dismissAnrVerified() {
+        fun dismissAnrVerified(stage: String) {
             var tries = 0
             while (anrPresent() && tries < 4) {
                 tries++
+                anrSeen++
                 Log.i(TAG, "dock-interact: ANR dialog present, dismissing (attempt " + tries + ")")
                 val waitBtn = device.findObject(androidx.test.uiautomator.UiSelector().text("Wait"))
                 if (waitBtn != null && waitBtn.exists()) waitBtn.click() else device.pressBack()
                 Thread.sleep(3_000)
             }
-            assertTrue("ANR dialog still present after " + tries + " dismiss attempts", !anrPresent())
+            // Dismissal is not proof the storm is over: run 40953752639
+            // re-posted the dialog after EVERY attempt. A dialog still up
+            // after the bounded dismissals is the storm case -> one
+            // bounded recovery, never a dismiss loop.
+            if (anrPresent() && !anrRecoveryUsed) {
+                anrEnvRecover(stage)
+            }
+            assertTrue("ANR dialog still present after " + tries + " dismiss attempts" +
+                (if (anrRecoveryUsed) " + one bounded environment recovery" else "") +
+                " at " + stage + " (untreated)", !anrPresent())
         }
-        dismissAnrVerified()
+        dismissAnrVerified("dock-preconditions")
 
         // Dismiss the screen-lock notification banner (top center) so it
         // cannot cover the dock: swipe it upward off the stack.
@@ -211,7 +284,7 @@ class UbuntuGnomeSpikeTest {
         device.click(540, 1200)
         Thread.sleep(2_000)
         Shot.save("21c-ubuntu-desktop-clean")
-        dismissAnrVerified()
+        dismissAnrVerified("dock-icon-tap")
         // Icon centers pixel-measured from the full-panel cold-start shot
         // (30, run 40671527573): Files = y~194 (grey/red cabinet),
         // second icon y~264, both spanning x~4-60 -> tap x=30.
@@ -456,10 +529,25 @@ class UbuntuGnomeSpikeTest {
                 Shot.dismissSystemDialogs(device)
                 dismissed++
             }
+            anrSeen += dismissed
             Log.i(TAG, "anr-guard[" + stage + "]: allowlisted dialogs dismissed=" + dismissed)
-            assertTrue("system ANR dialog still blocking input before " + stage,
-                device.findObject(androidx.test.uiautomator.By.textContains("isn't responding")) == null &&
-                device.findObject(androidx.test.uiautomator.By.textContains("Not Responding")) == null)
+            // A dismissal is not proof the storm is over: the dialog
+            // re-posts within seconds while the launcher stays hung. Watch
+            // a bounded window after any dismissal; a re-post goes to the
+            // single bounded recovery, not another silent dismiss cycle.
+            if (dismissed > 0 && !anrRecoveryUsed) {
+                val wEnd = System.currentTimeMillis() + 8_000
+                while (System.currentTimeMillis() < wEnd) {
+                    Thread.sleep(1_000)
+                    if (anrDialogUp()) {
+                        anrSeen++
+                        Log.i(TAG, "anr-guard[" + stage + "]: ANR re-posted inside post-dismiss window (anrSeen=" + anrSeen + ")")
+                        anrEnvRecover(stage)
+                        break
+                    }
+                }
+            }
+            assertTrue("system ANR dialog still blocking input before " + stage, !anrDialogUp())
         }
         anrGuard("gesture-tests")
 
