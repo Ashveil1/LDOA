@@ -92,7 +92,18 @@ jobs:
             # AutoEnter requires an empty Ubuntu state and must run FIRST;
             # UbuntuBaseSpikeTest has already installed Ubuntu in the generic suite.
             # It is still gating in the dedicated job, not skipped or retried.
-            ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.notClass=dev.phonelinux.proto.UbuntuGnomeSpikeTest,dev.phonelinux.proto.UbuntuDesktopAutoEnterTest --info 2>&1 | tee /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
+            # L1 fixture (run 40886363993): a01's in-test `pm revoke` killed the
+            # instrumentation VM itself - revoking a held runtime permission
+            # kills the app process that HOSTS the tests. Denial is therefore
+            # preset OUT of process here, before the app first runs (no-op
+            # kill), and SessionServiceTest runs FIRST in its own invocation
+            # so no earlier class can grant the permission via the runtime
+            # dialog. a01 asserts the denied precondition and fails loudly if
+            # this fixture breaks.
+            adb -s emulator-5554 shell pm revoke dev.phonelinux.proto android.permission.POST_NOTIFICATIONS || true
+            ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=dev.phonelinux.proto.SessionServiceTest --info 2>&1 | tee /tmp/instr-l1.log || touch /tmp/PHONELINUX_TESTS_FAILED
+            grep -q "BUILD SUCCESSFUL" /tmp/instr-l1.log || touch /tmp/PHONELINUX_TESTS_FAILED
+            ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.notClass=dev.phonelinux.proto.UbuntuGnomeSpikeTest,dev.phonelinux.proto.UbuntuDesktopAutoEnterTest,dev.phonelinux.proto.SessionServiceTest --info 2>&1 | tee /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
             grep -q "BUILD SUCCESSFUL" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
             # Host-driven cold-start E2E (parent directive): install the APK
             # on this RUNNING emulator, drive the real UI, am force-stop,
@@ -320,8 +331,15 @@ jobs:
           git clone https://github.com/termux/proot.git /tmp/termux-proot
           git -C /tmp/termux-proot checkout b27d81a68d765f3462e807f4a14e01a03f8e89ea
           git -C /tmp/termux-proot log -1 --format='%H %s' 
-          make -C /tmp/termux-proot/src -j4
+          # HAS_LOADER_32BIT= : arch.h enables a -m32 loader-m32 build that
+          # aarch64 gcc cannot compile (no multilib on ARM hosts; job
+          # 123490623535). The Ubuntu rootfs here is arm64-only, so the
+          # 32-bit loader is unused by this lane.
+          make -C /tmp/termux-proot/src HAS_LOADER_32BIT= -j4
+          # Architecture truth: prove what was built before it gates anything.
+          file /tmp/termux-proot/src/proot
           /tmp/termux-proot/src/proot --version
+          git -C /tmp/termux-proot log -1 --format='proot source: %H'
       - name: Fetch the exact arm64 rootfs the app would use
         run: |
           UBUNTU_BASE=$(grep -o 'UBUNTU_BASE = "[^"]*"' app/src/main/java/dev/phonelinux/proto/DistroInstaller.kt | cut -d'"' -f2)

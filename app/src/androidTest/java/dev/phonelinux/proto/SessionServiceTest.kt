@@ -1,7 +1,10 @@
 package dev.phonelinux.proto
 
+import android.Manifest
 import android.app.NotificationManager
 import android.content.Intent
+import android.content.pm.PackageManager
+import org.junit.Assert.assertEquals
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.UiDevice
@@ -45,7 +48,16 @@ class SessionServiceTest {
 
     @Test
     fun a01_notificationDenied_serviceStillRunsNoWakelock() {
-        shell("pm revoke $pkg android.permission.POST_NOTIFICATIONS")
+        // Denial is preset OUT of process by the lane (the workflow revokes
+        // POST_NOTIFICATIONS before this class-filtered invocation): an
+        // in-test `pm revoke` of a held runtime permission kills the app
+        // process that hosts the instrumentation VM (run 40886363993).
+        // Assert the fixture contract instead of mutating it here.
+        assertEquals(
+            "fixture: POST_NOTIFICATIONS must be denied entering a01 " +
+                "(the lane presets denial out-of-process before this class runs)",
+            PackageManager.PERMISSION_DENIED,
+            ctx.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS))
         SessionService.stop(ctx)
         Thread.sleep(1_500)
         SessionService.start(ctx)
