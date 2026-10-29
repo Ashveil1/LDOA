@@ -308,7 +308,11 @@ jobs:
   guest-arm64:
     if: github.event_name == 'workflow_dispatch' && (github.event.inputs.lanes == 'all' || github.event.inputs.lanes == 'guest-arm')
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 60
+    # 60 min was consumed mid-package-install (run 40897589750: DNS fix
+    # worked - 493 resolved Get: lines from ports.ubuntu.com, no SIGSEGV,
+    # then the job timeout killed proot/dbus during unpack). GNOME package
+    # installation under proot on the hosted ARM runner needs more.
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
       - name: Runner reality check
