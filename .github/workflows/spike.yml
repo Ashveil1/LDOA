@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       lanes:
-        description: "all (default, includes guest-arm64) | fast = build + emulator-test only | guest-arm = build + guest-arm64 only"
+        description: "all (default, includes guest-arm64) | fast = build + emulator-test only | guest-arm = build + guest-arm64 only | focus-x86 = build + emulator-test + ubuntu-gnome-spike (no ARM lanes)"
         default: "all"
         required: false
       arm_emulator:
@@ -371,4 +371,23 @@ jobs:
       - name: Diagnostic only - session launch attempt WITHOUT display server
         run: |
           echo "NO DISPLAY SERVER in this lane (no lorie, no Xvfb): output below is error-class data only, NOT a GNOME startup verdict. Android display/input path untested here."
-          /tmp/termux-proot/src/proot --link2symlink -0 -r /tmp/rootfs -b /dev -b /proc -b /sys -w /root dbus-launch gnome-session --session=ubuntu 2>&1 | head -50 || true
+          # Bounded diagnostic (run 40912064975 job 123582397018: the
+          # unbounded `| head -50` pipeline sat 148 min with ZERO output -
+          # head never saw 50 lines and there was no timeout, so the whole
+          # remaining cap burned uninformative). Now: 10-min window,
+          # output to file (no head buffering), liveness marker every 30s,
+          # explicit exit class, full dump at the end. Not a startup gate.
+          set +e
+          timeout --signal=TERM --kill-after=30s 600s             /tmp/termux-proot/src/proot --link2symlink -0 -r /tmp/rootfs -b /dev -b /proc -b /sys -w /root             dbus-launch gnome-session --session=ubuntu > /tmp/gnome-launch.log 2>&1 &
+          LAUNCH_PID=$!
+          for i in $(seq 1 20); do
+            sleep 30
+            if ! kill -0 $LAUNCH_PID 2>/dev/null; then echo "liveness: launch exited after ~$((i*30))s"; break; fi
+            echo "liveness: t=$((i*30))s alive, log bytes=$(wc -c < /tmp/gnome-launch.log 2>/dev/null || echo 0)"
+          done
+          wait $LAUNCH_PID
+          RC=$?
+          echo "launch exit class: rc=$RC (124=timeout-TERM, 137=timeout-KILL, 0=self-exit)"
+          echo "=== captured output bytes: $(wc -c < /tmp/gnome-launch.log 2>/dev/null || echo 0) ==="
+          head -200 /tmp/gnome-launch.log 2>/dev/null
+          exit 0
