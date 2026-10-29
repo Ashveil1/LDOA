@@ -4,6 +4,12 @@ on:
     # Narrowed 2026-10-29 (task-owner): only the app/entry branch triggers
     # this lane. Parallel feature branches (custom desktop) must not spend
     # 2h harness runs per push.
+    # Workflow-file-only edits (spike/mobile-desktop lanes, this file) do not
+    # change product code and must not fire a full x86 harness chain.
+    paths-ignore:
+      - '.github/workflows/spike.yml'
+      - '.github/workflows/mobile-desktop.yml'
+      - '.github/workflows/input-harness.yml'
     branches: [gnome/evidence]
   workflow_dispatch:
 

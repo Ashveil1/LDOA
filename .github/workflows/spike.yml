@@ -315,7 +315,11 @@ jobs:
           # guest-side ARM evidence, not Android proof.
           sudo apt-get update -qq
           sudo apt-get install -y -qq build-essential git libtalloc-dev
-          git clone --depth 1 https://github.com/termux/proot.git /tmp/termux-proot
+          # Pinned source commit for reproducibility (reviewed family, fixed
+          # vendor input): termux/proot b27d81a68d765f3462e807f4a14e01a03f8e89ea
+          git clone https://github.com/termux/proot.git /tmp/termux-proot
+          git -C /tmp/termux-proot checkout b27d81a68d765f3462e807f4a14e01a03f8e89ea
+          git -C /tmp/termux-proot log -1 --format='%H %s' 
           make -C /tmp/termux-proot/src -j4
           /tmp/termux-proot/src/proot --version
       - name: Fetch the exact arm64 rootfs the app would use
