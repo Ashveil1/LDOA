@@ -6,6 +6,11 @@ on:
   # no parallel broad runs until the lorie-mouse right-click question
   # settles (task-owner instruction). Restore `push:` after that.
   workflow_dispatch:
+    inputs:
+      lanes:
+        description: "all (default) or fast = build + emulator-test only (skips the 30-150m cold-chain and arm64 jobs)"
+        default: "all"
+        required: false
 
 jobs:
   build:
@@ -116,6 +121,7 @@ jobs:
   # is unproven; becomes gating only after a green real-render verdict.
   # apt-in-emulator is slow - its own job so the every-push lane stays fast.
   ubuntu-gnome-spike:
+    if: github.event.inputs.lanes != 'fast'
     runs-on: ubuntu-latest
     needs: build
     continue-on-error: true
@@ -207,7 +213,7 @@ jobs:
     # Hypervisor.framework (HVF error: HV_UNSUPPORTED, run 772fadb), and an
     # arm64 Android image cannot boot without hardware acceleration. Kept
     # for reproduction; not a per-push lane until ARM-capable runners exist.
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.lanes != 'fast'
     runs-on: macos-14
     needs: build
     continue-on-error: true
