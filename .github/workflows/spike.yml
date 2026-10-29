@@ -1,7 +1,10 @@
 name: spike
 
 on:
-  push:
+  # TEMP 2026-10-29: push trigger gated to manual dispatch while the focused
+  # input-attribution harness (input-harness.yml) owns per-push cycles -
+  # no parallel broad runs until the lorie-mouse right-click question
+  # settles (task-owner instruction). Restore `push:` after that.
   workflow_dispatch:
 
 jobs:
