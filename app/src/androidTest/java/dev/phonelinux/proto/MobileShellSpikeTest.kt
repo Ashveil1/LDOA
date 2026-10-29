@@ -53,6 +53,33 @@ class MobileShellSpikeTest {
         assertTrue("guest exec must exit 0. stderr=${g.stderr}", g.exitCode == 0)
         assertTrue("guest must be Ubuntu, got: ${g.stdout}", g.stdout.contains("Ubuntu"))
 
+        // Bounded /dev/tty probe (xterm Error 14 = ERROR_OPDEVTTY, errno 38
+        // ENOSYS, run 40898320897). NO guest strace: a process cannot have
+        // two ptracers and proot already traces the guest
+        // (github.com/proot-me/proot/issues/9), so a guest strace would be
+        // an altered environment, not product evidence. Instead: dash
+        // opens /dev/tty in xterm's exact mode (O_RDWR via the POSIX <>
+        // operator, error.h: ERROR_OPDEVTTY = spawn/startup open of
+        // /dev/tty), read-only + /dev/null controls, and the proot layer's
+        // own view via PROOT_VERBOSE (termux/proot cli.c:467-474 honors
+        // the env var; the vendored libproot.so is the Termux build).
+        // (publish-side fixes by the app worker, behavior-preserving:
+        //  the patch's nested double quotes did not compile in Kotlin -
+        //  switched the echo wrappers to single quotes; and `head -c 1
+        //  /dev/tty` would BLOCK forever if the open succeeded (tty read
+        //  with no input) - replaced with a pure O_RDONLY open test via
+        //  the POSIX `:` builtin, matching the open-only control intent.)
+        val ttyProbe = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c",
+            ": <> /dev/tty 2>/tmp/ttyrw.err; echo 'dev_tty_rdwr rc='${'$'}? 'err='${'$'}(cat /tmp/ttyrw.err); " +
+            ": < /dev/tty 2>/tmp/ttyr.err; echo 'dev_tty_rd rc='${'$'}? 'err='${'$'}(cat /tmp/ttyr.err); " +
+            "head -c 1 /dev/null >/dev/null 2>&1; echo 'dev_null_rd rc='${'$'}?; " +
+            "grep TracerPid /proc/self/status; " +
+            "ls -la /dev/tty 2>&1; ls /dev/pts 2>&1"),
+            extraEnv = mapOf("PROOT_VERBOSE" to "5"))
+        Log.i(TAG, "devtty probe exit=" + ttyProbe.exitCode +
+            " stdout: " + ttyProbe.stdout.trim() +
+            " proot-stderr tail: " + ttyProbe.stderr.takeLast(4000))
+
         // Provision the mobile set (bounded: jwm + xterm + pcmanfm + utils).
         if (!GuestMobileShell.hasMobileShell(rootfs)) {
             val r = GuestMobileShell.provisionMobileShell(ctx, rootfs)
