@@ -552,9 +552,10 @@ for i in range(d.childCount):
 
         val nwg = nauVisible()
         assertTrue("Files window missing before gesture tests", nwg != null)
-        val fe0 = frameExtents(nwg!!.id)
-        val bgGuestX = nwg.x + fe0[0] + (nwg.w - fe0[0] - fe0[1]) / 2
-        val bgGuestY = nwg.y + fe0[2] + (nwg.h - fe0[2] - fe0[3]) - 80
+        val nwgP = nwg!!
+        val fe0 = frameExtents(nwgP.id)
+        val bgGuestX = nwgP.x + fe0[0] + (nwgP.w - fe0[0] - fe0[1]) / 2
+        val bgGuestY = nwgP.y + fe0[2] + (nwgP.h - fe0[2] - fe0[3]) - 80
         val bgTarget = mapToDevice(bgGuestX, bgGuestY)
         assertTrue("no device mapping for long-press target", bgTarget != null)
 
@@ -593,7 +594,7 @@ for i in range(d.childCount):
 
         // (b) No spurious right-click: a one-finger drag and a plain tap on
         // the desktop background (outside every window) must open nothing.
-        val geom = xwin("xdotool getdisplaygeometry").trim().split(Regex("\s+"))
+        val geom = xwin("xdotool getdisplaygeometry").trim().split(Regex("\\s+"))
         val scrW = geom.getOrNull(0)?.toIntOrNull() ?: 1080
         val scrH = geom.getOrNull(1)?.toIntOrNull() ?: 2160
         val deskTarget = mapToDevice(scrW - 80, scrH - 60)
@@ -636,7 +637,7 @@ for i in range(d.childCount):
         } else {
             Log.i(TAG, "longpress-row: folder node not in a11y tree; headerbar fallback")
             val before = xwin("xwininfo -root -children | grep -c '0x' || true").trim().toIntOrNull() ?: 0
-            val hb = mapToDevice(nwg.x + fe0[0] + (nwg.w - fe0[0] - fe0[1]) - 200, nwg.y + fe0[2] + 20)
+            val hb = mapToDevice(nwgP.x + fe0[0] + (nwgP.w - fe0[0] - fe0[1]) - 200, nwgP.y + fe0[2] + 20)
             assertTrue("headerbar fallback mapping missing", hb != null)
             longPress(hb!!)
             Thread.sleep(2_500)
@@ -672,15 +673,13 @@ for i in range(d.childCount):
         val scrollProbe = probeStop("scroll")
         val bmpAfter = fullShot()
         Shot.save("23f-ubuntu-twofinger-scrolled")
-        val smoothEvents = Regex("valuators:[^\n]*3: -?\d").findAll(scrollProbe).count()
+        val smoothEvents = Regex("valuators:[^\\n]*3: -?\\d").findAll(scrollProbe).count()
         val moved = regionDiff(bmpBefore, bmpAfter, scrollRect)
         Log.i(TAG, "twofinger-scroll: smoothValuatorEvents=" + smoothEvents +
             " visibleChangeFraction=" + moved +
-            " probeTail=" + scrollProbe.takeLast(400).replace("
-", " | "))
+            " probeTail=" + scrollProbe.takeLast(400).replace("\n", " | "))
         assertTrue("two-finger drag delivered no scroll-valuator motion to :0 (probeTail=" +
-            scrollProbe.takeLast(300).replace("
-", " | ") + ")", smoothEvents > 0)
+            scrollProbe.takeLast(300).replace("\n", " | ") + ")", smoothEvents > 0)
         assertTrue("Files content did not visibly move after two-finger drags (diff=" + moved + ")",
             moved > 0.05)
         Log.i(TAG, "UBUNTU-TWOFINGER-SCROLL-OK injected scroll and visible movement (" + moved + ")")
@@ -698,8 +697,9 @@ for i in range(d.childCount):
             Thread.sleep(1_000)
         }
         assertTrue("xterm window never mapped", xt != null)
-        val xrect = devRectOf(xt!![0], xt[1], xt[2], xt[3])
-        val xc = mapToDevice(xt[0] + xt[2] / 2, xt[1] + xt[3] / 2)!!
+        val xtP = xt!!
+        val xrect = devRectOf(xtP[0], xtP[1], xtP[2], xtP[3])
+        val xc = mapToDevice(xtP[0] + xtP[2] / 2, xtP[1] + xtP[3] / 2)!!
         val bmpX0 = fullShot()
         Shot.save("23g-ubuntu-xterm-before-scroll")
         probeStart("xterm")
@@ -713,8 +713,7 @@ for i in range(d.childCount):
         val xMoved = regionDiff(bmpX0, bmpX1, xrect)
         val legacyUp = buttonPresses(xtermProbe, 4)
         Log.i(TAG, "xterm-scroll: visibleChangeFraction=" + xMoved + " emulatedBtn4=" + legacyUp +
-            " probeTail=" + xtermProbe.takeLast(400).replace("
-", " | "))
+            " probeTail=" + xtermProbe.takeLast(400).replace("\n", " | "))
         assertTrue("xterm content did not visibly move (legacy scroll path broken, diff=" + xMoved + ")",
             xMoved > 0.05)
         Log.i(TAG, "UBUNTU-LEGACY-SCROLL-OK xterm scrolled visibly (" + xMoved + ")")
@@ -746,7 +745,7 @@ for i in range(d.childCount):
         twoFingerSwipe(scP.first - 60, scP.second, scP.first + 60, scP.second, 0, -200)
         Thread.sleep(900)
         val offScrollProbe = probeStop("offscroll")
-        val offSmooth = Regex("valuators:[^\n]*3: -?\d").findAll(offScrollProbe).count()
+        val offSmooth = Regex("valuators:[^\\n]*3: -?\\d").findAll(offScrollProbe).count()
         Log.i(TAG, "toggle-off scroll: injectedSmoothEvents=" + offSmooth)
         assertTrue("scroll injection still active with the toggle off", offSmooth == 0)
         Shot.save("23i-ubuntu-toggles-off")
