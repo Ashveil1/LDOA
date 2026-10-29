@@ -89,6 +89,20 @@ class SessionServiceTest {
         assertFalse("no auto wakelock", SessionService.isWakelockHeld())
         toggleWakelock()
         awaitTrue(5_000, "wakelock held after user toggle on") { SessionService.isWakelockHeld() }
+        // Active-notification state proof (run 40893043994: the shade pixel
+        // still showed "off" 2.3s after the toggle - byte-identical to the
+        // off-state shot, cause undetermined). API state settles that the
+        // posted notification really carries the on text; the ACTUAL shade
+        // on-state pixel remains an open verification item, not replaced
+        // by this assertion.
+        val nm3 = ctx.getSystemService(NotificationManager::class.java)
+        awaitTrue(5_000, "active notification text shows wakelock on") {
+            nm3.activeNotifications.any {
+                it.id == SessionService.NOTIF_ID &&
+                    (it.notification.extras.getCharSequence("android.text") ?: "")
+                        .contains("Wakelock: on")
+            }
+        }
         // Pixel evidence: notification text reflects the held wakelock.
         device.openNotification()
         Thread.sleep(1_500)
