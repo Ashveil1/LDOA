@@ -150,6 +150,7 @@ object GuestMobileShell {
             xprop -root -remove _DBUS_SESSION_BUS_PID 2>/dev/null
             eval ${'$'}(dbus-launch --sh-syntax) 2>&1
             echo "mobile-launch: session bus ${'$'}DBUS_SESSION_BUS_ADDRESS"
+            echo ${'$'}DBUS_SESSION_BUS_PID > /root/.mobile-bus.pid 2>/dev/null
             xrdb -merge /root/.Xresources 2>&1
             xsetroot -solid "${ui.background}"
             echo "mobile-launch: starting jwm (tray=${trayH}px dpi=$dpi scale=${ui.scale})"

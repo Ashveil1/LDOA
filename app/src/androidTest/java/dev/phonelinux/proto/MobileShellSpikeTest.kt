@@ -14,10 +14,12 @@ import java.io.File
 /**
  * Mobile desktop mode lane (dispatch-only, mobile-desktop.yml): provision
  * the touch-sized reused-jwm session on the Ubuntu rootfs, launch it
- * against the embedded X server, capture early + settled screenshots for
- * pixel inspection, prove a client window mapped on :0, then tear the
- * whole session tree down by host parentage and verify it is empty
- * (fail closed).
+ * against the embedded X server, capture screenshots for pixel inspection
+ * at the DEFAULT, MIN (75%) and MAX (200%) UI scales (readability of the
+ * settings range is judged on the artifacts, not asserted), prove a
+ * client window mapped on :0, and after EVERY launch tear the whole
+ * session tree down by host parentage and verify it is empty
+ * (fail closed - a leftover fails the test).
  *
  * Runs alone in its own emulator job: it owns :0 for the whole run, so no
  * GNOME/Alpine session can be racing the display. A green test means the
@@ -61,18 +63,80 @@ class MobileShellSpikeTest {
 
         // Dedicated lane: the fresh emulator owns :0 for the whole run.
         XServer.start(ctx)
-        val proc = GuestMobileShell.launchMobileSession(ctx, rootfs)
-
-        // Evidence window: poll mobile-desktop.log for launch markers.
         val logFile = File(ctx.filesDir, "mobile-desktop.log")
+        val defaultPrefs = MobileModeSettings.read(ctx)
+        var logOffset = 0L
+
+        // One full launch->evidence->verified-teardown cycle per scale.
+        // Default gets early+settled shots and the xwininfo window proof;
+        // min/max add one settled shot each for readability pixel review.
+        for (round in listOf(
+            Triple(defaultPrefs.scale, "40-mobile-desktop-early", "41-mobile-desktop-settled"),
+            Triple(0.75f, "", "42-mobile-scale-min"),
+            Triple(2.0f, "", "43-mobile-scale-max"))) {
+            val (scale, shotEarly, shotSettled) = round
+            MobileModeSettings.write(ctx, defaultPrefs.copy(scale = scale))
+            Log.i(TAG, "mobile round scale=$scale")
+            val proc = GuestMobileShell.launchMobileSession(ctx, rootfs)
+            logOffset = awaitJwmAlive(proc, logFile, logOffset)
+            assertTrue("mobile session process died before the evidence window closed (scale=$scale)", proc.isAlive)
+
+            ctx.startActivity(
+                Intent(ctx, com.termux.x11.MainActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            Thread.sleep(30_000)
+            Shot.dismissSystemDialogs(device)
+            if (shotEarly.isNotEmpty()) Shot.save(shotEarly)
+            Thread.sleep(if (shotEarly.isNotEmpty()) 90_000 else 30_000)
+            Shot.dismissSystemDialogs(device)
+            Shot.save(shotSettled)
+            assertTrue("mobile session died during the render window (scale=$scale)", proc.isAlive)
+
+            if (shotEarly.isNotEmpty()) {
+                // Client-window evidence via the guest's own xwininfo on :0.
+                val wins = GuestDesktop.guestShell(ctx, rootfs,
+                    "DISPLAY=:0 xwininfo -root -children 2>/dev/null | grep -i -e xterm -e pcmanfm || true",
+                    extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"))
+                Log.i(TAG, "mobile windows: $wins")
+                assertTrue("no xterm window mapped on :0", wins.contains("xterm"))
+            }
+
+            // TEARDOWN PROOF (every round): host-parentage kill walk from
+            // the tracked proot root PLUS the recorded session-bus PID
+            // (dbus-daemon reparents to init and escapes the parentage
+            // walk). TERM, re-verify, KILL survivors, verify empty. A
+            // guest-global PLINUX_SESSION scan is unsafe: /proc is
+            // host-bound into every proot and GNOME/Alpine share one tag.
+            val rootPid = hostPidOf(proc)
+            assertTrue("proot root PID unreadable - cannot prove teardown", rootPid != null)
+            val busPid = File(rootfs, "root/.mobile-bus.pid")
+                .takeIf { it.isFile }?.readText()?.trim()?.toIntOrNull()
+            val left = killTreeVerified(rootPid!!, setOfNotNull(busPid))
+            assertTrue("session tree not empty after teardown (scale=$scale): $left", left.isEmpty())
+            Log.i(TAG, "mobile round scale=$scale torn down clean")
+        }
+        MobileModeSettings.write(ctx, defaultPrefs)
+        Log.i(TAG, "MOBILE-SHELL-OK sessions alive, rendered at 3 scales, windows mapped, trees torn down")
+    }
+
+    /** Poll the session log (new bytes only) for the jwm-alive marker with
+     *  fail-fast on decisive failures. Returns the new log offset. */
+    private fun awaitJwmAlive(proc: Process, logFile: File, startOffset: Long): Long {
         val deadline = System.currentTimeMillis() + 600_000
+        var offset = startOffset
         var sawLaunchMarker = false
-        var sawAlive = false
         while (System.currentTimeMillis() < deadline) {
-            val text = if (logFile.isFile) logFile.readText() else ""
+            val len = if (logFile.isFile) logFile.length() else 0L
+            var text = ""
+            if (len > offset) {
+                logFile.inputStream().use { it.skip(offset); text = it.readBytes().toString(Charsets.UTF_8) }
+                offset = len
+            }
             if (text.contains("mobile-launch:")) sawLaunchMarker = true
-            if (text.contains("mobile-launch: jwm alive")) { sawAlive = true; break }
-            // Decisive failures end the poll immediately (no blind waiting).
+            if (text.contains("mobile-launch: jwm alive")) {
+                assertTrue("session script never reached the launch marker before alive", sawLaunchMarker)
+                return offset
+            }
             if (text.contains("mobile-launch: jwm died") ||
                 text.contains("Cannot open display") ||
                 text.contains("jwm: not found")) {
@@ -84,38 +148,7 @@ class MobileShellSpikeTest {
         }
         Log.i(TAG, "mobile log tail: " + (if (logFile.isFile) logFile.readText().takeLast(1500) else "<missing>"))
         assertTrue("session script never reached the launch marker", sawLaunchMarker)
-        assertTrue("jwm never reported alive", sawAlive)
-        assertTrue("mobile session process died before the evidence window closed", proc.isAlive)
-
-        // Render evidence: X surface early + settled (pixel judgment is on
-        // the artifact screenshots, same convention as the GNOME lane).
-        ctx.startActivity(
-            Intent(ctx, com.termux.x11.MainActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        Thread.sleep(30_000)
-        Shot.dismissSystemDialogs(device)
-        Shot.save("40-mobile-desktop-early")
-        Thread.sleep(90_000)
-        Shot.dismissSystemDialogs(device)
-        Shot.save("41-mobile-desktop-settled")
-        assertTrue("mobile session died during the render window", proc.isAlive)
-
-        // Client-window evidence via the guest's own xwininfo against :0.
-        val wins = GuestDesktop.guestShell(ctx, rootfs,
-            "DISPLAY=:0 xwininfo -root -children 2>/dev/null | grep -i -e xterm -e pcmanfm || true",
-            extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"))
-        Log.i(TAG, "mobile windows: $wins")
-        assertTrue("no xterm window mapped on :0", wins.contains("xterm"))
-
-        // TEARDOWN PROOF: host-parentage kill walk from the tracked proot
-        // root (TERM, re-verify, KILL survivors, verify empty). A
-        // guest-global PLINUX_SESSION scan is unsafe: /proc is host-bound
-        // into every proot and the GNOME/Alpine lanes share one tag.
-        val rootPid = hostPidOf(proc)
-        assertTrue("proot root PID unreadable - cannot prove teardown", rootPid != null)
-        val left = killTreeVerified(rootPid!!)
-        assertTrue("session tree not empty after teardown: $left", left.isEmpty())
-        Log.i(TAG, "MOBILE-SHELL-OK session alive, rendered, window mapped, tree torn down")
+        throw AssertionError("jwm never reported alive")
     }
 
     // ---- host process helpers (temporary, until the GNOME worker's
@@ -156,13 +189,14 @@ class MobileShellSpikeTest {
         return out
     }
 
-    /** TERM the snapshot tree, verify, KILL survivors, verify empty.
-     *  PID reuse is guarded by starttime. Anything that escaped the
-     *  snapshot (reparented) is reported as a leftover and fails the
+    /** TERM the snapshot tree (+ explicitly named extra PIDs such as the
+     *  reparented session bus), verify, KILL survivors, verify empty.
+     *  PID reuse is guarded by starttime. Anything that escaped both the
+     *  snapshot and the extras is reported as a leftover and fails the
      *  assert - fail closed, never claim a clean kill we did not verify. */
-    private fun killTreeVerified(root: Int): List<Int> {
+    private fun killTreeVerified(root: Int, extraPids: Set<Int> = emptySet()): List<Int> {
         val all0 = scanProc()
-        val snapshot = treeOf(root, all0)
+        val snapshot = treeOf(root, all0) + extraPids.filter { all0.containsKey(it) }
         val starts = HashMap<Int, String>()
         for (pid in snapshot) all0[pid]?.let { starts[pid] = it.start }
         for (sig in listOf(android.system.OsConstants.SIGTERM, android.system.OsConstants.SIGKILL)) {
