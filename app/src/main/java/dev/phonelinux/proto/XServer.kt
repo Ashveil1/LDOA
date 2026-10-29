@@ -82,6 +82,18 @@ object XServer {
         // (renderer.cpp, settings.gradle.kts vendored patch). Injection and
         // app-drawn text carets are unaffected.
         env["LORIE_HIDE_CURSOR"] = "1"
+        // The compositing renderer (lorie renderer.cpp, loaded via LorieView
+        // JNI) runs in THIS app process, not in the spawned server, so the
+        // server env alone never reaches its per-frame getenv (CI evidence:
+        // run 40916848175 shots 07/08 show the cursor composited). Set it
+        // here too, before the X11 activity opens and renders its first
+        // frame. If setenv fails, degrade to a visible cursor instead of
+        // failing the desktop launch.
+        try {
+            Os.setenv("LORIE_HIDE_CURSOR", "1", true)
+        } catch (t: Throwable) {
+            Log.w(TAG, "LORIE_HIDE_CURSOR setenv failed; X cursor will stay visible", t)
+        }
         pb.redirectErrorStream(true)
         pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))
         process = pb.start()
