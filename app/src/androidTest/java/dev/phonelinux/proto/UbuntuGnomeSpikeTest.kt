@@ -497,7 +497,7 @@ for i in range(d.childCount):
             return null
         }
 
-        fun longPress(at: Pair<Int, Int>) {
+        fun longPress(at: Pair<Int, Int>, holdMs: Long = 800) {
             val down = android.os.SystemClock.uptimeMillis()
             val props = android.view.MotionEvent.PointerProperties().apply {
                 id = 0; toolType = android.view.MotionEvent.TOOL_TYPE_FINGER
@@ -511,10 +511,37 @@ for i in range(d.childCount):
                 android.view.InputDevice.SOURCE_TOUCHSCREEN, 0)
             var e = ev(android.view.MotionEvent.ACTION_DOWN)
             try { instr.sendPointerSync(e) } finally { e.recycle() }
-            android.os.SystemClock.sleep(800)
+            android.os.SystemClock.sleep(holdMs)
             e = ev(android.view.MotionEvent.ACTION_UP)
             try { instr.sendPointerSync(e) } finally { e.recycle() }
         }
+        fun holdDrag(from: Pair<Int, Int>, dx: Int, dy: Int, holdMs: Long) {
+            val down = android.os.SystemClock.uptimeMillis()
+            val props = android.view.MotionEvent.PointerProperties().apply {
+                id = 0; toolType = android.view.MotionEvent.TOOL_TYPE_FINGER
+            }
+            val coords = android.view.MotionEvent.PointerCoords().apply {
+                x = from.first.toFloat(); y = from.second.toFloat(); pressure = 1f; size = 1f
+            }
+            fun ev(action: Int) = android.view.MotionEvent.obtain(down,
+                android.os.SystemClock.uptimeMillis(), action, 1,
+                arrayOf(props), arrayOf(coords), 0, 0, 1f, 1f, 0, 0,
+                android.view.InputDevice.SOURCE_TOUCHSCREEN, 0)
+            var e = ev(android.view.MotionEvent.ACTION_DOWN)
+            try { instr.sendPointerSync(e) } finally { e.recycle() }
+            android.os.SystemClock.sleep(holdMs)
+            val steps = 12
+            for (i in 1..steps) {
+                coords.x = from.first + dx * i / steps.toFloat()
+                coords.y = from.second + dy * i / steps.toFloat()
+                e = ev(android.view.MotionEvent.ACTION_MOVE)
+                try { instr.sendPointerSync(e) } finally { e.recycle() }
+                android.os.SystemClock.sleep(30)
+            }
+            e = ev(android.view.MotionEvent.ACTION_UP)
+            try { instr.sendPointerSync(e) } finally { e.recycle() }
+        }
+
         fun twoFingerSwipe(cx1: Int, cy1: Int, cx2: Int, cy2: Int, dx: Int, dy: Int) {
             val down = android.os.SystemClock.uptimeMillis()
             val p1 = android.view.MotionEvent.PointerProperties().apply {
@@ -559,14 +586,17 @@ for i in range(d.childCount):
         val bgTarget = mapToDevice(bgGuestX, bgGuestY)
         assertTrue("no device mapping for long-press target", bgTarget != null)
 
-        // (a) HOLD = RIGHT-CLICK, surface 1: Files background. The proof is
-        // the menu itself: real Nautilus menu items appear near the hold
-        // point that were not there before, forming exactly one contiguous
-        // menu, plus the injected pointer right-click on :0.
+        // (a) STATIONARY HOLD, RIGHT-CLICK ON RELEASE, surface 1: Files
+        // background. The proof is the menu itself: real Nautilus menu items
+        // appear near the hold point that were not there before, forming
+        // exactly one contiguous menu in exactly one new menu window, opened
+        // by exactly one injected pointer right-click on :0 - no duplicate
+        // from a native client long-press plus our injection.
         val bgProbes = listOf("new folder", "paste", "select all", "properties",
             "open in terminal", "sort", "undo", "redo", "restore", "empty trash")
         val baselineBgNames = menuHits(parseAts(atspi()), bgProbes)
         Log.i(TAG, "longpress-bg: baseline item names=" + baselineBgNames)
+        val menuWinsBefore = xwin("xwininfo -root -children | grep -c '0x' || true").trim().toIntOrNull() ?: 0
         probeStart("menu")
         longPress(bgTarget!!)
         val menuNodes = awaitMenu(bgProbes, baselineBgNames, 6_000)
@@ -586,8 +616,13 @@ for i in range(d.childCount):
         assertTrue("menu opened far from the hold point", posNode != null &&
             Math.abs(posNode.x + posNode.w / 2 - bgGuestX) <= 400 &&
             Math.abs(posNode.y + posNode.h / 2 - bgGuestY) <= 400)
-        assertTrue("no pointer right-click (button 3) injected on :0 (probeTail=" +
-            menuProbe.takeLast(300).replace("\n", " | ") + ")", buttonPresses(menuProbe, 3) > 0)
+        val menuWinsAfter = xwin("xwininfo -root -children | grep -c '0x' || true").trim().toIntOrNull() ?: 0
+        Log.i(TAG, "longpress-bg: menu windows before=" + menuWinsBefore + " after=" + menuWinsAfter)
+        assertTrue("expected exactly one injected button-3 press, got " + buttonPresses(menuProbe, 3) +
+            " (probeTail=" + menuProbe.takeLast(300).replace("\n", " | ") + ")",
+            buttonPresses(menuProbe, 3) == 1)
+        assertTrue("expected exactly one new menu window, delta=" + (menuWinsAfter - menuWinsBefore) +
+            " (native+injected duplicate?)", menuWinsAfter - menuWinsBefore == 1)
         device.pressKeyCode(android.view.KeyEvent.KEYCODE_ESCAPE)
         assertTrue("context menu did not close on Escape", awaitNoMenu(bgProbes, baselineBgNames, 4_000))
         Log.i(TAG, "UBUNTU-LONGPRESS-RIGHTCLICK-OK Files background menu: " + bgNew)
@@ -608,6 +643,25 @@ for i in range(d.childCount):
         Thread.sleep(1_200)
         assertTrue("plain tap spuriously opened a context menu",
             (menuHits(parseAts(atspi()), bgProbes) - baselineBgNames).isEmpty())
+        // Below-threshold hold (400ms < the 500ms gate) must not right-click,
+        // and a two-finger drag on the desktop must stay a scroll, not a
+        // right-click (second finger cancels the hold bookkeeping).
+        probeStart("shorthold")
+        longPress(deskP, 400)
+        Thread.sleep(600)
+        val shProbe = probeStop("shorthold")
+        assertTrue("sub-threshold hold injected button-3 (probeTail=" +
+            shProbe.takeLast(200).replace("\n", " | ") + ")", buttonPresses(shProbe, 3) == 0)
+        assertTrue("sub-threshold hold opened a menu",
+            (menuHits(parseAts(atspi()), bgProbes) - baselineBgNames).isEmpty())
+        probeStart("twofingbg")
+        twoFingerSwipe(deskP.first - 40, deskP.second - 80, deskP.first + 40, deskP.second - 80, 0, 120)
+        Thread.sleep(600)
+        val tfProbe = probeStop("twofingbg")
+        assertTrue("two-finger gesture injected button-3", buttonPresses(tfProbe, 3) == 0)
+        assertTrue("two-finger gesture opened a menu",
+            (menuHits(parseAts(atspi()), bgProbes) - baselineBgNames).isEmpty())
+        Log.i(TAG, "UBUNTU-HOLD-THRESHOLD-OK 400ms hold and two-finger drag caused no right-click")
         Log.i(TAG, "UBUNTU-NO-SPURIOUS-RIGHTCLICK-OK drag and tap stayed drag/click")
 
         // (c) HOLD = RIGHT-CLICK, surface 2: a file row (the folder created
@@ -718,6 +772,41 @@ for i in range(d.childCount):
             xMoved > 0.05)
         Log.i(TAG, "UBUNTU-LEGACY-SCROLL-OK xterm scrolled visibly (" + xMoved + ")")
         xwin("xwininfo -root -tree | grep -i xterm | awk '{print \$1}' | head -1 | xargs -r xkill -id || true")
+
+        // (a3) HOLD-THEN-DRAG regression: a press that pauses past the
+        // right-click threshold and then drags the Files titlebar must stay
+        // a native drag - the window follows and no right-click fires.
+        // (007bf07 broke this via the onLongPress takeover.)
+        val hbNau = nauVisible()
+        if (hbNau != null) {
+            val feH = frameExtents(hbNau.id)
+            val hbGX = hbNau.x + feH[0] + (hbNau.w - feH[0] - feH[1]) / 2
+            val hbGY = hbNau.y + feH[2] + 12
+            val hbD = mapToDevice(hbGX, hbGY)
+            assertTrue("no mapping for hold-drag titlebar point", hbD != null)
+            val posBefore = xwin("xwininfo -id " + hbNau.id + " | grep Absolute")
+            probeStart("holddrag")
+            holdDrag(hbD!!, 150, 80, 700)
+            Thread.sleep(1_000)
+            val hdProbe = probeStop("holddrag")
+            val posAfter = xwin("xwininfo -id " + hbNau.id + " | grep Absolute")
+            Shot.save("23h-ubuntu-hold-drag")
+            val bx = Regex("Absolute upper-left X:\\s+(-?\\d+)").find(posBefore)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            val by = Regex("Absolute upper-left Y:\\s+(-?\\d+)").find(posBefore)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            val ax = Regex("Absolute upper-left X:\\s+(-?\\d+)").find(posAfter)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            val ay = Regex("Absolute upper-left Y:\\s+(-?\\d+)").find(posAfter)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            Log.i(TAG, "hold-drag: before=(" + bx + ", " + by + ") after=(" + ax + ", " + ay +
+                ") button3=" + buttonPresses(hdProbe, 3))
+            assertTrue("hold-then-drag injected a right-click", buttonPresses(hdProbe, 3) == 0)
+            assertTrue("hold-then-drag opened a menu",
+                (menuHits(parseAts(atspi()), bgProbes) - baselineBgNames).isEmpty())
+            assertTrue("window did not follow hold-then-drag (before=(" + bx + "," + by +
+                ") after=(" + ax + "," + ay + "))",
+                Math.abs(ax - bx - 150) <= 60 && Math.abs(ay - by - 80) <= 60)
+            Log.i(TAG, "UBUNTU-HOLD-DRAG-OK window followed finger: (" + bx + "," + by + ")->(" + ax + "," + ay + ")")
+        } else {
+            Log.i(TAG, "hold-drag: Files window not visible; skipped")
+        }
         Thread.sleep(1_000)
 
         // (f) Toggles OFF must restore the unpatched behavior: no

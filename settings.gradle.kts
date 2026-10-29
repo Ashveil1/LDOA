@@ -55,11 +55,14 @@ for (rel in listOf("third_party/termux-x11/lorie/build.gradle", "third_party/ter
     }
 }
 
-// Vendored patch (LDOA gestures): direct-touch long-press = right-click and
-// two-finger drag = wheel scroll, each behind an app-level toggle read from
-// the app's default SharedPreferences (defaults on, user-approved gesture
-// map 2026-10-29). InputEventSender gains endAllTouches() so a taken-over
-// touch sequence ends cleanly instead of dangling.
+// Vendored patch (LDOA gestures): direct-touch stationary hold 500ms+ =
+// right-click injected on release (movement keeps the sequence a native
+// drag, so press-hold-drag works) and two-finger drag = wheel scroll, each
+// behind an app-level toggle read from the app's default SharedPreferences
+// (defaults on, user-approved gesture map 2026-10-29). InputEventSender
+// gains endAllTouches(x, y) so a scroll takeover ends the touch sequence at
+// the finger point instead of dangling - and never at (0,0), which a WM
+// reads as a drag endpoint and collapses the window (run 40820196500).
 run {
     val tih = File(rootDir, "third_party/termux-x11/lorie/src/main/java/com/termux/x11/input/TouchInputHandler.java")
     val ies = File(rootDir, "third_party/termux-x11/lorie/src/main/java/com/termux/x11/input/InputEventSender.java")
@@ -76,11 +79,11 @@ run {
      * takes over a direct-touch sequence, so the X client sees a clean
      * sequence end instead of a stuck pointer.
      */
-    public void endAllTouches() {
+    public void endAllTouches(int x, int y) {
         for (int id = 0; id < pointers.length; id++) {
             if (pointers[id]) {
                 pointers[id] = false;
-                mInjector.sendTouchEvent(XI_TouchEnd, id, 0, 0);
+                mInjector.sendTouchEvent(XI_TouchEnd, id, x, y);
             }
         }
     }
@@ -94,9 +97,16 @@ run {
             val orig = """    private boolean mSuppressCursorMovement;
 """
             val patched = """    private boolean mSuppressCursorMovement;
-    /** LDOA: true while an Android-side gesture (long-press right-click or
-     * two-finger scroll) has taken over the current direct-touch sequence. */
+    /** LDOA: true while an Android-side gesture (two-finger scroll) has
+     * taken over the current direct-touch sequence. */
     private boolean mSuppressDirectTouch;
+    /** LDOA hold-release right-click bookkeeping: a stationary one-finger
+     * hold of 500ms+ injects a right-click on release; any movement turns
+     * the sequence into a native drag and cancels the injection, so
+     * press-hold-drag keeps working everywhere. */
+    private long mHoldDownTime;
+    private float mHoldDownX, mHoldDownY;
+    private boolean mHoldMoved;
 """
             val text = f.readText()
             if (orig in text && patched !in text) f.writeText(text.replace(orig, patched))
@@ -125,6 +135,10 @@ run {
             val patched = """                case MotionEvent.ACTION_DOWN:
                     mSuppressCursorMovement = false;
                     mSuppressDirectTouch = false;
+                    mHoldDownTime = event.getEventTime();
+                    mHoldDownX = event.getX();
+                    mHoldDownY = event.getY();
+                    mHoldMoved = false;
 """
             val text = f.readText()
             if (orig in text && patched !in text) f.writeText(text.replace(orig, patched))
@@ -144,8 +158,8 @@ run {
                     if (directTouchPrefs(mActivity).getBoolean("ldoa_twofinger_scroll", true)) {
                         if (!mSuppressDirectTouch) {
                             mSuppressDirectTouch = true;
-                            mInjector.endAllTouches();
                             mRenderData.mapScreenPoint(e2.getX(), e2.getY(), mappedPoint);
+                            mInjector.endAllTouches((int) mappedPoint[0], (int) mappedPoint[1]);
                             mInjector.sendCursorMove(mappedPoint[0], mappedPoint[1], false);
                         }
                         mInjector.sendMouseWheelEvent(distanceX, distanceY);
@@ -161,40 +175,6 @@ run {
         }
         run {
             val f = tih
-            val orig = """        public void onLongPress(int pointerCount, float x, float y) {
-            int button = mouseButtonFromPointerCount(pointerCount);
-            if (button == InputStub.BUTTON_UNDEFINED) {
-                return;
-            }
-"""
-            val patched = """        public void onLongPress(int pointerCount, float x, float y) {
-            int button = mouseButtonFromPointerCount(pointerCount);
-            if (button == InputStub.BUTTON_UNDEFINED) {
-                return;
-            }
-
-            if (pointerCount == 1
-                    && mInputStrategy instanceof InputStrategyInterface.NullInputStrategy
-                    && directTouchPrefs(mActivity).getBoolean("ldoa_longpress_rightclick", true)) {
-                // LDOA direct touch: a completed hold becomes a right click
-                // everywhere, not only where the X client implements its own
-                // long-press. End the touch sequence cleanly and right-click
-                // at the finger point; any tap the end emits mirrors
-                // right-click's usual select side effect.
-                mSuppressDirectTouch = true;
-                mInjector.endAllTouches();
-                mRenderData.mapScreenPoint(x, y, mappedPoint);
-                mInjector.sendCursorMove(mappedPoint[0], mappedPoint[1], false);
-                mInjector.sendMouseClick(InputStub.BUTTON_RIGHT, false);
-                return;
-            }
-"""
-            val text = f.readText()
-            if (orig in text && patched !in text) f.writeText(text.replace(orig, patched))
-            check(patched in f.readText()) { "LDOA gesture patch 5 failed for ${f.name}" }
-        }
-        run {
-            val f = tih
             val orig = """    public boolean shouldInterceptKeys() {
 """
             val patched = """    /** LDOA: app-level gesture toggles (default on; see PickerScreen). */
@@ -207,6 +187,50 @@ run {
             val text = f.readText()
             if (orig in text && patched !in text) f.writeText(text.replace(orig, patched))
             check(patched in f.readText()) { "LDOA gesture patch 6 failed for ${f.name}" }
+        }
+        run {
+            val f = tih
+            val orig = """                case MotionEvent.ACTION_POINTER_DOWN:
+                    mTotalMotionY = 0;
+                    break;
+"""
+            val patched = """                case MotionEvent.ACTION_POINTER_DOWN:
+                    mTotalMotionY = 0;
+                    // LDOA: a second finger cancels hold-release right-click.
+                    mHoldMoved = true;
+                    break;
+
+                case MotionEvent.ACTION_MOVE:
+                    // LDOA hold tracking: movement beyond slop makes this a
+                    // native drag; no right-click fires on release.
+                    if (mHoldDownTime != 0L
+                            && (Math.abs(event.getX() - mHoldDownX) > 30f
+                                || Math.abs(event.getY() - mHoldDownY) > 30f))
+                        mHoldMoved = true;
+                    break;
+
+                case MotionEvent.ACTION_UP:
+                    // LDOA direct touch: a stationary one-finger hold of
+                    // half a second or longer becomes a right-click at the
+                    // held point, injected on release. A moved hold stays a
+                    // native drag (press-hold-drag keeps working). The raw
+                    // tap was forwarded all along; its select side effect
+                    // mirrors a real right-click's.
+                    if (mHoldDownTime != 0L) {
+                        if (!mHoldMoved && event.getEventTime() - mHoldDownTime >= 500
+                                && mInputStrategy instanceof InputStrategyInterface.NullInputStrategy
+                                && directTouchPrefs(mActivity).getBoolean("ldoa_longpress_rightclick", true)) {
+                            mRenderData.mapScreenPoint(mHoldDownX, mHoldDownY, mappedPoint);
+                            mInjector.sendCursorMove(mappedPoint[0], mappedPoint[1], false);
+                            mInjector.sendMouseClick(InputStub.BUTTON_RIGHT, false);
+                        }
+                        mHoldDownTime = 0L;
+                    }
+                    break;
+"""
+            val text = f.readText()
+            if (orig in text && patched !in text) f.writeText(text.replace(orig, patched))
+            check(patched in f.readText()) { "LDOA gesture patch 7 failed for ${f.name}" }
         }
     }
 }

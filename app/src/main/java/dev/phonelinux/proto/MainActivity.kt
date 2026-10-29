@@ -197,9 +197,10 @@ private fun PickerScreen(distros: List<Distro>, vm: SpikeViewModel, onPrimary: (
 @Composable
 private fun GestureToggles() {
     // Finger interaction map (user-approved 2026-10-29, option A): tap =
-    // click, hold ~0.5s = right-click, one-finger drag native, two-finger
-    // drag = scroll. Each extra gesture can be switched off here; the lorie
-    // input layer reads these keys per gesture (TouchInputHandler patch).
+    // click, hold ~0.5s without moving = right-click on release, one-finger
+    // drag native (hold-then-drag keeps working), two-finger drag = scroll.
+    // Each extra gesture can be switched off here; the lorie input layer
+    // reads these keys per gesture (TouchInputHandler patch).
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val prefs = remember { ctx.getSharedPreferences(ctx.packageName + "_preferences", android.content.Context.MODE_PRIVATE) }
     var longPress by remember { mutableStateOf(prefs.getBoolean("ldoa_longpress_rightclick", true)) }
