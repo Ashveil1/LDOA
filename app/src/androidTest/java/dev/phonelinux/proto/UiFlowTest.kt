@@ -42,6 +42,10 @@ class UiFlowTest {
         // the dialog never covers later screenshots.
         Shot.dismissSystemDialogs(device)
 
+        // 0. first-run screen is the front door now; reach the picker via
+        // its explicit escape link.
+        device.wait(Until.findObject(By.desc("show-picker")), 10_000)?.click()
+
         // 1. picker
         assertNotNull("distro card", device.wait(Until.hasObject(By.text("Alpine Linux")), 10_000))
         shot(device, "01-picker")
@@ -197,6 +201,7 @@ class UiFlowTest {
             val fieldDeadline = System.currentTimeMillis() + 90_000
             while (System.currentTimeMillis() < fieldDeadline && field == null) {
                 Shot.dismissSystemDialogs(device)
+                device.findObject(By.desc("show-picker"))?.click()
                 val reopen = device.wait(Until.findObject(By.desc("open-terminal-alpine")), 2_000)
                 if (reopen != null) {
                     android.util.Log.i("PHONEDIAG", "runCommand: terminal screen lost, re-opening for: " + cmd)

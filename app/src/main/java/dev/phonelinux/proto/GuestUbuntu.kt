@@ -51,23 +51,27 @@ object GuestUbuntu {
 
     // fakeRoot: apt/dpkg refuse to install as a non-root euid; proot -0
     // fakes uid 0 inside the guest (same trick proot-distro uses).
-    private fun apt(ctx: Context, rootfs: File, vararg args: String): Proot.Result =
+    private fun apt(ctx: Context, rootfs: File, onLine: (String) -> Unit, vararg args: String): Proot.Result =
         Proot.runGuest(ctx, rootfs, listOf("apt-get") + args.toList(),
-            extraEnv = mapOf("DEBIAN_FRONTEND" to "noninteractive"), fakeRoot = true)
+            extraEnv = mapOf("DEBIAN_FRONTEND" to "noninteractive"), fakeRoot = true, onLine = onLine)
 
     /** apt-get update + install the GNOME set. One retry on failure: apt
      *  fetch hiccups under proot are transient. */
-    fun provisionGnome(ctx: Context, rootfs: File): Proot.Result {
-        var r = apt(ctx, rootfs, "update")
+    fun provisionGnome(ctx: Context, rootfs: File, onLine: (String) -> Unit = {}): Proot.Result {
+        onLine("apt-get update: fetching package lists")
+        var r = apt(ctx, rootfs, onLine, "update")
         if (r.exitCode != 0) {
+            onLine("apt-get update failed (exit " + r.exitCode + ") - one retry")
             Thread.sleep(5_000)
-            r = apt(ctx, rootfs, "update")
+            r = apt(ctx, rootfs, onLine, "update")
             if (r.exitCode != 0) return r
         }
-        r = apt(ctx, rootfs, "install", "-y", "--no-install-recommends", *GNOME_PACKAGES.toTypedArray())
+        onLine("apt-get install: downloading and installing the GNOME desktop packages")
+        r = apt(ctx, rootfs, onLine, "install", "-y", "--no-install-recommends", *GNOME_PACKAGES.toTypedArray())
         if (r.exitCode != 0) {
+            onLine("apt-get install failed (exit " + r.exitCode + ") - one retry")
             Thread.sleep(5_000)
-            r = apt(ctx, rootfs, "install", "-y", "--no-install-recommends", *GNOME_PACKAGES.toTypedArray())
+            r = apt(ctx, rootfs, onLine, "install", "-y", "--no-install-recommends", *GNOME_PACKAGES.toTypedArray())
         }
         Log.i(TAG, "gnome provision exit=" + r.exitCode)
         return r

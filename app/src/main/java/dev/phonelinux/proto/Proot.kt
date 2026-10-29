@@ -33,7 +33,7 @@ object Proot {
      *  fakeRoot (-0): guest sees uid 0. Required for apt/dpkg (they refuse
      *  to install as non-root); Alpine's apk never needed it, so the flag
      *  is opt-in per call site, not a global behavior change. */
-    fun runGuest(ctx: Context, rootfs: File, guestCmd: List<String>, extraBinds: List<Pair<String, String>> = emptyList(), extraEnv: Map<String, String> = emptyMap(), fakeRoot: Boolean = false): Result {
+    fun runGuest(ctx: Context, rootfs: File, guestCmd: List<String>, extraBinds: List<Pair<String, String>> = emptyList(), extraEnv: Map<String, String> = emptyMap(), fakeRoot: Boolean = false, onLine: ((String) -> Unit)? = null): Result {
         val args = buildList {
             add(prootPath(ctx))
             add("--link2symlink")
@@ -46,7 +46,7 @@ object Proot {
             add("-w"); add("/root")
             addAll(guestCmd)
         }
-        return exec(ctx, args, extraEnv)
+        return exec(ctx, args, extraEnv, onLine)
     }
 
     private fun prootPath(ctx: Context) = File(nativeDir(ctx), "libproot.so").absolutePath
@@ -57,7 +57,7 @@ object Proot {
     fun prootTmpDir(ctx: Context): File =
         File(ctx.cacheDir, "proot-tmp").apply { mkdirs() }
 
-    private fun exec(ctx: Context, argv: List<String>, extraEnv: Map<String, String> = emptyMap()): Result {
+    private fun exec(ctx: Context, argv: List<String>, extraEnv: Map<String, String> = emptyMap(), onLine: ((String) -> Unit)? = null): Result {
         val nd = nativeDir(ctx)
         val env = mutableMapOf(
             "PROOT_LOADER" to File(nd, "libproot_loader.so").absolutePath,
@@ -80,9 +80,22 @@ object Proot {
             pb.environment().putAll(env)
             pb.directory(File(ctx.filesDir, "work").apply { mkdirs() })
             val proc = pb.start()
-            val out = proc.inputStream.readBytes().toString(Charsets.UTF_8)
-            val err = proc.errorStream.readBytes().toString(Charsets.UTF_8)
+            // Drain stderr concurrently (apt/dpkg can fill the pipe buffer
+            // and deadlock a sequential read); stdout lines stream to the
+            // optional progress sink for the provisioning UI.
+            val errSb = StringBuilder()
+            val errThread = kotlin.concurrent.thread {
+                proc.errorStream.bufferedReader().forEachLine { errSb.append(it).append('\n') }
+            }
+            val outSb = StringBuilder()
+            proc.inputStream.bufferedReader().forEachLine {
+                outSb.append(it).append('\n')
+                onLine?.invoke(it)
+            }
             val code = proc.waitFor()
+            errThread.join(10_000)
+            val out = outSb.toString()
+            val err = errSb.toString()
             val ms = (System.nanoTime() - start) / 1_000_000
             Log.i(TAG, "exec ${argv.first()} exit=$code ${ms}ms")
             Result(code, out, err, ms)

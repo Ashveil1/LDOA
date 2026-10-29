@@ -35,6 +35,10 @@ class UbuntuTerminalUiTest {
         device.waitForIdle(2_000)
         Shot.dismissSystemDialogs(device)
 
+        // First-run/resume screen is the front door now; reach the picker
+        // via its explicit escape link.
+        device.wait(Until.findObject(By.desc("show-picker")), 10_000)?.click()
+
         // Ubuntu may already be installed (UbuntuBaseSpikeTest installs it in
         // the same run): then the card shows open-terminal-ubuntu, no Install.
         var openBtn = device.wait(Until.findObject(By.desc("open-terminal-ubuntu")), 5_000)

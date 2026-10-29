@@ -40,7 +40,7 @@ private val Accent2 = Color(0xFF41D9A3)
 private val CardBg = Color(0xFF1A2340)
 private val TextDim = Color(0xFF9AA6C8)
 
-enum class Screen { PICKER, TERMINAL }
+enum class Screen { FIRST_RUN, PICKER, TERMINAL }
 
 // gnome/evidence branch: GNOME render + interaction qualification in
 // flight (wallpaper/topbar/dock pixel-proven run 40661199161). Merge to
@@ -52,7 +52,7 @@ class SpikeViewModel : ViewModel() {
     val states: SnapshotStateMap<String, InstallState> = mutableStateMapOf()
     var log by mutableStateOf("")
     var busy by mutableStateOf(false)
-    var screen by mutableStateOf(Screen.PICKER)
+    var screen by mutableStateOf(Screen.FIRST_RUN)
 
     fun stateFor(d: Distro): InstallState = states[d.id] ?: InstallState.NotInstalled
 
@@ -66,9 +66,13 @@ class SpikeViewModel : ViewModel() {
     /** Set by the activity: opens the desktop for a distro (XServer). */
     var autoDesktop: ((Distro) -> Unit)? = null
     var coldAutoEntered = false
+    /** Live one-line status for the desktop-preparing overlay. */
+    var desktopStage by mutableStateOf("")
+    /** Non-null shows the desktop failure dialog (fail-closed path). */
+    var desktopError by mutableStateOf<String?>(null)
 
     fun install(ctx: android.content.Context, d: Distro) {
-        if (busy) return
+        if (busy) { log += "[--] install tap ignored - another install is running\n"; return }
         busy = true
         val installer = DistroInstaller(ctx.applicationContext)
         viewModelScope.launch {
@@ -143,13 +147,19 @@ class MainActivity : ComponentActivity() {
                 // package set (large). Ask BEFORE that download starts;
                 // everything else goes straight through.
                 val requestDesktop: (Distro) -> Unit = { d ->
+                    vm.log += "[tap] open-desktop " + d.id + "\n"
                     val needsProvision = d.pkgMgr == PkgMgr.APT &&
                         !GuestUbuntu.hasGnome(DistroInstaller(applicationContext).rootfsDir(d))
+                    vm.log += "[..] desktop route: " + (if (needsProvision) "first-start consent" else "direct start") + "\n"
                     if (needsProvision) {
                         vm.pendingDesktop = d
                     } else {
                         vm.desktopPrep = true
-                        XServer.openDesktop(this@MainActivity, d)
+                        vm.desktopError = null
+                        vm.desktopStage = ""
+                        XServer.openDesktop(this@MainActivity, d,
+                            onStage = { s -> runOnUiThread { vm.desktopStage = s } },
+                            onError = { m -> runOnUiThread { vm.desktopPrep = false; vm.desktopError = m } })
                     }
                 }
                 // Post-install auto-enter goes through the same first-start
@@ -172,7 +182,11 @@ class MainActivity : ComponentActivity() {
                         // marker is only set once it is), so no download
                         // consent is needed here.
                         vm.desktopPrep = true
-                        XServer.openDesktop(this@MainActivity, Distros.UBUNTU)
+                        vm.desktopError = null
+                        vm.desktopStage = ""
+                        XServer.openDesktop(this@MainActivity, Distros.UBUNTU,
+                            onStage = { s -> runOnUiThread { vm.desktopStage = s } },
+                            onError = { m -> runOnUiThread { vm.desktopPrep = false; vm.desktopError = m } })
                     }
                 }
                 Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(BgTop, BgBottom)))) {
@@ -180,13 +194,31 @@ class MainActivity : ComponentActivity() {
                         AlertDialog(
                             onDismissRequest = { vm.pendingDesktop = null },
                             confirmButton = { TextButton(onClick = {
+                                vm.log += "[tap] first-start consent confirmed\n"
                                 vm.pendingDesktop = null
                                 vm.desktopPrep = true
-                                XServer.openDesktop(this@MainActivity, pd)
+                                vm.desktopError = null
+                                vm.desktopStage = ""
+                                XServer.openDesktop(this@MainActivity, pd,
+                                    onStage = { s -> runOnUiThread { vm.desktopStage = s } },
+                                    onError = { m -> runOnUiThread { vm.desktopPrep = false; vm.desktopError = m } })
                             }) { Text("Download and start") } },
                             dismissButton = { TextButton(onClick = { vm.pendingDesktop = null }) { Text("Not now") } },
                             title = { Text("Ubuntu desktop - first start") },
                             text = { Text("The first start downloads the desktop packages - a large download; the exact size is not measured. Use Wi-Fi, not mobile data.\n\nThis can take several minutes. Keep the app open.") })
+                    }
+                    vm.desktopError?.let { err ->
+                        AlertDialog(
+                            onDismissRequest = { vm.desktopError = null },
+                            confirmButton = { TextButton(onClick = {
+                                vm.log += "[tap] desktop error dialog: try again\n"
+                                vm.desktopError = null
+                                requestDesktop(Distros.UBUNTU)
+                            }) { Text("Try again") } },
+                            dismissButton = { TextButton(onClick = { vm.desktopError = null }) { Text("Close") } },
+                            title = { Text("Ubuntu desktop did not start") },
+                            text = { Text(err, fontSize = 13.sp,
+                                modifier = Modifier.verticalScroll(rememberScrollState())) })
                     }
                     if (vm.desktopPrep) {
                         Column(Modifier.fillMaxSize().padding(32.dp),
@@ -198,8 +230,17 @@ class MainActivity : ComponentActivity() {
                             Spacer(Modifier.height(10.dp))
                             Text("First start downloads a large package set and can take several minutes. Keep the app open; your files stay on the device.",
                                 color = TextDim, fontSize = 14.sp)
+                            if (vm.desktopStage.isNotEmpty()) {
+                                Spacer(Modifier.height(10.dp))
+                                Text(vm.desktopStage.take(160), color = TextDim, fontSize = 12.sp,
+                                    fontFamily = FontFamily.Monospace)
+                            }
                         }
                     } else when (vm.screen) {
+                        Screen.FIRST_RUN -> FirstRunScreen(vm,
+                            onInstall = { vm.install(this@MainActivity, Distros.UBUNTU) },
+                            onResumeDesktop = { requestDesktop(Distros.UBUNTU) },
+                            onShowPicker = { vm.screen = Screen.PICKER })
                         Screen.PICKER -> PickerScreen(distros, vm,
                             onPrimary = { d ->
                                 when (vm.stateFor(d)) {
@@ -212,6 +253,67 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun FirstRunScreen(vm: SpikeViewModel, onInstall: () -> Unit, onResumeDesktop: () -> Unit, onShowPicker: () -> Unit) {
+    // Landing screen (user request 2026-10-29): Ubuntu automatic - the
+    // picker is not the front door. One explicit download notice/confirm
+    // (user-mandated consent before any large download); everything after
+    // is automatic (install -> desktop consent -> desktop). Also covers
+    // the resume case: Ubuntu installed but the desktop was never
+    // activated (interrupted first setup).
+    val ubuntuState = vm.stateFor(Distros.UBUNTU)
+    Column(Modifier.fillMaxSize().statusBarsPadding().padding(24.dp),
+        verticalArrangement = Arrangement.Center) {
+        Text("Phone Linux", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+        Text("Ubuntu desktop on this phone", color = TextDim, fontSize = 13.sp)
+        Spacer(Modifier.height(20.dp))
+        when (ubuntuState) {
+            InstallState.Installed -> {
+                Text("Ubuntu is installed. The desktop setup continues from where it stopped; the first desktop start still downloads the desktop packages (large download).",
+                    color = Color.White, fontSize = 15.sp)
+                Spacer(Modifier.height(16.dp))
+                Button(onClick = onResumeDesktop,
+                    modifier = Modifier.fillMaxWidth().semantics { contentDescription = "firstrun-resume-desktop" }) {
+                    Text("Continue to desktop setup")
+                }
+            }
+            is InstallState.Downloading -> {
+                val mbDone = ubuntuState.doneBytes / 1_000_000
+                val mbTotal = ubuntuState.totalBytes / 1_000_000
+                Text("Downloading Ubuntu system... " + mbDone + " / " + mbTotal + " MB", color = Color.White, fontSize = 15.sp)
+                Spacer(Modifier.height(12.dp))
+                LinearProgressIndicator(
+                    progress = if (ubuntuState.totalBytes > 0) ubuntuState.doneBytes.toFloat() / ubuntuState.totalBytes else 0f,
+                    modifier = Modifier.fillMaxWidth())
+            }
+            InstallState.Verifying -> Text("Verifying the download...", color = Color.White, fontSize = 15.sp)
+            InstallState.Extracting -> Text("Unpacking Ubuntu...", color = Color.White, fontSize = 15.sp)
+            is InstallState.Failed -> {
+                Text("The Ubuntu install failed: " + ubuntuState.message, color = Color(0xFFFF7A7A), fontSize = 15.sp)
+                Spacer(Modifier.height(16.dp))
+                Button(onClick = onInstall,
+                    modifier = Modifier.fillMaxWidth().semantics { contentDescription = "firstrun-install-ubuntu" }) {
+                    Text("Try again")
+                }
+            }
+            else -> {
+                Text("The first start downloads the Ubuntu system (about 30 MB) and then the desktop packages (a large download). Use Wi-Fi, not mobile data.\n\nEverything after this is automatic: install, desktop setup, and the desktop itself.",
+                    color = Color.White, fontSize = 15.sp)
+                Spacer(Modifier.height(16.dp))
+                Button(onClick = onInstall,
+                    modifier = Modifier.fillMaxWidth().semantics { contentDescription = "firstrun-install-ubuntu" }) {
+                    Text("Download and install Ubuntu")
+                }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        TextButton(onClick = onShowPicker,
+            modifier = Modifier.semantics { contentDescription = "show-picker" }) {
+            Text("All distros (advanced)", color = TextDim)
         }
     }
 }

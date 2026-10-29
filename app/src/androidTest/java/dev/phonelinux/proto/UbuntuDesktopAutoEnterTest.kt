@@ -43,8 +43,10 @@ class UbuntuDesktopAutoEnterTest {
         device.wait(Until.findObject(By.text("Allow")), 15_000)?.click()
         Shot.dismissSystemDialogs(device)
 
-        val installBtn = device.wait(Until.findObject(By.desc("install-ubuntu")), 30_000)
-        assertTrue("install-ubuntu button not found on the picker", installBtn != null)
+        // First-run screen is the front door (user request 2026-10-29):
+        // one confirmed notice tap starts the automatic chain.
+        val installBtn = device.wait(Until.findObject(By.desc("firstrun-install-ubuntu")), 30_000)
+        assertTrue("firstrun-install-ubuntu button not found on the first-run screen", installBtn != null)
         installBtn.click()
         Log.i(TAG, "auto-enter: install tapped; awaiting first-start consent dialog")
         Shot.save("28-ubuntu-installing")

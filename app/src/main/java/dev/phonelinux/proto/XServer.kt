@@ -69,35 +69,49 @@ object XServer {
         Log.i(TAG, "X server spawned; log=$log")
     }
 
-    fun openDesktop(activity: Activity, distro: Distro) {
-        if (preparing) return
+    /** Open the desktop fail-CLOSED: the X11 activity only launches when a
+     *  desktop session actually started; every failure path reports through
+     *  onError with detail instead of opening a silent black screen
+     *  (real-device report 2026-10-29: tap -> screen unchanged, cause
+     *  invisible). onStage receives one-line progress for the preparing UI. */
+    fun openDesktop(activity: Activity, distro: Distro,
+                    onStage: (String) -> Unit = {},
+                    onError: (String) -> Unit = {}) {
+        if (preparing) {
+            onStage("desktop start already in progress - tap ignored")
+            return
+        }
         preparing = true
         thread(name = "xserver-start") {
             val ctx = activity.applicationContext
+            var launched = false
+            var failure: String? = null
             try {
+                onStage("Starting X server")
                 start(ctx)
-                // The desktop entry point must launch the DESKTOP the tests
-                // prove (jwm + pcmanfm + st), not the old xclock smoke -
-                // otherwise the shipped app does less than the CI evidence.
                 val installer = DistroInstaller(ctx)
                 if (installer.isInstalled(distro)) {
                     val rootfs = installer.rootfsDir(distro)
                     when (distro.pkgMgr) {
                         PkgMgr.APK -> {
                             if (!GuestDesktop.hasDesktopShell(rootfs)) {
-                                Log.i(TAG, "desktop shell not provisioned; installing jwm/pcmanfm/st")
+                                onStage("Installing desktop shell (jwm/pcmanfm/st)")
                                 var add = GuestDesktop.provisionDesktopShell(ctx, rootfs)
                                 if (add.exitCode != 0) {
                                     Thread.sleep(5_000)
                                     add = GuestDesktop.provisionDesktopShell(ctx, rootfs)
                                 }
                                 Log.i(TAG, "desktop shell provision exit=" + add.exitCode)
+                                if (add.exitCode != 0) failure =
+                                    "Desktop shell install failed (exit " + add.exitCode + ")\n" + (add.stdout + add.stderr).takeLast(1200)
                             }
-                            if (GuestDesktop.hasDesktopShell(rootfs)) {
-                                Log.i(TAG, "launching full desktop session")
-                                GuestDesktop.launchDesktopSession(ctx, rootfs)
-                            } else {
-                                Log.e(TAG, "desktop shell unavailable; desktop will be empty")
+                            if (failure == null && GuestDesktop.hasDesktopShell(rootfs)) {
+                                onStage("Launching desktop session")
+                                val p = GuestDesktop.launchDesktopSession(ctx, rootfs)
+                                launched = p.isAlive
+                                if (!launched) failure = "Desktop session died immediately after launch"
+                            } else if (failure == null) {
+                                failure = "Desktop shell unavailable after install; desktop would be empty"
                             }
                         }
                         PkgMgr.APT -> {
@@ -106,25 +120,39 @@ object XServer {
                             // evidence trail.
                             if (!GuestUbuntu.hasGnome(rootfs)) {
                                 Log.i(TAG, "GNOME not provisioned; apt install gnome-shell et al")
-                                val add = GuestUbuntu.provisionGnome(ctx, rootfs)
+                                val add = GuestUbuntu.provisionGnome(ctx, rootfs) { line -> onStage(line) }
                                 Log.i(TAG, "gnome provision exit=" + add.exitCode)
+                                if (add.exitCode != 0) failure =
+                                    "GNOME package install failed (exit " + add.exitCode + ")\n" + (add.stdout + add.stderr).takeLast(1200)
                             }
-                            if (GuestUbuntu.hasGnome(rootfs)) {
+                            if (failure == null && GuestUbuntu.hasGnome(rootfs)) {
                                 ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
                                     .edit().putBoolean("ubuntu_desktop_active", true).apply()
-                                launchOrReuseGnomeSession(ctx, distro, rootfs)
-                            } else {
-                                Log.e(TAG, "GNOME unavailable; desktop will be empty")
+                                onStage("Launching GNOME session")
+                                val p = launchOrReuseGnomeSession(ctx, distro, rootfs)
+                                launched = p.isAlive
+                                if (!launched) failure = "GNOME session died immediately after launch; see guest-gnome.log"
+                            } else if (failure == null) {
+                                failure = "GNOME unavailable after package install; desktop would be empty"
                             }
                         }
                     }
+                } else {
+                    failure = distro.displayName + " is not installed"
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "X server start failed", t)
+                failure = "X server failed: " + (t.message ?: t.javaClass.simpleName)
             }
+            val f = failure
             Handler(Looper.getMainLooper()).post {
                 preparing = false
-                activity.startActivity(Intent(activity, com.termux.x11.MainActivity::class.java))
+                if (launched) {
+                    activity.startActivity(Intent(activity, com.termux.x11.MainActivity::class.java))
+                } else {
+                    Log.e(TAG, "desktop open failed-closed: " + f)
+                    onError(f ?: "unknown desktop start failure")
+                }
             }
         }
     }
