@@ -305,11 +305,19 @@ jobs:
           uname -m
           test "$(uname -m)" = "aarch64"
           ls -l /dev/kvm 2>&1 || echo "/dev/kvm absent (expected; not needed - proot is userspace)"
-      - name: Install host proot
+      - name: Build host proot from termux/proot source
         run: |
+          # Ubuntu noble's proot 5.1.0-1.3 SEGFAULTS (signal 11) running
+          # apt under a noble guest on this fleet (job 123476210272) - the
+          # app vendors a Termux-built proot, so the faithful host
+          # approximation is the same source built for glibc. NOT bit-
+          # identical to the vendored bionic build: results remain
+          # guest-side ARM evidence, not Android proof.
           sudo apt-get update -qq
-          sudo apt-get install -y -qq proot
-          proot --version
+          sudo apt-get install -y -qq build-essential git libtalloc-dev
+          git clone --depth 1 https://github.com/termux/proot.git /tmp/termux-proot
+          make -C /tmp/termux-proot/src -j4
+          /tmp/termux-proot/src/proot --version
       - name: Fetch the exact arm64 rootfs the app would use
         run: |
           UBUNTU_BASE=$(grep -o 'UBUNTU_BASE = "[^"]*"' app/src/main/java/dev/phonelinux/proto/DistroInstaller.kt | cut -d'"' -f2)
@@ -322,10 +330,13 @@ jobs:
         run: |
           PKGS=$(sed -n '/GNOME_PACKAGES = listOf(/,/) *$/p' app/src/main/java/dev/phonelinux/proto/GuestUbuntu.kt | grep -o '"[^"]*"' | tr -d '"' | tr '\n' ' ')
           echo "package list from GuestUbuntu.kt: $PKGS"
-          run_guest() { proot -0 -r /tmp/rootfs -b /dev -b /proc -b /sys -w /root env DEBIAN_FRONTEND=noninteractive "$@"; }  # no --link2symlink: that flag is a Termux-patched proot extension, absent in Ubuntu's proot
+          PROOT=/tmp/termux-proot/src/proot
+          # --link2symlink restored: Termux proot supports it, matching the
+          # app's Proot.runGuest flags exactly.
+          run_guest() { $PROOT --link2symlink -0 -r /tmp/rootfs -b /dev -b /proc -b /sys -w /root env DEBIAN_FRONTEND=noninteractive "$@"; }
           run_guest apt-get update || run_guest apt-get update
           run_guest apt-get install -y --no-install-recommends $PKGS || run_guest apt-get install -y --no-install-recommends $PKGS
       - name: Diagnostic only - session launch attempt WITHOUT display server
         run: |
           echo "NO DISPLAY SERVER in this lane (no lorie, no Xvfb): output below is error-class data only, NOT a GNOME startup verdict. Android display/input path untested here."
-          proot -0 -r /tmp/rootfs -b /dev -b /proc -b /sys -w /root dbus-launch gnome-session --session=ubuntu 2>&1 | head -50 || true
+          /tmp/termux-proot/src/proot --link2symlink -0 -r /tmp/rootfs -b /dev -b /proc -b /sys -w /root dbus-launch gnome-session --session=ubuntu 2>&1 | head -50 || true
