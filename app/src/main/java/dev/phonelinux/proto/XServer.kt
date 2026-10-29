@@ -86,6 +86,30 @@ object XServer {
         return null
     }
 
+    /** Readiness gate: poll the NEW portion of the session log (past
+     *  logBase) until the session script reports the GNOME shell registered
+     *  on THIS launch's session bus (bus address must match the bus line
+     *  written by the same launch), the process dies, or the budget runs
+     *  out. Returns the matched line, or null. */
+    private fun awaitShellRegistered(p: Process, log: File, logBase: Long, budgetMs: Long): String? {
+        val deadline = System.currentTimeMillis() + budgetMs
+        while (System.currentTimeMillis() < deadline) {
+            if (!p.isAlive) return null
+            if (log.isFile && log.length() > logBase) {
+                val fresh = log.readText().substring(logBase.toInt().coerceAtMost(log.length().toInt()))
+                val bus = fresh.lineSequence().firstOrNull { it.contains("gnome-launch: session bus ") }
+                    ?.substringAfter("gnome-launch: session bus ")?.trim()
+                val hit = fresh.lineSequence().firstOrNull { line ->
+                    line.contains("gnome-launch: shell registered") &&
+                        (bus == null || line.substringAfter("bus=").trim() == bus)
+                }
+                if (hit != null && bus != null) return hit.trim()
+            }
+            Thread.sleep(2_000)
+        }
+        return null
+    }
+
     /** Open the desktop fail-CLOSED: the X11 activity only launches when a
      *  desktop session actually started; every failure path reports through
      *  onError with detail instead of opening a silent black screen
@@ -158,8 +182,15 @@ object XServer {
                                 val gnomeLog = File(ctx.filesDir, "guest-gnome.log")
                                 val logBase = if (gnomeLog.isFile) gnomeLog.length() else 0L
                                 val p = launchOrReuseGnomeSession(ctx, distro, rootfs)
-                                val marker = awaitSessionMarker(p, gnomeLog, logBase, 45_000,
-                                    "gnome-launch: gnome-session alive", "falling back to bare gnome-shell")
+                                // Readiness gate (P0/P2): only a shell that
+                                // REGISTERED on THIS launch's session bus
+                                // passes - "gnome-session alive" and the bare
+                                // shell fallback line are not success (run
+                                // 40864638283: fallback marker passed, shell
+                                // stalled, black screen). Bus address must
+                                // match this launch's own bus line so an owner
+                                // from a stale session can never satisfy it.
+                                val marker = awaitShellRegistered(p, gnomeLog, logBase, 60_000)
                                 if (marker != null) {
                                     Log.i(TAG, "GNOME session evidence: " + marker)
                                     ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
@@ -169,7 +200,7 @@ object XServer {
                                     val tail = if (gnomeLog.isFile && gnomeLog.length() > logBase)
                                         gnomeLog.readText().substring(logBase.toInt().coerceAtMost((gnomeLog.length()).toInt())).takeLast(1500)
                                         else "(guest-gnome.log has no new output)"
-                                    failure = "GNOME session did not come up (no alive marker in 45s, process " +
+                                    failure = "GNOME shell did not register on its session bus in 60s (process " +
                                         (if (p.isAlive) "still running" else "exited") + "). Log tail:\n" + tail
                                 }
                             } else if (failure == null) {

@@ -174,14 +174,25 @@ jobs:
             # TRUE cold-start proof: full process kill (force-stop kills the
             # app uid incl. proot/GNOME children), fresh MainActivity launch,
             # pref-driven auto-enter must bring back a usable desktop with
-            # zero taps. Fresh log first so the marker proves a NEW session.
-            adb -s emulator-5554 shell run-as dev.phonelinux.proto rm -f files/guest-gnome.log || true
+            # zero taps. The first launch's log is PRESERVED (per-launch
+            # isolation, never deleted): copy it aside and gate only on the
+            # byte range appended after this point.
+            adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/guest-gnome.log > guest-gnome.launch-prev.log 2>/dev/null || true
+            GNOME_LOG_BASE=$(adb -s emulator-5554 shell run-as dev.phonelinux.proto wc -c files/guest-gnome.log 2>/dev/null | tr -d '\r' | awk '{print $1}')
+            GNOME_LOG_BASE=${GNOME_LOG_BASE:-0}
+            echo "gnome log base offset: $GNOME_LOG_BASE"
             adb -s emulator-5554 shell am force-stop dev.phonelinux.proto || true
             sleep 8
             adb -s emulator-5554 shell am start -n dev.phonelinux.proto/.MainActivity 2>&1 | tail -2
-            for i in $(seq 1 90); do adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/guest-gnome.log 2>/dev/null | grep -q "gnome-launch:" && echo "COLD-REENTER-FRESH-MARKER after ~$((i*10))s" && break; sleep 10; done
-            adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/guest-gnome.log 2>/dev/null | grep -m1 "gnome-launch:" || { echo "COLD-REENTER-MISSING"; touch /tmp/PHONELINUX_TESTS_FAILED; }
-            sleep 120
+            for i in $(seq 1 90); do adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/guest-gnome.log 2>/dev/null | tail -c "+$((GNOME_LOG_BASE+1))" | grep -q "gnome-launch: shell registered" && echo "COLD-REENTER-SHELL-REGISTERED after ~$((i*10))s" && break; sleep 10; done
+            adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/guest-gnome.log 2>/dev/null | tail -c "+$((GNOME_LOG_BASE+1))" | grep -m1 "gnome-launch: shell registered" || { echo "COLD-REENTER-MISSING: shell never registered on the fresh launch's bus"; touch /tmp/PHONELINUX_TESTS_FAILED; }
+            # ANR evidence BEFORE any dismissal: attribute, don't hide.
+            adb -s emulator-5554 shell dumpsys activity activities | grep -iE "anr|not responding" || echo "no ANR in dumpsys pre-dismiss"
+            adb -s emulator-5554 exec-out screencap -p > screenshots/30a-ubuntu-coldstart-pre-dismiss.png || true
+            adb -s emulator-5554 shell input keyevent KEYCODE_BACK || true
+            sleep 2
+            adb -s emulator-5554 exec-out screencap -p > screenshots/30b-ubuntu-coldstart-post-dismiss.png || true
+            sleep 118
             adb -s emulator-5554 exec-out screencap -p > screenshots/30-ubuntu-coldstart-reenter.png || true
             adb -s emulator-5554 shell run-as dev.phonelinux.proto ls -ld files/distros/ubuntu/root/LDOA-proof-renamed || touch /tmp/PHONELINUX_TESTS_FAILED
             adb -s emulator-5554 shell run-as dev.phonelinux.proto ls -la files/ || true
@@ -200,6 +211,7 @@ jobs:
           path: |
             screenshots/
             guest-gnome.log
+            guest-gnome.launch-prev.log
             /tmp/shotlog.txt
 
   # ARM64 qualification lane: "ARM package compatibility != ARM execution".

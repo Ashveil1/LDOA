@@ -85,6 +85,8 @@ object GuestUbuntu {
             #!/bin/sh
             export DISPLAY=:0 HOME=/root XDG_RUNTIME_DIR=/tmp/xdg XDG_CURRENT_DESKTOP=ubuntu:GNOME
             export PLINUX_SESSION=desktop
+            LAUNCH_ID=$(date +%s)
+            echo "gnome-launch: launch id=${'$'}LAUNCH_ID"
             mkdir -p /tmp/xdg
             chmod 0700 /tmp/xdg
             # EVIDENCE + BOUNDED FIX ATTEMPT: dump session state, then
@@ -157,6 +159,21 @@ object GuestUbuntu {
             xprop -root -remove _DBUS_SESSION_BUS_PID 2>/dev/null
             eval $(dbus-launch --sh-syntax) 2>&1
             echo "gnome-launch: session bus ${'$'}DBUS_SESSION_BUS_ADDRESS"
+            # READINESS evidence for the app-side gate: org.gnome.Shell owned
+            # on THIS launch's bus. A stalled shell (run 40864638283 re-enter:
+            # fallback shell never registered, black screen) fails this poll.
+            ( for i in $(seq 1 30); do
+                sleep 2
+                if gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
+                  echo "gnome-launch: shell registered launch=${'$'}LAUNCH_ID bus=${'$'}DBUS_SESSION_BUS_ADDRESS"
+                  break
+                fi
+              done
+              if ! gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
+                echo "gnome-launch: shell missing after 60s launch=${'$'}LAUNCH_ID"
+                echo "gnome-launch: shell-missing-state xdg=$(ls /tmp/xdg 2>&1 | tr '\n' '|') ice=$(ls /tmp/.ICE-unix 2>&1 | tr '\n' '|') x11=$(ls /tmp/.X11-unix 2>&1 | tr '\n' '|')"
+                ps 2>&1 | head -25
+              fi ) &
             echo "gnome-launch: trying gnome-session --session=ubuntu (top bar + ubuntu-dock + yaru)"
             gnome-session --session=ubuntu 2>&1 &
             GSPID=${'$'}!
@@ -168,6 +185,8 @@ object GuestUbuntu {
             else
               wait ${'$'}GSPID 2>/dev/null
               echo "gnome-launch: gnome-session died exit=${'$'}? - falling back to bare gnome-shell --x11"
+              # Repro-diagnosis state for the fallback path (no cleanup):
+              echo "gnome-launch: fallback-state xdg=$(ls /tmp/xdg 2>&1 | tr '\n' '|') ice=$(ls /tmp/.ICE-unix 2>&1 | tr '\n' '|') x11=$(ls /tmp/.X11-unix 2>&1 | tr '\n' '|')"
               exec gnome-shell --x11
             fi
             """.trimIndent() + "\n")
