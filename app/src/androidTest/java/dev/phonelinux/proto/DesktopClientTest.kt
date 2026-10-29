@@ -443,7 +443,11 @@ class DesktopClientTest {
         // repeat would be needed, qualification fails; no cleanup can turn
         // a failed return green.
         val go = gOff!!
-        val tb2 = devFor(900.0, go[1] - 13.0)
+        // Grab the ACTUAL visible titlebar segment, never a computed point
+        // past the screen edge (1080-wide display).
+        val grabGx = minOf(go[0] + go[2] - 100, minOf(go[0] + go[2], 1080) - 40)
+        assertTrue("st titlebar not visibly grabbable (off=" + go.toList() + ")", grabGx > go[0] + 20)
+        val tb2 = devFor(grabGx.toDouble(), go[1] - 13.0)
         device.drag(tb2.first, tb2.second, tb2.first + (20 - go[0]), tb2.second, 40)
         Thread.sleep(2_000)
         val gBack = stGeom()

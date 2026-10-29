@@ -433,11 +433,23 @@ for i in range(d.childCount):
             xwin("xwininfo -id " + id + " | grep -E 'Absolute upper-left|Width:|Height:'").replace("\n", " | ")
         // Window-level menu proof, independent of the (slow, possibly
         // GTK4-blind) atspi dump: the set of new top-level X windows.
+        fun plausibleMenuGeom(id: String): Boolean {
+            val g = geomLine(id)
+            val w = Regex("Width:\\s+(\\d+)").find(g)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            val h = Regex("Height:\\s+(\\d+)").find(g)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            // Real context menus are at least tens of px in both axes; 1x1 /
+            // origin-anchored windows are GNOME/mutter internals, not menus.
+            return w >= 20 && h >= 20
+        }
         fun awaitMenuWindow(beforeIds: Set<String>, timeoutMs: Long): Pair<List<String>, String>? {
             val deadline = System.currentTimeMillis() + timeoutMs
             while (System.currentTimeMillis() < deadline) {
                 val added = (rootChildIds() - beforeIds).sorted()
-                if (added.isNotEmpty()) return Pair(added, geomLine(added.first()))
+                val plausible = added.filter { plausibleMenuGeom(it) }
+                if (added.isNotEmpty() && plausible.isEmpty())
+                    Log.i(TAG, "awaitMenuWindow: ignoring implausible new windows " + added +
+                        " geom=" + geomLine(added.first()))
+                if (plausible.isNotEmpty()) return Pair(plausible, geomLine(plausible.first()))
                 Thread.sleep(700)
             }
             return null
@@ -462,7 +474,7 @@ for i in range(d.childCount):
         // Event-level probe of what the input layer injects into :0.
         fun probeStart(tag: String) {
             xwin("pkill -f 'xinput test-xi2' 2>/dev/null; rm -f /root/probe-" + tag + ".log; " +
-                "(xinput test-xi2 --root > /root/probe-" + tag + ".log 2>&1 &)")
+                "(stdbuf -oL xinput test-xi2 --root > /root/probe-" + tag + ".log 2>&1 &)")
             Thread.sleep(2_000)
         }
         fun probeStop(tag: String): String {
@@ -621,25 +633,38 @@ for i in range(d.childCount):
         val menuProbe = probeStop("menu")
         Shot.save("23d-ubuntu-longpress-menu")
         val menuNodes = awaitMenu(bgProbes, baselineBgNames, 35_000)
+        val injected3 = buttonPresses(menuProbe, 3)
         Log.i(TAG, "longpress-bg: menuWin=" + menuWin + " rightClickInjections=" +
-            buttonPresses(menuProbe, 3) + " probeTail=" + menuProbe.takeLast(300).replace("\n", " | ") +
+            injected3 + " probeBytes=" + menuProbe.length +
+            " probeTail=" + menuProbe.takeLast(300).replace("\n", " | ") +
             " atspiNull=" + (menuNodes == null))
-        if (menuWin == null) {
+        if (menuWin == null || injected3 != 1) {
             // DIAGNOSTIC ONLY (never asserted): is the X input stack able to
             // open a menu at that point at all? xdotool uses XTEST, an
             // independent path from the lorie mouse injection. If XTEST
             // opens a menu, the lorie mouse path is inert; if not, the
-            // client/point refuses right-click menus.
+            // client/point refuses right-click menus. The XTEST click is
+            // wrapped in its own probe window as a POSITIVE CONTROL: if the
+            // probe records the XTEST button-3, an earlier zero count for
+            // the product injection is a real negative; if it does not, the
+            // probe itself is unhealthy and zero counts are void. Runs on
+            // the original failure; the original asserts below still decide
+            // the verdict unchanged.
             val xlist = xwin("xinput list 2>/dev/null | head -24 || true").replace("\n", " | ")
             val mloc = xwin("xdotool getmouselocation 2>/dev/null || true").replace("\n", " | ")
             Log.i(TAG, "longpress-bg DIAG: xinput list=" + xlist)
             Log.i(TAG, "longpress-bg DIAG: mouse=" + mloc + " probeBytes=" + menuProbe.length +
                 " probeHead=" + menuProbe.take(300).replace("\n", " | "))
+            probeStart("hc")
             xwin("xdotool mousemove " + bgGuestX + " " + bgGuestY + " click 3 2>/dev/null || true")
             Thread.sleep(3_000)
+            val hcProbe = probeStop("hc")
+            Log.i(TAG, "longpress-bg DIAG: health-check probe button3=" + buttonPresses(hcProbe, 3) +
+                " motion=" + hcProbe.contains("Motion") + " hcBytes=" + hcProbe.length)
             val xdWin = (rootChildIds() - menuBeforeIds).sorted()
-            Log.i(TAG, "longpress-bg DIAG: xdotool right-click at the same point -> new windows=" + xdWin)
-            if (xdWin.isNotEmpty()) {
+            Log.i(TAG, "longpress-bg DIAG: xdotool right-click at the same point -> new windows=" + xdWin +
+                " plausible=" + xdWin.filter { plausibleMenuGeom(it) })
+            if (xdWin.any { plausibleMenuGeom(it) }) {
                 Shot.save("23d2b-xdotool-menu")
                 device.pressKeyCode(android.view.KeyEvent.KEYCODE_ESCAPE)
                 Thread.sleep(1_000)
@@ -651,8 +676,8 @@ for i in range(d.childCount):
             menuWin != null || menuNodes != null)
         assertTrue("expected exactly one new menu window, added=" + (menuWin?.first ?: emptyList<String>()) +
             " (native+injected duplicate?)", menuWin != null && menuWin.first.size == 1)
-        assertTrue("expected exactly one injected button-3 press, got " + buttonPresses(menuProbe, 3),
-            buttonPresses(menuProbe, 3) == 1)
+        assertTrue("expected exactly one injected button-3 press, got " + injected3,
+            injected3 == 1)
         val mwX = Regex("Absolute upper-left X:\\s+(-?\\d+)").find(menuWin!!.second)?.groupValues?.get(1)?.toIntOrNull() ?: -10000
         val mwY = Regex("Absolute upper-left Y:\\s+(-?\\d+)").find(menuWin.second)?.groupValues?.get(1)?.toIntOrNull() ?: -10000
         assertTrue("menu window opened far from the hold point (menu at " + mwX + "," + mwY +
