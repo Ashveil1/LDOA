@@ -428,45 +428,28 @@ class DesktopClientTest {
         // and verify the right edge (controls) is back onscreen.
         val gHome = stGeom()!!
         anrGuard("st-offscreen")
-        // Effect-verified hold-drag: both swipe AND drag have produced
-        // zero-delta outcomes on this step (runs 40824568558 swipe,
-        // 40827970133 drag) during Pixel Launcher ANR storm periods -
-        // injected events can be lost while the system input pipeline is
-        // jammed. Re-drag until the window actually leaves, logging every
-        // attempt; the assert still requires the final position offscreen.
-        var gOff = stGeom()
-        var offAttempts = 0
-        while ((gOff == null || gOff[0] + gOff[2] + 8 <= 1080) && offAttempts < 3) {
-            offAttempts++
-            val cur = stGeom()!!
-            val tb = devFor(cur[0] + 400.0, cur[1] - 13.0)
-            device.drag(tb.first, tb.second, tb.first + 600, tb.second, 40)
-            Thread.sleep(2_000)
-            gOff = stGeom()
-            android.util.Log.i("PHONEDIAG", "offscreen drag attempt " + offAttempts + ": geom=" + gOff?.toList())
-        }
-        android.util.Log.i("PHONEDIAG", "offscreen drag: before=" + gHome.toList() + " off=" + gOff?.toList() + " attempts=" + offAttempts)
-        assertTrue("st did not move offscreen (before=" + gHome.toList() + " off=" + gOff?.toList() + " attempts=" + offAttempts + ")",
+        // Single hold-drag only - no retries (qualification rule). Both
+        // swipe and drag have produced zero-delta outcomes on this step
+        // (runs 40824568558 swipe, 40827970133 drag), both inside Pixel
+        // Launcher ANR storm windows; correlation, not proven causation.
+        val tb = devFor(gHome[0] + 400.0, gHome[1] - 13.0)
+        device.drag(tb.first, tb.second, tb.first + 600, tb.second, 40)
+        Thread.sleep(2_000)
+        val gOff = stGeom()
+        android.util.Log.i("PHONEDIAG", "offscreen drag: before=" + gHome.toList() + " off=" + gOff?.toList())
+        assertTrue("st did not move offscreen (before=" + gHome.toList() + " off=" + gOff?.toList() + ")",
             gOff != null && gOff[0] + gOff[2] + 8 > 1080)
+        // Return gesture: ONE attempt only (qualification rule) - if a
+        // repeat would be needed, qualification fails; no cleanup can turn
+        // a failed return green.
         val go = gOff!!
         val tb2 = devFor(900.0, go[1] - 13.0)
         device.drag(tb2.first, tb2.second, tb2.first + (20 - go[0]), tb2.second, 40)
         Thread.sleep(2_000)
-        // Effect-verified recovery: re-drag by the remaining delta until
-        // the controls are truly onscreen; every attempt is logged.
-        var gBack = stGeom()
-        var recAttempts = 0
-        while (gBack != null && gBack[0] + gBack[2] + 8 > 1080 && recAttempts < 3) {
-            recAttempts++
-            val grab = devFor((gBack[0] + gBack[2] - 100).toDouble(), gBack[1] - 13.0)
-            device.drag(grab.first, grab.second, grab.first + (20 - gBack[0]), grab.second, 60)
-            Thread.sleep(2_000)
-            gBack = stGeom()
-            android.util.Log.i("PHONEDIAG", "recovery drag attempt " + recAttempts + ": back=" + gBack?.toList())
-        }
+        val gBack = stGeom()
         Shot.save("12-st-recovered")
-        android.util.Log.i("PHONEDIAG", "recovery drag: off=" + go.toList() + " back=" + gBack?.toList() + " attempts=" + recAttempts)
-        assertTrue("st controls not recovered onscreen (off=" + go.toList() + " back=" + gBack?.toList() + " attempts=" + recAttempts + ")",
+        android.util.Log.i("PHONEDIAG", "recovery drag: off=" + go.toList() + " back=" + gBack?.toList())
+        assertTrue("st controls not recovered onscreen in one attempt (off=" + go.toList() + " back=" + gBack?.toList() + ")",
             gBack != null && gBack[0] + gBack[2] + 8 <= 1080)
 
         // 6. White-stripe experiment: the band inside st exists only
