@@ -145,6 +145,19 @@ class UbuntuGnomeSpikeTest {
             return null
         }
 
+        fun atspi(): String = xwin(
+            "export DBUS_SESSION_BUS_ADDRESS=\"${'$'}(cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n' | grep -m1 '^DBUS_SESSION_BUS_ADDRESS=' | cut -d= -f2-)\"; " +
+                "timeout 30 python3 /root/atspi_dump.py 2>/dev/null | head -c 200000 || true")
+        class ANode(val depth: Int, val role: String, val x: Int, val y: Int,
+                    val w: Int, val h: Int, val name: String)
+        fun parseAts(dump: String): List<ANode> = dump.lines().mapNotNull { ln ->
+            val parts = ln.split("|")
+            if (parts.size < 7) return@mapNotNull null
+            ANode(parts[0].toIntOrNull() ?: return@mapNotNull null, parts[1],
+                parts[2].toIntOrNull() ?: -1, parts[3].toIntOrNull() ?: -1,
+                parts[4].toIntOrNull() ?: 0, parts[5].toIntOrNull() ?: 0, parts[6])
+        }
+
         /** GTK CSD windows draw a large input-transparent drop shadow INSIDE
          *  the X window: run 40695193086 measured visible top-left at
          *  xwininfo pos + (63,55). Grabbing without the extents lands in the
@@ -156,6 +169,26 @@ class UbuntuGnomeSpikeTest {
             Log.i(TAG, "dock-interact: frame extents for " + id + ": " + out.replace("\n", " | ").take(160))
             return if (nums.size >= 4) nums.take(4) else listOf(0, 0, 0, 0)
         }
+
+        // Run 40925177246 (shot 21c): a modal "Pixel Launcher isn't
+        // responding" ANR dialog was up at dock-tap time and the popup-clear
+        // tap did not clear it; a modal dialog eats outside touches. Dismiss
+        // it explicitly and VERIFY absence before any dock targeting.
+        fun anrPresent(): Boolean = device.executeShellCommand(
+            "dumpsys window windows | grep -m1 'Application Not Responding' || true"
+        ).contains("Application Not Responding")
+        fun dismissAnrVerified() {
+            var tries = 0
+            while (anrPresent() && tries < 4) {
+                tries++
+                Log.i(TAG, "dock-interact: ANR dialog present, dismissing (attempt " + tries + ")")
+                val waitBtn = device.findObject(androidx.test.uiautomator.UiSelector().text("Wait"))
+                if (waitBtn != null && waitBtn.exists()) waitBtn.click() else device.pressBack()
+                Thread.sleep(3_000)
+            }
+            assertTrue("ANR dialog still present after " + tries + " dismiss attempts", !anrPresent())
+        }
+        dismissAnrVerified()
 
         // Dismiss the screen-lock notification banner (top center) so it
         // cannot cover the dock: swipe it upward off the stack.
@@ -178,34 +211,10 @@ class UbuntuGnomeSpikeTest {
         device.click(540, 1200)
         Thread.sleep(2_000)
         Shot.save("21c-ubuntu-desktop-clean")
+        dismissAnrVerified()
         // Icon centers pixel-measured from the full-panel cold-start shot
         // (30, run 40671527573): Files = y~194 (grey/red cabinet),
         // second icon y~264, both spanning x~4-60 -> tap x=30.
-        var nauWid: String? = null
-        for ((attempt, tapY) in listOf(194, 264).withIndex().map { it.index + 1 to it.value }) {
-            // Finger-like press: short hold instead of an instant
-            // down/up, closer to how a finger lands on glass.
-            device.swipe(30, tapY, 32, tapY, 25)
-            Log.i(TAG, "dock-interact: pressed Files candidate (30," + tapY + ") attempt " + attempt)
-            val openDeadline = System.currentTimeMillis() + 90_000
-            while (System.currentTimeMillis() < openDeadline) {
-                val vis = nauVisible()
-                if (vis != null && vis.id !in beforeIds) { nauWid = vis.id; break }
-                val proc = xwin("pgrep -x nautilus || true").trim()
-                if (proc.isNotEmpty()) Log.i(TAG, "dock-interact: nautilus process alive pid=" + proc + " (no visible window yet)")
-                Thread.sleep(3_000)
-            }
-            if (nauWid != null) break
-        }
-        Thread.sleep(10_000) // mapped geometry can precede the first painted frame
-        Shot.save("22-ubuntu-dock-files-opened")
-        assertTrue("finger press on the dock Files icon did not open a nautilus window (2 positions tried)", nauWid != null)
-
-        val winBefore = nauVisible()
-        val wBefore = winBefore?.let { Pair(it.x, it.y) }
-        Log.i(TAG, "dock-interact: nautilus visible wid=" + nauWid + " geom=" + (winBefore?.let { it.x.toString() + "," + it.y + " " + it.w + "x" + it.h }))
-        assertTrue("nautilus window geometry unreadable", winBefore != null)
-
         // X-to-device coordinate mapping: UNKNOWN a priori (run 40686393933
         // grabbed wallpaper - guest (216,111) was not the headerbar in
         // device px; Android status bar offsets the lorie surface and the
@@ -250,6 +259,52 @@ class UbuntuGnomeSpikeTest {
             val by = 1200 - ay * first.second
             return Pair((ax * x + bx).toInt(), (ay * y + by).toInt())
         }
+
+        // Target the CURRENT dock geometry first: resolve the Files icon
+        // from the live a11y tree (run 40925177246: icons sat near y130/175
+        // on this panel while the taps hit y194/264 - stale per-panel
+        // constants). Legacy candidates stay as logged fallbacks; the
+        // gate itself (nautilus must open) is unchanged.
+        val filesNode = parseAts(atspi()).firstOrNull {
+            it.name.equals("Files", ignoreCase = true) && it.w >= 20 && it.h >= 20 && it.x <= 120
+        }
+        Log.i(TAG, "dock-interact: a11y Files node: " +
+            (filesNode?.let { it.x.toString() + "," + it.y + " " + it.w + "x" + it.h } ?: "unresolved"))
+        val tapCandidates = mutableListOf<Pair<Pair<Int, Int>, String>>()
+        if (filesNode != null) {
+            val c = mapToDevice(filesNode.x + filesNode.w / 2, filesNode.y + filesNode.h / 2)
+            if (c != null) tapCandidates.add(c to "a11y-measured")
+        }
+        tapCandidates.add((30 to 194) to "legacy-194")
+        tapCandidates.add((30 to 264) to "legacy-264")
+
+        var nauWid: String? = null
+        for ((attempt, cand) in tapCandidates.withIndex().map { it.index + 1 to it.value }) {
+            val (tapPoint, tapLabel) = cand
+            // Finger-like press: short hold instead of an instant
+            // down/up, closer to how a finger lands on glass.
+            device.swipe(tapPoint.first, tapPoint.second, tapPoint.first + 2, tapPoint.second, 25)
+            Log.i(TAG, "dock-interact: pressed Files candidate " + tapLabel +
+                " at (" + tapPoint.first + "," + tapPoint.second + ") attempt " + attempt)
+            val openDeadline = System.currentTimeMillis() + 90_000
+            while (System.currentTimeMillis() < openDeadline) {
+                val vis = nauVisible()
+                if (vis != null && vis.id !in beforeIds) { nauWid = vis.id; break }
+                val proc = xwin("pgrep -x nautilus || true").trim()
+                if (proc.isNotEmpty()) Log.i(TAG, "dock-interact: nautilus process alive pid=" + proc + " (no visible window yet)")
+                Thread.sleep(3_000)
+            }
+            if (nauWid != null) break
+        }
+        Thread.sleep(10_000) // mapped geometry can precede the first painted frame
+        Shot.save("22-ubuntu-dock-files-opened")
+        assertTrue("finger press on the dock Files icon did not open a nautilus window (2 positions tried)", nauWid != null)
+
+        val winBefore = nauVisible()
+        val wBefore = winBefore?.let { Pair(it.x, it.y) }
+        Log.i(TAG, "dock-interact: nautilus visible wid=" + nauWid + " geom=" + (winBefore?.let { it.x.toString() + "," + it.y + " " + it.w + "x" + it.h }))
+        assertTrue("nautilus window geometry unreadable", winBefore != null)
+
         // Headerbar (CSD) drag: grab the RIGHT side of the visible
         // headerbar (empty stretch between the path bar and the view
         // buttons), corrected by _GTK_FRAME_EXTENTS so the finger lands on
@@ -408,18 +463,6 @@ for i in range(d.childCount):
     a = d.getChildAtIndex(i)
     if a is not None: walk(a, 0)
 """.trimIndent())
-        fun atspi(): String = xwin(
-            "export DBUS_SESSION_BUS_ADDRESS=\"${'$'}(cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n' | grep -m1 '^DBUS_SESSION_BUS_ADDRESS=' | cut -d= -f2-)\"; " +
-                "timeout 30 python3 /root/atspi_dump.py 2>/dev/null | head -c 200000 || true")
-        class ANode(val depth: Int, val role: String, val x: Int, val y: Int,
-                    val w: Int, val h: Int, val name: String)
-        fun parseAts(dump: String): List<ANode> = dump.lines().mapNotNull { ln ->
-            val parts = ln.split("|")
-            if (parts.size < 7) return@mapNotNull null
-            ANode(parts[0].toIntOrNull() ?: return@mapNotNull null, parts[1],
-                parts[2].toIntOrNull() ?: -1, parts[3].toIntOrNull() ?: -1,
-                parts[4].toIntOrNull() ?: 0, parts[5].toIntOrNull() ?: 0, parts[6])
-        }
         // Only menu-tree nodes count: a file listing contains names like
         // "openssl" or "run-parts" that would otherwise fake menu items.
         fun menuHits(nodes: List<ANode>, probes: List<String>): List<String> =
