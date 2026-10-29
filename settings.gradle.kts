@@ -108,10 +108,15 @@ run {
      * injects a right-click at the midpoint; movement or a longer hold
      * keeps the sequence native (scroll/pinch) and never fires. One-finger
      * hold is deliberately NOT injected: GTK press-and-hold owns it where
-     * supported, and duplicating it raced the native menu (run 40844558720). */
+     * supported, and duplicating it raced the native menu (run 40844558720).
+     * The click fires when the LAST finger lifts: injecting while a touch
+     * is still active lets the trailing lift land as a tap that dismisses
+     * the just-opened menu (run 40851575540 arm3). */
     private long mTwoTapDownTime;
+    private long mTwoTapLiftTime;
     private float mTwoTapX1, mTwoTapY1, mTwoTapX2, mTwoTapY2;
     private boolean mTwoTapMoved;
+    private boolean mTwoTapPending;
 """
             val text = f.readText()
             if (orig in text && patched !in text) f.writeText(text.replace(orig, patched))
@@ -140,6 +145,9 @@ run {
             val patched = """                case MotionEvent.ACTION_DOWN:
                     mSuppressCursorMovement = false;
                     mSuppressDirectTouch = false;
+                    mTwoTapPending = false;
+                    mTwoTapDownTime = 0L;
+                    mTwoTapMoved = false;
 """
             val text = f.readText()
             if (orig in text && patched !in text) f.writeText(text.replace(orig, patched))
@@ -199,6 +207,7 @@ run {
                     mTotalMotionY = 0;
                     // LDOA: a second finger's down opens the two-finger-tap
                     // window; anything but exactly two fingers cancels it.
+                    mTwoTapPending = false;
                     if (event.getPointerCount() == 2) {
                         int tapAi = event.getActionIndex();
                         int tapOi = tapAi == 0 ? 1 : 0;
@@ -223,35 +232,59 @@ run {
                                 || Math.abs(event.getX(1) - mTwoTapX2) > 30f
                                 || Math.abs(event.getY(1) - mTwoTapY2) > 30f))
                         mTwoTapMoved = true;
+                    // LDOA: while a tap is pending the last finger's lift,
+                    // that finger drifting beyond slop cancels the pending
+                    // click; the move itself stays a native one-finger drag
+                    // (already forwarded above).
+                    if (mTwoTapPending && event.getPointerCount() == 1
+                            && (Math.abs(event.getX(0) - mTwoTapX1) > 30f
+                                || Math.abs(event.getY(0) - mTwoTapY1) > 30f))
+                        mTwoTapMoved = true;
                     break;
 
                 case MotionEvent.ACTION_POINTER_UP:
                     // LDOA direct touch: a two-finger tap (second finger
                     // lifted within 350ms, both fingers under 30px slop)
-                    // becomes a right-click at the midpoint. Moved or held
-                    // two-finger sequences stay native (scroll/pinch) and
-                    // never fire. One-finger hold is NOT injected: GTK's
-                    // native press-and-hold owns that gesture where the
-                    // toolkit supports it, and duplicating it raced the
-                    // native menu (run 40844558720 arm3). The raw taps are
-                    // forwarded all along; their focus/select side effect
-                    // mirrors a real touchscreen's.
+                    // becomes a right-click at the midpoint - but the click
+                    // is injected only when the LAST finger lifts. Raw
+                    // events are forwarded before this switch runs, so by
+                    // then no touch is active and the click reaches the
+                    // client in the same context as the proven XTEST
+                    // baseline. Injecting at this earlier point let the
+                    // trailing lift land as a tap that dismissed the
+                    // just-opened menu (run 40851575540 arm3). Moved or
+                    // held two-finger sequences stay native (scroll/pinch)
+                    // and never fire. One-finger hold is NOT injected:
+                    // GTK's native press-and-hold owns that gesture where
+                    // the toolkit supports it, and duplicating it raced
+                    // the native menu (run 40844558720 arm3).
                     if (mTwoTapDownTime != 0L) {
-                        if (!mTwoTapMoved && event.getEventTime() - mTwoTapDownTime <= 350
-                                && mInputStrategy instanceof InputStrategyInterface.NullInputStrategy
-                                && directTouchPrefs(mActivity).getBoolean("ldoa_twofinger_tap_rightclick", true)) {
-                            mRenderData.mapScreenPoint((mTwoTapX1 + mTwoTapX2) / 2f, (mTwoTapY1 + mTwoTapY2) / 2f, mappedPoint);
-                            mInjector.sendCursorMove(mappedPoint[0], mappedPoint[1], false);
-                            mInjector.sendMouseClick(InputStub.BUTTON_RIGHT, false);
-                            android.util.Log.i("LorieTouch", "LDOA-2FTAP-FIRE right-click guest("
-                                + (int) mappedPoint[0] + "," + (int) mappedPoint[1] + ") dtMs="
-                                + (event.getEventTime() - mTwoTapDownTime));
+                        if (!mTwoTapMoved && event.getEventTime() - mTwoTapDownTime <= 350) {
+                            mTwoTapPending = true;
+                            mTwoTapLiftTime = event.getEventTime();
                         }
                         mTwoTapDownTime = 0L;
                     }
                     break;
 
                 case MotionEvent.ACTION_UP:
+                    // LDOA: the last finger lifted; its touch-end was
+                    // already forwarded natively above, so no touch is
+                    // active now. A pending tap within slop and within the
+                    // 350ms final-lift window fires; anything else drops.
+                    if (mTwoTapPending) {
+                        if (!mTwoTapMoved && event.getEventTime() - mTwoTapLiftTime <= 350
+                                && mInputStrategy instanceof InputStrategyInterface.NullInputStrategy
+                                && directTouchPrefs(mActivity).getBoolean("ldoa_twofinger_tap_rightclick", true)) {
+                            mRenderData.mapScreenPoint((mTwoTapX1 + mTwoTapX2) / 2f, (mTwoTapY1 + mTwoTapY2) / 2f, mappedPoint);
+                            mInjector.sendCursorMove(mappedPoint[0], mappedPoint[1], false);
+                            mInjector.sendMouseClick(InputStub.BUTTON_RIGHT, false);
+                            android.util.Log.i("LorieTouch", "LDOA-2FTAP-FIRE right-click guest("
+                                + (int) mappedPoint[0] + "," + (int) mappedPoint[1] + ") liftDtMs="
+                                + (event.getEventTime() - mTwoTapLiftTime));
+                        }
+                        mTwoTapPending = false;
+                    }
                     mTwoTapDownTime = 0L;
                     break;
 """
