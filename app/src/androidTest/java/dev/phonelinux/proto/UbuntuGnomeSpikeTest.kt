@@ -351,6 +351,423 @@ class UbuntuGnomeSpikeTest {
                 !File(rootfs, "root/LDOA-proof-created").exists())
         Log.i(TAG, "UBUNTU-FILEOPS-OK UI folder create and rename independently verified")
 
+        // --- Finger-gesture qualification (user-approved map 2026-10-29,
+        // option A: tap = click, hold = right-click, one-finger drag native,
+        // two-finger drag = wheel scroll, individual toggles). Runtime-
+        // verified against the real desktop, never assumed from client docs:
+        // menus are proven by their actual items and position (AT-SPI),
+        // scroll by visible content movement plus the injected event stream
+        // (xinput), toggles by behavior with them off and on again.
+        // python3-pyatspi/xinput/xterm are test-only probes installed here,
+        // not product packages.
+        hideSoftKeyboardIfShown()
+
+        // A modal system ANR dialog blocks input to the X surface (run
+        // 40811548463: a Pixel Launcher ANR ate the Alpine maximize tap).
+        // Bounded environment recovery: dismiss only allowlisted system
+        // ANRs via the shared helper, log the count, assert the path is
+        // clear; anything else stays up and fails the test.
+        fun anrGuard(stage: String) {
+            var dismissed = 0
+            while (dismissed < 3) {
+                val t = device.findObject(androidx.test.uiautomator.By.textContains("isn't responding"))
+                    ?: device.findObject(androidx.test.uiautomator.By.textContains("Not Responding"))
+                    ?: break
+                Shot.dismissSystemDialogs(device)
+                dismissed++
+            }
+            Log.i(TAG, "anr-guard[" + stage + "]: allowlisted dialogs dismissed=" + dismissed)
+            assertTrue("system ANR dialog still blocking input before " + stage,
+                device.findObject(androidx.test.uiautomator.By.textContains("isn't responding")) == null &&
+                device.findObject(androidx.test.uiautomator.By.textContains("Not Responding")) == null)
+        }
+        anrGuard("gesture-tests")
+
+        Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c",
+            "export DEBIAN_FRONTEND=noninteractive; apt-get install -y python3-pyatspi xinput xterm"),
+            fakeRoot = true)
+        File(rootfs, "root/atspi_dump.py").writeText("""
+import pyatspi
+def walk(node, depth):
+    try: role = node.getRoleName()
+    except Exception: return
+    name = (node.name or '').replace('|', '/').replace('\n', ' ')
+    try:
+        e = node.queryComponent().getExtents(0)
+        print('%d|%s|%d|%d|%d|%d|%s' % (depth, role, e.x, e.y, e.width, e.height, name))
+    except Exception:
+        print('%d|%s|-1|-1|0|0|%s' % (depth, role, name))
+    try: n = node.childCount
+    except Exception: n = 0
+    for i in range(n):
+        try: ch = node.getChildAtIndex(i)
+        except Exception: continue
+        if ch is not None: walk(ch, depth + 1)
+d = pyatspi.Registry.getDesktop(0)
+for i in range(d.childCount):
+    a = d.getChildAtIndex(i)
+    if a is not None: walk(a, 0)
+""".trimIndent())
+        fun atspi(): String = xwin(
+            "export DBUS_SESSION_BUS_ADDRESS=\"${'$'}(cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n' | grep -m1 '^DBUS_SESSION_BUS_ADDRESS=' | cut -d= -f2-)\"; " +
+                "timeout 30 python3 /root/atspi_dump.py 2>/dev/null | head -c 60000 || true")
+        class ANode(val depth: Int, val role: String, val x: Int, val y: Int,
+                    val w: Int, val h: Int, val name: String)
+        fun parseAts(dump: String): List<ANode> = dump.lines().mapNotNull { ln ->
+            val parts = ln.split("|")
+            if (parts.size < 7) return@mapNotNull null
+            ANode(parts[0].toIntOrNull() ?: return@mapNotNull null, parts[1],
+                parts[2].toIntOrNull() ?: -1, parts[3].toIntOrNull() ?: -1,
+                parts[4].toIntOrNull() ?: 0, parts[5].toIntOrNull() ?: 0, parts[6])
+        }
+        // Only menu-tree nodes count: a file listing contains names like
+        // "openssl" or "run-parts" that would otherwise fake menu items.
+        fun menuHits(nodes: List<ANode>, probes: List<String>): List<String> =
+            nodes.filter { n -> n.role.lowercase().contains("menu") &&
+                probes.any { pr -> n.name.lowercase().contains(pr) } }
+                .map { it.name }.distinct()
+        fun awaitMenu(probes: List<String>, baseline: List<String>, timeoutMs: Long): List<ANode>? {
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (System.currentTimeMillis() < deadline) {
+                val nodes = parseAts(atspi())
+                if ((menuHits(nodes, probes) - baseline).size >= 2) return nodes
+                Thread.sleep(700)
+            }
+            return null
+        }
+        fun awaitNoMenu(probes: List<String>, baseline: List<String>, timeoutMs: Long): Boolean {
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (System.currentTimeMillis() < deadline) {
+                if ((menuHits(parseAts(atspi()), probes) - baseline).isEmpty()) return true
+                Thread.sleep(500)
+            }
+            return false
+        }
+        // Event-level probe of what the input layer injects into :0.
+        fun probeStart(tag: String) {
+            xwin("pkill -f 'xinput test-xi2' 2>/dev/null; rm -f /root/probe-" + tag + ".log; " +
+                "(xinput test-xi2 --root > /root/probe-" + tag + ".log 2>&1 &)")
+            Thread.sleep(2_000)
+        }
+        fun probeStop(tag: String): String {
+            Thread.sleep(500)
+            xwin("pkill -f 'xinput test-xi2' 2>/dev/null || true")
+            Thread.sleep(500)
+            return xwin("cat /root/probe-" + tag + ".log 2>/dev/null || true")
+        }
+        fun buttonPresses(probe: String, detail: Int): Int =
+            Regex("ButtonPress\\)[\\s\\S]{0,200}?detail: " + detail).findAll(probe).count()
+        fun fullShot(): android.graphics.Bitmap = instr.uiAutomation.takeScreenshot()
+            ?: throw AssertionError("takeScreenshot returned null")
+        fun regionDiff(a: android.graphics.Bitmap, b: android.graphics.Bitmap, r: android.graphics.Rect): Double {
+            val x0 = r.left.coerceIn(0, a.width - 1); val x1 = r.right.coerceIn(0, a.width - 1)
+            val y0 = r.top.coerceIn(0, a.height - 1); val y1 = r.bottom.coerceIn(0, a.height - 1)
+            var diff = 0; var total = 0; var y = y0
+            while (y <= y1) {
+                var x = x0
+                while (x <= x1) {
+                    val pa = a.getPixel(x, y); val pb = b.getPixel(x, y)
+                    if (Math.abs((pa and 0xff) - (pb and 0xff)) > 16 ||
+                        Math.abs(((pa shr 8) and 0xff) - ((pb shr 8) and 0xff)) > 16 ||
+                        Math.abs(((pa shr 16) and 0xff) - ((pb shr 16) and 0xff)) > 16) diff++
+                    total++; x += 4
+                }
+                y += 4
+            }
+            return if (total == 0) 0.0 else diff.toDouble() / total
+        }
+        fun devRectOf(x: Int, y: Int, w: Int, h: Int): android.graphics.Rect {
+            val tl = mapToDevice(x, y)!!; val br = mapToDevice(x + w, y + h)!!
+            val dw = br.first - tl.first; val dh = br.second - tl.second
+            return android.graphics.Rect(tl.first + dw / 50, tl.second + (dh * 0.12).toInt(),
+                br.first - dw / 50, br.second - dh / 50)
+        }
+        fun guestRect(pattern: String): IntArray? {
+            for (id in windowIds(pattern)) {
+                val st = xwin("xwininfo -id " + id + " -stats")
+                val map = Regex("Map State: (\\w+)").find(st)?.groupValues?.get(1)
+                val w = Regex("Width: (\\d+)").find(st)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                val h = Regex("Height: (\\d+)").find(st)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                if (map == "IsViewable" && w > 100 && h > 100) {
+                    val x = Regex("Absolute upper-left X:\\s+(-?\\d+)").find(st)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                    val y = Regex("Absolute upper-left Y:\\s+(-?\\d+)").find(st)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                    return intArrayOf(x, y, w, h)
+                }
+            }
+            return null
+        }
+
+        fun longPress(at: Pair<Int, Int>) {
+            val down = android.os.SystemClock.uptimeMillis()
+            val props = android.view.MotionEvent.PointerProperties().apply {
+                id = 0; toolType = android.view.MotionEvent.TOOL_TYPE_FINGER
+            }
+            val coords = android.view.MotionEvent.PointerCoords().apply {
+                x = at.first.toFloat(); y = at.second.toFloat(); pressure = 1f; size = 1f
+            }
+            fun ev(action: Int) = android.view.MotionEvent.obtain(down,
+                android.os.SystemClock.uptimeMillis(), action, 1,
+                arrayOf(props), arrayOf(coords), 0, 0, 1f, 1f, 0, 0,
+                android.view.InputDevice.SOURCE_TOUCHSCREEN, 0)
+            var e = ev(android.view.MotionEvent.ACTION_DOWN)
+            try { instr.sendPointerSync(e) } finally { e.recycle() }
+            android.os.SystemClock.sleep(800)
+            e = ev(android.view.MotionEvent.ACTION_UP)
+            try { instr.sendPointerSync(e) } finally { e.recycle() }
+        }
+        fun twoFingerSwipe(cx1: Int, cy1: Int, cx2: Int, cy2: Int, dx: Int, dy: Int) {
+            val down = android.os.SystemClock.uptimeMillis()
+            val p1 = android.view.MotionEvent.PointerProperties().apply {
+                id = 0; toolType = android.view.MotionEvent.TOOL_TYPE_FINGER
+            }
+            val p2 = android.view.MotionEvent.PointerProperties().apply {
+                id = 1; toolType = android.view.MotionEvent.TOOL_TYPE_FINGER
+            }
+            fun c(x: Float, y: Float) = android.view.MotionEvent.PointerCoords().apply {
+                this.x = x; this.y = y; pressure = 1f; size = 1f
+            }
+            fun send(action: Int, pts: Array<android.view.MotionEvent.PointerProperties>,
+                     cx1: Float, cy1: Float, cx2: Float, cy2: Float) {
+                val coords = if (pts.size == 1) arrayOf(c(cx1, cy1)) else arrayOf(c(cx1, cy1), c(cx2, cy2))
+                val e = android.view.MotionEvent.obtain(down,
+                    android.os.SystemClock.uptimeMillis(), action, pts.size, pts, coords,
+                    0, 0, 1f, 1f, 0, 0, android.view.InputDevice.SOURCE_TOUCHSCREEN, 0)
+                try { instr.sendPointerSync(e) } finally { e.recycle() }
+            }
+            val idx1 = 1 shl android.view.MotionEvent.ACTION_POINTER_INDEX_SHIFT
+            send(android.view.MotionEvent.ACTION_DOWN, arrayOf(p1), cx1.toFloat(), cy1.toFloat(), 0f, 0f)
+            send(android.view.MotionEvent.ACTION_POINTER_DOWN or idx1, arrayOf(p1, p2),
+                cx1.toFloat(), cy1.toFloat(), cx2.toFloat(), cy2.toFloat())
+            val steps = 12
+            for (st in 1..steps) {
+                send(android.view.MotionEvent.ACTION_MOVE, arrayOf(p1, p2),
+                    cx1 + dx * st / steps.toFloat(), cy1 + dy * st / steps.toFloat(),
+                    cx2 + dx * st / steps.toFloat(), cy2 + dy * st / steps.toFloat())
+                android.os.SystemClock.sleep(40)
+            }
+            send(android.view.MotionEvent.ACTION_POINTER_UP or idx1, arrayOf(p1, p2),
+                (cx1 + dx).toFloat(), (cy1 + dy).toFloat(), (cx2 + dx).toFloat(), (cy2 + dy).toFloat())
+            send(android.view.MotionEvent.ACTION_UP, arrayOf(p1), (cx1 + dx).toFloat(), (cy1 + dy).toFloat(), 0f, 0f)
+        }
+
+        val nwg = nauVisible()
+        assertTrue("Files window missing before gesture tests", nwg != null)
+        val fe0 = frameExtents(nwg!!.id)
+        val bgGuestX = nwg.x + fe0[0] + (nwg.w - fe0[0] - fe0[1]) / 2
+        val bgGuestY = nwg.y + fe0[2] + (nwg.h - fe0[2] - fe0[3]) - 80
+        val bgTarget = mapToDevice(bgGuestX, bgGuestY)
+        assertTrue("no device mapping for long-press target", bgTarget != null)
+
+        // (a) HOLD = RIGHT-CLICK, surface 1: Files background. The proof is
+        // the menu itself: real Nautilus menu items appear near the hold
+        // point that were not there before, forming exactly one contiguous
+        // menu, plus the injected pointer right-click on :0.
+        val bgProbes = listOf("new folder", "paste", "select all", "properties",
+            "open in terminal", "sort", "undo", "redo", "restore", "empty trash")
+        val baselineBgNames = menuHits(parseAts(atspi()), bgProbes)
+        Log.i(TAG, "longpress-bg: baseline item names=" + baselineBgNames)
+        probeStart("menu")
+        longPress(bgTarget!!)
+        val menuNodes = awaitMenu(bgProbes, baselineBgNames, 6_000)
+        val menuProbe = probeStop("menu")
+        Shot.save("23d-ubuntu-longpress-menu")
+        assertTrue("hold on Files background produced no context menu (no new items)", menuNodes != null)
+        val bgNew = menuHits(menuNodes!!, bgProbes) - baselineBgNames
+        val hitIdx = menuNodes.mapIndexedNotNull { idx, n -> if (n.name in bgNew) idx else null }
+        val spread = if (hitIdx.isEmpty()) -1 else hitIdx.last() - hitIdx.first()
+        Log.i(TAG, "longpress-bg: new menu items=" + bgNew + " idxSpread=" + spread +
+            " rightClickInjections=" + buttonPresses(menuProbe, 3))
+        assertTrue("context menu items not identifiable (found=" + bgNew + ")", bgNew.size >= 2)
+        assertTrue("menu items not contiguous - more than one menu? (spread=" + spread + ")",
+            spread in 0..(bgNew.size * 4))
+        val posNode = menuNodes.firstOrNull { it.name in bgNew && it.w > 0 }
+        assertTrue("menu position evidence missing (no sized item node)", posNode != null)
+        assertTrue("menu opened far from the hold point", posNode != null &&
+            Math.abs(posNode.x + posNode.w / 2 - bgGuestX) <= 400 &&
+            Math.abs(posNode.y + posNode.h / 2 - bgGuestY) <= 400)
+        assertTrue("no pointer right-click (button 3) injected on :0 (probeTail=" +
+            menuProbe.takeLast(300).replace("\n", " | ") + ")", buttonPresses(menuProbe, 3) > 0)
+        device.pressKeyCode(android.view.KeyEvent.KEYCODE_ESCAPE)
+        assertTrue("context menu did not close on Escape", awaitNoMenu(bgProbes, baselineBgNames, 4_000))
+        Log.i(TAG, "UBUNTU-LONGPRESS-RIGHTCLICK-OK Files background menu: " + bgNew)
+
+        // (b) No spurious right-click: a one-finger drag and a plain tap on
+        // the desktop background (outside every window) must open nothing.
+        val geom = xwin("xdotool getdisplaygeometry").trim().split(Regex("\s+"))
+        val scrW = geom.getOrNull(0)?.toIntOrNull() ?: 1080
+        val scrH = geom.getOrNull(1)?.toIntOrNull() ?: 2160
+        val deskTarget = mapToDevice(scrW - 80, scrH - 60)
+        assertTrue("no mapping for desktop point", deskTarget != null)
+        val deskP = deskTarget!!
+        device.swipe(deskP.first - 60, deskP.second - 30, deskP.first, deskP.second, 20)
+        Thread.sleep(1_200)
+        assertTrue("one-finger drag spuriously opened a context menu",
+            (menuHits(parseAts(atspi()), bgProbes) - baselineBgNames).isEmpty())
+        device.click(deskP.first, deskP.second)
+        Thread.sleep(1_200)
+        assertTrue("plain tap spuriously opened a context menu",
+            (menuHits(parseAts(atspi()), bgProbes) - baselineBgNames).isEmpty())
+        Log.i(TAG, "UBUNTU-NO-SPURIOUS-RIGHTCLICK-OK drag and tap stayed drag/click")
+
+        // (c) HOLD = RIGHT-CLICK, surface 2: a file row (the folder created
+        // and renamed by the fileops steps). Fallback if the row is not in
+        // the a11y tree: the window headerbar's own menu (window count).
+        val rowNode = parseAts(atspi()).firstOrNull { it.name == "LDOA-proof-renamed" && it.w > 0 }
+        if (rowNode != null) {
+            val rgX = rowNode.x + rowNode.w / 2; val rgY = rowNode.y + rowNode.h / 2
+            val rowTarget = mapToDevice(rgX, rgY)
+            assertTrue("no device mapping for file-row hold", rowTarget != null)
+            val rowProbes = listOf("open", "cut", "copy", "rename", "move to trash",
+                "star", "properties", "compress", "run")
+            val baselineRow = menuHits(parseAts(atspi()), rowProbes)
+            longPress(rowTarget!!)
+            val rowMenu = awaitMenu(rowProbes, baselineRow, 6_000)
+            Shot.save("23d2-ubuntu-longpress-row-menu")
+            assertTrue("hold on a file row produced no context menu", rowMenu != null)
+            val rowNew = menuHits(rowMenu!!, rowProbes) - baselineRow
+            Log.i(TAG, "longpress-row: new items=" + rowNew)
+            assertTrue("row context menu items not identifiable (found=" + rowNew + ")", rowNew.size >= 2)
+            val posR = rowMenu.firstOrNull { it.name in rowNew && it.w > 0 }
+            assertTrue("row menu opened far from the hold point", posR != null &&
+                Math.abs(posR.x + posR.w / 2 - rgX) <= 400 && Math.abs(posR.y + posR.h / 2 - rgY) <= 400)
+            device.pressKeyCode(android.view.KeyEvent.KEYCODE_ESCAPE)
+            assertTrue("row menu did not close on Escape", awaitNoMenu(rowProbes, baselineRow, 4_000))
+            Log.i(TAG, "UBUNTU-LONGPRESS-RIGHTCLICK-SURFACE2-OK file row menu: " + rowNew)
+        } else {
+            Log.i(TAG, "longpress-row: folder node not in a11y tree; headerbar fallback")
+            val before = xwin("xwininfo -root -children | grep -c '0x' || true").trim().toIntOrNull() ?: 0
+            val hb = mapToDevice(nwg.x + fe0[0] + (nwg.w - fe0[0] - fe0[1]) - 200, nwg.y + fe0[2] + 20)
+            assertTrue("headerbar fallback mapping missing", hb != null)
+            longPress(hb!!)
+            Thread.sleep(2_500)
+            val after = xwin("xwininfo -root -children | grep -c '0x' || true").trim().toIntOrNull() ?: 0
+            Shot.save("23d2-ubuntu-longpress-headerbar-menu")
+            assertTrue("hold on the headerbar opened no window menu (" + before + " -> " + after + ")", after > before)
+            device.pressKeyCode(android.view.KeyEvent.KEYCODE_ESCAPE)
+            Thread.sleep(1_000)
+            Log.i(TAG, "UBUNTU-LONGPRESS-RIGHTCLICK-SURFACE2-OK headerbar menu (windows " + before + " -> " + after + ")")
+        }
+
+        // (d) TWO-FINGER DRAG = WHEEL SCROLL on modern content: Files at
+        // /usr/bin. Proof is both the injected event stream (smooth
+        // scroll-valuator motion) AND visible content movement in the
+        // window interior.
+        chord(false, android.view.KeyEvent.KEYCODE_L)
+        Thread.sleep(1_500)
+        device.executeShellCommand("input text /usr/bin")
+        device.pressEnter()
+        Thread.sleep(6_000)
+        anrGuard("scroll")
+        val nws = nauVisible()!!
+        val scrollRect = devRectOf(nws.x, nws.y, nws.w, nws.h)
+        val sc = mapToDevice(nws.x + nws.w / 2, nws.y + nws.h / 2)
+        assertTrue("no device mapping for scroll center", sc != null)
+        val scP = sc!!
+        val bmpBefore = fullShot()
+        Shot.save("23e-ubuntu-scroll-target")
+        probeStart("scroll")
+        twoFingerSwipe(scP.first - 60, scP.second, scP.first + 60, scP.second, 0, -200)
+        Thread.sleep(900)
+        twoFingerSwipe(scP.first - 60, scP.second, scP.first + 60, scP.second, 0, -200)
+        val scrollProbe = probeStop("scroll")
+        val bmpAfter = fullShot()
+        Shot.save("23f-ubuntu-twofinger-scrolled")
+        val smoothEvents = Regex("valuators:[^\n]*3: -?\d").findAll(scrollProbe).count()
+        val moved = regionDiff(bmpBefore, bmpAfter, scrollRect)
+        Log.i(TAG, "twofinger-scroll: smoothValuatorEvents=" + smoothEvents +
+            " visibleChangeFraction=" + moved +
+            " probeTail=" + scrollProbe.takeLast(400).replace("
+", " | "))
+        assertTrue("two-finger drag delivered no scroll-valuator motion to :0 (probeTail=" +
+            scrollProbe.takeLast(300).replace("
+", " | ") + ")", smoothEvents > 0)
+        assertTrue("Files content did not visibly move after two-finger drags (diff=" + moved + ")",
+            moved > 0.05)
+        Log.i(TAG, "UBUNTU-TWOFINGER-SCROLL-OK injected scroll and visible movement (" + moved + ")")
+
+        // (e) Legacy client coverage: xterm has no XI2 smooth scrolling;
+        // it scrolls only if the server converts the valuators to button
+        // 4/5 steps (SetScrollValuator). Proof is visible scrollback
+        // movement; the probe records any emulated button events.
+        xwin("(xterm -sb -geometry 100x30+200+250 -e /bin/sh -c 'seq 1 400; sleep 240' >/dev/null 2>&1 &) ; sleep 2")
+        var xt: IntArray? = null
+        val xtDeadline = System.currentTimeMillis() + 15_000
+        while (System.currentTimeMillis() < xtDeadline) {
+            xt = guestRect("xterm")
+            if (xt != null) break
+            Thread.sleep(1_000)
+        }
+        assertTrue("xterm window never mapped", xt != null)
+        val xrect = devRectOf(xt!![0], xt[1], xt[2], xt[3])
+        val xc = mapToDevice(xt[0] + xt[2] / 2, xt[1] + xt[3] / 2)!!
+        val bmpX0 = fullShot()
+        Shot.save("23g-ubuntu-xterm-before-scroll")
+        probeStart("xterm")
+        // Finger-DOWN swipe: view toward earlier lines (scroll back).
+        twoFingerSwipe(xc.first - 60, xc.second, xc.first + 60, xc.second, 0, 200)
+        Thread.sleep(900)
+        twoFingerSwipe(xc.first - 60, xc.second, xc.first + 60, xc.second, 0, 200)
+        val xtermProbe = probeStop("xterm")
+        val bmpX1 = fullShot()
+        Shot.save("23h-ubuntu-xterm-scrolled")
+        val xMoved = regionDiff(bmpX0, bmpX1, xrect)
+        val legacyUp = buttonPresses(xtermProbe, 4)
+        Log.i(TAG, "xterm-scroll: visibleChangeFraction=" + xMoved + " emulatedBtn4=" + legacyUp +
+            " probeTail=" + xtermProbe.takeLast(400).replace("
+", " | "))
+        assertTrue("xterm content did not visibly move (legacy scroll path broken, diff=" + xMoved + ")",
+            xMoved > 0.05)
+        Log.i(TAG, "UBUNTU-LEGACY-SCROLL-OK xterm scrolled visibly (" + xMoved + ")")
+        xwin("xwininfo -root -tree | grep -i xterm | awk '{print \$1}' | head -1 | xargs -r xkill -id || true")
+        Thread.sleep(1_000)
+
+        // (f) Toggles OFF must restore the unpatched behavior: no
+        // right-click/scroll INJECTION (event-level), whatever the client
+        // then does natively with the forwarded touch. The input layer
+        // reads the toggles per touch sequence, so no restart is needed.
+        // Toggles are switched back on and re-verified afterwards.
+        val prefs = ctx.getSharedPreferences(ctx.packageName + "_preferences",
+            android.content.Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("ldoa_longpress_rightclick", false)
+            .putBoolean("ldoa_twofinger_scroll", false).apply()
+        Thread.sleep(500)
+        probeStart("offhold")
+        longPress(scP)
+        Thread.sleep(2_000)
+        val offHoldProbe = probeStop("offhold")
+        val offInjected = buttonPresses(offHoldProbe, 3)
+        val offMenuNames = menuHits(parseAts(atspi()), bgProbes) - baselineBgNames
+        Log.i(TAG, "toggle-off hold: injectedRightClicks=" + offInjected +
+            " nativeMenuItems=" + offMenuNames + " (a menu here would be the client's own touch handling)")
+        assertTrue("right-click injection still active with the toggle off", offInjected == 0)
+        device.pressKeyCode(android.view.KeyEvent.KEYCODE_ESCAPE)
+        Thread.sleep(800)
+        probeStart("offscroll")
+        twoFingerSwipe(scP.first - 60, scP.second, scP.first + 60, scP.second, 0, -200)
+        Thread.sleep(900)
+        val offScrollProbe = probeStop("offscroll")
+        val offSmooth = Regex("valuators:[^\n]*3: -?\d").findAll(offScrollProbe).count()
+        Log.i(TAG, "toggle-off scroll: injectedSmoothEvents=" + offSmooth)
+        assertTrue("scroll injection still active with the toggle off", offSmooth == 0)
+        Shot.save("23i-ubuntu-toggles-off")
+        Log.i(TAG, "UBUNTU-TOGGLES-OFF-OK no injection while disabled")
+
+        prefs.edit().putBoolean("ldoa_longpress_rightclick", true)
+            .putBoolean("ldoa_twofinger_scroll", true).apply()
+        Thread.sleep(500)
+        val onProbes = bgProbes + listOf("open", "cut", "copy", "rename", "move to trash", "run", "star")
+        val baseOn = menuHits(parseAts(atspi()), onProbes)
+        probeStart("onhold")
+        longPress(scP)
+        val onMenu = awaitMenu(onProbes, baseOn, 6_000)
+        val onHoldProbe = probeStop("onhold")
+        Shot.save("23j-ubuntu-toggles-restored")
+        assertTrue("right-click did not come back after re-enabling the toggle",
+            onMenu != null && buttonPresses(onHoldProbe, 3) > 0)
+        device.pressKeyCode(android.view.KeyEvent.KEYCODE_ESCAPE)
+        Thread.sleep(800)
+        Log.i(TAG, "UBUNTU-TOGGLES-RESTORE-OK injection active again after re-enable")
+
         // Kill a pid with all its /proc descendants (deepest first): guest
         // binaries exec under proot so their cmdline does not carry the
         // rootfs path - name/pattern kills miss them (run 40702734816 left
@@ -463,11 +880,15 @@ class UbuntuGnomeSpikeTest {
         val rg = mapToDevice(rw.x + re[0] + rw.w - re[0] - re[1] - 200, rw.y + re[2] + 20)
         assertTrue("restart drag mapping missing", rg != null)
         Log.i(TAG, "restart: drag geom=" + rw.x + "," + rw.y + " " + rw.w + "x" + rw.h + " extents=" + re + " target=" + rg)
+        anrGuard("restart-drag")
+        Log.i(TAG, "restart: nautilus ids before drag: " + windowIds("nautilus"))
         fingerDrag(rg!!)
         Log.i(TAG, "restart: pointer after drag=" + xwin("xdotool getmouselocation --shell").replace("\n", " | "))
+        Log.i(TAG, "restart: nautilus ids after drag: " + windowIds("nautilus"))
         val moved = nauVisible()
         Shot.save("24c-ubuntu-restart-dragged")
-        Log.i(TAG, "restart: finger drag (" + rw.x + "," + rw.y + ") -> " + moved?.let { it.x.toString() + "," + it.y })
+        Log.i(TAG, "restart: finger drag id=" + rw.id + " (" + rw.x + "," + rw.y + ") -> " +
+            moved?.let { it.id + " (" + it.x + "," + it.y + ")" })
         assertTrue("Files did not follow finger drag after restart", moved != null &&
             Math.abs(moved.x - rw.x + 60) < 30 && Math.abs(moved.y - rw.y - 120) < 30)
         assertTrue("renamed folder missing after session restart", File(rootfs, "root/LDOA-proof-renamed").isDirectory)

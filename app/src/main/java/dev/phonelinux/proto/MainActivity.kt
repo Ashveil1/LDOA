@@ -183,12 +183,40 @@ private fun PickerScreen(distros: List<Distro>, vm: SpikeViewModel, onPrimary: (
             }
             Spacer(Modifier.height(12.dp))
         }
+        GestureToggles()
         Spacer(Modifier.height(8.dp))
         Text("Output", color = TextDim, fontSize = 13.sp)
         Spacer(Modifier.height(6.dp))
         Box(Modifier.fillMaxSize().clip(RoundedCornerShape(14.dp)).background(Color(0xFF0A0E1A)).padding(12.dp)) {
             Text(vm.log, color = Accent2, fontFamily = FontFamily.Monospace, fontSize = 12.sp,
                 modifier = Modifier.verticalScroll(rememberScrollState()))
+        }
+    }
+}
+
+@Composable
+private fun GestureToggles() {
+    // Finger interaction map (user-approved 2026-10-29, option A): tap =
+    // click, hold ~0.5s = right-click, one-finger drag native, two-finger
+    // drag = scroll. Each extra gesture can be switched off here; the lorie
+    // input layer reads these keys per gesture (TouchInputHandler patch).
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val prefs = remember { ctx.getSharedPreferences(ctx.packageName + "_preferences", android.content.Context.MODE_PRIVATE) }
+    var longPress by remember { mutableStateOf(prefs.getBoolean("ldoa_longpress_rightclick", true)) }
+    var twoFinger by remember { mutableStateOf(prefs.getBoolean("ldoa_twofinger_scroll", true)) }
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(CardBg).padding(horizontal = 16.dp, vertical = 6.dp)) {
+        Text("Touch gestures", color = TextDim, fontSize = 13.sp)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Hold = right-click", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Switch(checked = longPress, onCheckedChange = {
+                longPress = it; prefs.edit().putBoolean("ldoa_longpress_rightclick", it).apply()
+            }, modifier = Modifier.semantics { contentDescription = "toggle-longpress-rightclick" })
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Two-finger scroll", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Switch(checked = twoFinger, onCheckedChange = {
+                twoFinger = it; prefs.edit().putBoolean("ldoa_twofinger_scroll", it).apply()
+            }, modifier = Modifier.semantics { contentDescription = "toggle-twofinger-scroll" })
         }
     }
 }

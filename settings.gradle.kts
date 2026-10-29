@@ -54,3 +54,159 @@ for (rel in listOf("third_party/termux-x11/lorie/build.gradle", "third_party/ter
         check("compileSdkVersion 35" in f.readText()) { "compileSdk 35 bump failed for $rel" }
     }
 }
+
+// Vendored patch (LDOA gestures): direct-touch long-press = right-click and
+// two-finger drag = wheel scroll, each behind an app-level toggle read from
+// the app's default SharedPreferences (defaults on, user-approved gesture
+// map 2026-10-29). InputEventSender gains endAllTouches() so a taken-over
+// touch sequence ends cleanly instead of dangling.
+run {
+    val tih = File(rootDir, "third_party/termux-x11/lorie/src/main/java/com/termux/x11/input/TouchInputHandler.java")
+    val ies = File(rootDir, "third_party/termux-x11/lorie/src/main/java/com/termux/x11/input/InputEventSender.java")
+    if (tih.exists() && ies.exists()) {
+        run {
+            val f = ies
+            val orig = """    private final boolean[] pointers = new boolean[32];
+"""
+            val patched = """    private final boolean[] pointers = new boolean[32];
+
+    /**
+     * LDOA: end every currently tracked touch pointer. Used when an
+     * Android-side gesture (long-press right-click, two-finger scroll)
+     * takes over a direct-touch sequence, so the X client sees a clean
+     * sequence end instead of a stuck pointer.
+     */
+    public void endAllTouches() {
+        for (int id = 0; id < pointers.length; id++) {
+            if (pointers[id]) {
+                pointers[id] = false;
+                mInjector.sendTouchEvent(XI_TouchEnd, id, 0, 0);
+            }
+        }
+    }
+"""
+            val text = f.readText()
+            if (orig in text) f.writeText(text.replace(orig, patched))
+            check(patched in f.readText()) { "LDOA gesture patch 0 failed for ${f.name}" }
+        }
+        run {
+            val f = tih
+            val orig = """    private boolean mSuppressCursorMovement;
+"""
+            val patched = """    private boolean mSuppressCursorMovement;
+    /** LDOA: true while an Android-side gesture (long-press right-click or
+     * two-finger scroll) has taken over the current direct-touch sequence. */
+    private boolean mSuppressDirectTouch;
+"""
+            val text = f.readText()
+            if (orig in text) f.writeText(text.replace(orig, patched))
+            check(patched in f.readText()) { "LDOA gesture patch 1 failed for ${f.name}" }
+        }
+        run {
+            val f = tih
+            val orig = """            if (mInputStrategy instanceof InputStrategyInterface.NullInputStrategy)
+                mInjector.sendTouchEvent(event, mRenderData);
+            else
+"""
+            val patched = """            if (mInputStrategy instanceof InputStrategyInterface.NullInputStrategy) {
+                if (!mSuppressDirectTouch)
+                    mInjector.sendTouchEvent(event, mRenderData);
+            } else
+"""
+            val text = f.readText()
+            if (orig in text) f.writeText(text.replace(orig, patched))
+            check(patched in f.readText()) { "LDOA gesture patch 2 failed for ${f.name}" }
+        }
+        run {
+            val f = tih
+            val orig = """                case MotionEvent.ACTION_DOWN:
+                    mSuppressCursorMovement = false;
+"""
+            val patched = """                case MotionEvent.ACTION_DOWN:
+                    mSuppressCursorMovement = false;
+                    mSuppressDirectTouch = false;
+"""
+            val text = f.readText()
+            if (orig in text) f.writeText(text.replace(orig, patched))
+            check(patched in f.readText()) { "LDOA gesture patch 3 failed for ${f.name}" }
+        }
+        run {
+            val f = tih
+            val orig = """            if (pointerCount == 2 && mSwipePinchDetector.isSwiping()) {
+                mInputStrategy.onScroll(distanceX, distanceY);
+"""
+            val patched = """            if (pointerCount == 2 && mSwipePinchDetector.isSwiping()) {
+                if (mInputStrategy instanceof InputStrategyInterface.NullInputStrategy) {
+                    // LDOA direct touch: two-finger drag is wheel scroll. The X
+                    // server turns the smooth valuators into legacy button 4/5
+                    // steps for clients without XI2 smooth scrolling itself
+                    // (SetScrollValuator, InitInput.c).
+                    if (directTouchPrefs(mActivity).getBoolean("ldoa_twofinger_scroll", true)) {
+                        if (!mSuppressDirectTouch) {
+                            mSuppressDirectTouch = true;
+                            mInjector.endAllTouches();
+                            mRenderData.mapScreenPoint(e2.getX(), e2.getY(), mappedPoint);
+                            mInjector.sendCursorMove(mappedPoint[0], mappedPoint[1], false);
+                        }
+                        mInjector.sendMouseWheelEvent(distanceX, distanceY);
+                    }
+                    mSuppressCursorMovement = true;
+                    return true;
+                }
+                mInputStrategy.onScroll(distanceX, distanceY);
+"""
+            val text = f.readText()
+            if (orig in text) f.writeText(text.replace(orig, patched))
+            check(patched in f.readText()) { "LDOA gesture patch 4 failed for ${f.name}" }
+        }
+        run {
+            val f = tih
+            val orig = """        public void onLongPress(int pointerCount, float x, float y) {
+            int button = mouseButtonFromPointerCount(pointerCount);
+            if (button == InputStub.BUTTON_UNDEFINED) {
+                return;
+            }
+"""
+            val patched = """        public void onLongPress(int pointerCount, float x, float y) {
+            int button = mouseButtonFromPointerCount(pointerCount);
+            if (button == InputStub.BUTTON_UNDEFINED) {
+                return;
+            }
+
+            if (pointerCount == 1
+                    && mInputStrategy instanceof InputStrategyInterface.NullInputStrategy
+                    && directTouchPrefs(mActivity).getBoolean("ldoa_longpress_rightclick", true)) {
+                // LDOA direct touch: a completed hold becomes a right click
+                // everywhere, not only where the X client implements its own
+                // long-press. End the touch sequence cleanly and right-click
+                // at the finger point; any tap the end emits mirrors
+                // right-click's usual select side effect.
+                mSuppressDirectTouch = true;
+                mInjector.endAllTouches();
+                mRenderData.mapScreenPoint(x, y, mappedPoint);
+                mInjector.sendCursorMove(mappedPoint[0], mappedPoint[1], false);
+                mInjector.sendMouseClick(InputStub.BUTTON_RIGHT, false);
+                return;
+            }
+"""
+            val text = f.readText()
+            if (orig in text) f.writeText(text.replace(orig, patched))
+            check(patched in f.readText()) { "LDOA gesture patch 5 failed for ${f.name}" }
+        }
+        run {
+            val f = tih
+            val orig = """    public boolean shouldInterceptKeys() {
+"""
+            val patched = """    /** LDOA: app-level gesture toggles (default on; see PickerScreen). */
+    private static android.content.SharedPreferences directTouchPrefs(android.content.Context ctx) {
+        return ctx.getSharedPreferences(ctx.getPackageName() + "_preferences", android.content.Context.MODE_PRIVATE);
+    }
+
+    public boolean shouldInterceptKeys() {
+"""
+            val text = f.readText()
+            if (orig in text) f.writeText(text.replace(orig, patched))
+            check(patched in f.readText()) { "LDOA gesture patch 6 failed for ${f.name}" }
+        }
+    }
+}

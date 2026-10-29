@@ -248,9 +248,31 @@ class DesktopClientTest {
             stWid.matches(Regex("(0x[0-9a-fA-F]+|[0-9]+)")))
         fun devFor(x: Double, y: Double) = Pair(((x - oX) / sX).toInt(), ((y - oY) / sY).toInt())
 
+        // A modal system ANR dialog blocks input to the X surface (run
+        // 40811548463 st-maximize tap, run 40814163677 JWM menu tap: both
+        // eaten by a Pixel Launcher ANR dialog, pixel-verified). Bounded
+        // environment recovery before critical X gestures: dismiss only
+        // allowlisted system ANRs via the shared helper, log the count,
+        // assert the path is clear; anything else stays up and fails.
+        fun anrGuard(stage: String) {
+            var dismissed = 0
+            while (dismissed < 3) {
+                val t = device.findObject(androidx.test.uiautomator.By.textContains("isn't responding"))
+                    ?: device.findObject(androidx.test.uiautomator.By.textContains("Not Responding"))
+                    ?: break
+                Shot.dismissSystemDialogs(device)
+                dismissed++
+            }
+            android.util.Log.i("PHONEDIAG", "anr-guard[" + stage + "]: allowlisted dialogs dismissed=" + dismissed)
+            assertTrue("system ANR dialog still up before " + stage,
+                device.findObject(androidx.test.uiautomator.By.textContains("isn't responding")) == null &&
+                device.findObject(androidx.test.uiautomator.By.textContains("Not Responding")) == null)
+        }
+
         // 1. Tap the JWM menu button (tray = 1080x34+0+1978, button at the
         // left end ~X(20,1995)). jwm menus are override-redirect popups: a
         // new top-level window appears while the menu is open.
+        anrGuard("jwm-menu")
         val menuBtn = devFor(20.0, 1995.0)
         val menuBefore = topCount()
         device.click(menuBtn.first, menuBtn.second)
@@ -366,6 +388,7 @@ class DesktopClientTest {
             " parentLine=" + xwin("xwininfo -id " + stWid + " | grep 'Parent window id'").trim())
         assertTrue("st geometry unreadable for resize tests", gHome0 != null)
         val gh = gHome0!!
+        anrGuard("st-maximize")
         val maxBtn0 = devFor(gh[0] + gh[2] + 4.0 - 36.0, gh[1] - 14.0)
         device.click(maxBtn0.first, maxBtn0.second)
         Thread.sleep(2_000)
@@ -378,6 +401,7 @@ class DesktopClientTest {
             gMax != null && gMax[2] > gh[2] + 40 && gMax[3] > gh[3] + 100)
         // 4b. Restore: tap the same button again, expect ~original size.
         val gm2 = gMax!!
+        anrGuard("st-restore")
         val maxBtn1 = devFor(gm2[0] + gm2[2] + 4.0 - 36.0, gm2[1] - 14.0)
         device.click(maxBtn1.first, maxBtn1.second)
         Thread.sleep(2_000)
@@ -389,6 +413,7 @@ class DesktopClientTest {
         // 4c. Free resize: drag the measured frame corner with drag()
         // (long-press semantics; swipe() produced a no-op in run
         // bd799a0 despite a verified on-border grab point).
+        anrGuard("st-resize")
         val corner = devFor(gr2[0] + gr2[2] + 2.0, gr2[1] + gr2[3] + 2.0)
         device.drag(corner.first, corner.second, corner.first - 120, corner.second - 100, 40)
         Thread.sleep(2_000)
