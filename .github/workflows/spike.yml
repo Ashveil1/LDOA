@@ -322,10 +322,10 @@ jobs:
         run: |
           PKGS=$(sed -n '/GNOME_PACKAGES = listOf(/,/) *$/p' app/src/main/java/dev/phonelinux/proto/GuestUbuntu.kt | grep -o '"[^"]*"' | tr -d '"' | tr '\n' ' ')
           echo "package list from GuestUbuntu.kt: $PKGS"
-          run_guest() { proot --link2symlink -0 -r /tmp/rootfs -b /dev -b /proc -b /sys -w /root env DEBIAN_FRONTEND=noninteractive "$@"; }
+          run_guest() { proot -0 -r /tmp/rootfs -b /dev -b /proc -b /sys -w /root env DEBIAN_FRONTEND=noninteractive "$@"; }  # no --link2symlink: that flag is a Termux-patched proot extension, absent in Ubuntu's proot
           run_guest apt-get update || run_guest apt-get update
           run_guest apt-get install -y --no-install-recommends $PKGS || run_guest apt-get install -y --no-install-recommends $PKGS
       - name: Diagnostic only - session launch attempt WITHOUT display server
         run: |
           echo "NO DISPLAY SERVER in this lane (no lorie, no Xvfb): output below is error-class data only, NOT a GNOME startup verdict. Android display/input path untested here."
-          proot --link2symlink -0 -r /tmp/rootfs -b /dev -b /proc -b /sys -w /root dbus-launch gnome-session --session=ubuntu 2>&1 | head -50 || true
+          proot -0 -r /tmp/rootfs -b /dev -b /proc -b /sys -w /root dbus-launch gnome-session --session=ubuntu 2>&1 | head -50 || true
