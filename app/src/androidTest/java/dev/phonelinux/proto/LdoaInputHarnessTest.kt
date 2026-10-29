@@ -97,9 +97,17 @@ class LdoaInputHarnessTest {
             if (shellWins >= 3) break
             Thread.sleep(10_000)
         }
-        Log.i(TAG, "harness: desktop readiness shell-windows=" + shellWins)
+        Log.i(TAG, "harness: desktop readiness shell-windows=" + shellWins + " (readiness PROXY, not proved-usable desktop)")
         Log.i(TAG, "harness: window tree at readiness: " +
             xwinEarly("xwininfo -root -children | tail -8").replace("\n", " | "))
+        // Warm-precondition evidence: which session services the auto-enter
+        // session left running after the reset (reset kills only
+        // gnome-session/gnome-shell cmdlines), and the launch fallback used.
+        Log.i(TAG, "harness: services-retained gsd-count=" +
+            xwinEarly("ps -ef 2>/dev/null | grep '[g]sd-' | wc -l").trim() +
+            " shell-name-owner=" + xwinEarly("dbus-send --session --dest=org.freedesktop.DBus --print-reply /org/freedesktop/DBus org.freedesktop.DBus.NameHasOwner string:org.gnome.Shell 2>/dev/null | tail -1 || true").trim() +
+            " a11y-bus=" + xwinEarly("dbus-send --session --dest=org.freedesktop.DBus --print-reply /org/freedesktop/DBus org.freedesktop.DBus.NameHasOwner string:org.a11y.Bus 2>/dev/null | tail -1 || true").trim())
+        Log.i(TAG, "harness: launch-mode=" + (if (logFile.isFile && logFile.readText().contains("falling back to bare gnome-shell")) "gnome-session exit=1 fallback -> bare gnome-shell --x11" else "gnome-session"))
 
         fun xwin(cmd: String): String {
             val r = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c", "export DISPLAY=:0; " + cmd),
@@ -164,11 +172,19 @@ class LdoaInputHarnessTest {
         Thread.sleep(2_000)
         val beforeIds = windowIds("nautilus")
         var nauWid: String? = null
+        // Retry-assisted SETUP only (never product fresh-entry evidence):
+        // record every tap; the whole assisted open is wall-bounded so a
+        // broken desktop fails fast instead of looping 6x120s.
+        val assistedOpenDeadline = System.currentTimeMillis() + 360_000
+        var assistedTaps = 0
         for (round in 1..3) {
             for (tapY in listOf(194, 264)) {
+                if (System.currentTimeMillis() > assistedOpenDeadline) break
+                assistedTaps++
                 device.swipe(30, tapY, 32, tapY, 25)
-                Log.i(TAG, "harness: pressed Files candidate (30,$tapY) round $round")
-                val openDeadline = System.currentTimeMillis() + 120_000
+                Log.i(TAG, "harness: assisted-setup tap " + assistedTaps + " (30,$tapY) round $round" +
+                    " at wall=" + System.currentTimeMillis() + " (gnome-session fallback exit=1 desktop)")
+                val openDeadline = minOf(System.currentTimeMillis() + 120_000, assistedOpenDeadline)
                 while (System.currentTimeMillis() < openDeadline) {
                     val vis = nauVisible()
                     if (vis != null && vis.id !in beforeIds) { nauWid = vis.id; break }
@@ -181,6 +197,8 @@ class LdoaInputHarnessTest {
                 xwin("xwininfo -root -children | tail -10").replace("\n", " | "))
         }
         Thread.sleep(8_000)
+        Log.i(TAG, "harness: assisted-setup result taps=" + assistedTaps +
+            " opened=" + (nauWid != null) + " - diagnostic setup only, no product readiness credit")
         assertTrue("harness: Files window did not open", nauWid != null)
         val nw = nauVisible()
         assertTrue("harness: Files geometry unreadable", nw != null)
