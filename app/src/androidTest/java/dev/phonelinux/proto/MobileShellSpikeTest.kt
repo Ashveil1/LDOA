@@ -121,24 +121,27 @@ class MobileShellSpikeTest {
                 "DISPLAY=:0 timeout 20s xterm -e /bin/true 2>&1 | head -6"),
                 extraBinds = xtermBind, fakeRoot = true,
                 extraEnv = mapOf("PROOT_VERBOSE" to "5"))
-            // (publish-side fix) A bare '/dev/tty' filter keeps proot's
-            // translate lines but DROPS the openat sysenter/sysexit lines
-            // (they carry only hex pointers) - exactly the lines that
-            // attribute the returned errno. Keep a window around every
-            // /dev/tty or SIGSYS hit instead, plus each vpid exit.
+            // (publish-side fix, iteration 2 after run 40906977785):
+            // window around /dev/tty hits ONLY. Triggering on SIGSYS too
+            // let proot's startup interceptions (set_robust_list/rseq)
+            // consume the whole 80-line cap, and joining into ONE Log.i
+            // hit logcat's ~4KB entry limit - the decisive openat sysexit
+            // was truncated away. Chunk at 3000 chars (same pattern as
+            // the c595129 streamed dump).
             val vLines = xtv.stderr.lines()
             val keep = sortedSetOf<Int>()
             vLines.forEachIndexed { i, l ->
-                if (l.contains("/dev/tty") || l.contains("SIGSYS") ||
-                    l.contains("exited with status")) {
+                if (l.contains("/dev/tty") || l.contains("exited with status")) {
                     for (j in (i - 4)..(i + 10)) {
                         if (j in vLines.indices) keep.add(j)
                     }
                 }
             }
-            Log.i(TAG, "devtty xterm fake0 verbose: " + xtv.stdout.trim() +
-                " proot-trace-window: " +
-                keep.take(80).joinToString(" | ") { vLines[it] })
+            Log.i(TAG, "devtty xterm fake0 verbose: " + xtv.stdout.trim())
+            val trace = keep.take(40).joinToString("\n") { vLines[it] }
+            trace.chunked(3000).forEachIndexed { ci, chunk ->
+                Log.i(TAG, "devtty trace[" + ci + "]: " + chunk)
+            }
         }
         val logFile = File(ctx.filesDir, "mobile-desktop.log")
         val defaultPrefs = MobileModeSettings.read(ctx)
