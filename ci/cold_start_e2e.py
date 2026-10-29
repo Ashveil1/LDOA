@@ -148,6 +148,10 @@ hit = tap_first_match([
     r'<node[^>]*text="Allow"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
 ], 30)
 log("permission dialog handled: " + (hit if hit else "no dialog shown"))
+# Front door is the first-run screen now (user request 2026-10-29): the
+# distro picker sits behind its explicit escape link.
+if not tap_desc("show-picker", 30):
+    fail("first-run screen missing its show-picker link")
 if not tap_desc("install-alpine", 60):
     fail("install button never appeared")
 log("waiting for distro install marker (up to 15 min)")
@@ -191,6 +195,9 @@ log("uid processes after force-stop: [%s]" % survivors)
 log("cold start #2: relaunch - must NOT reinstall")
 shell("am start -n %s/.MainActivity" % PKG)
 time.sleep(6)
+# Same front door after the process kill (Ubuntu still absent -> FIRST_RUN).
+if not tap_desc("show-picker", 30):
+    fail("first-run screen missing its show-picker link after relaunch")
 # Truncate the desktop log so a chosen-wm line below proves a FRESH launch.
 runas("sh -c '> %s'" % DESKLOG)
 if not tap_desc("open-desktop-alpine", 90):
