@@ -101,6 +101,9 @@ class MobileShellSpikeTest {
         // verbose cell's proot stderr is the syscall-disposition evidence
         // (what proot saw and returned), kept to tty/ENOSYS lines + tail.
         val xtermBind = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix")
+        // Full verbose stderr of the xterm cell lands here (dumped in the
+        // finally block); declared before the probe so finally can see it.
+        val devttyTrace = File(ctx.filesDir, "devtty-trace.log")
         var xUp = false
         val xDeadline = System.currentTimeMillis() + 90_000
         while (System.currentTimeMillis() < xDeadline) {
@@ -121,26 +124,33 @@ class MobileShellSpikeTest {
                 "DISPLAY=:0 timeout 20s xterm -e /bin/true 2>&1 | head -6"),
                 extraBinds = xtermBind, fakeRoot = true,
                 extraEnv = mapOf("PROOT_VERBOSE" to "5"))
-            // (publish-side fix, iteration 2 after run 40906977785):
-            // window around /dev/tty hits ONLY. Triggering on SIGSYS too
-            // let proot's startup interceptions (set_robust_list/rseq)
-            // consume the whole 80-line cap, and joining into ONE Log.i
-            // hit logcat's ~4KB entry limit - the decisive openat sysexit
-            // was truncated away. Chunk at 3000 chars (same pattern as
-            // the c595129 streamed dump).
-            val vLines = xtv.stderr.lines()
-            val keep = sortedSetOf<Int>()
-            vLines.forEachIndexed { i, l ->
-                if (l.contains("/dev/tty") || l.contains("exited with status")) {
-                    for (j in (i - 4)..(i + 10)) {
-                        if (j in vLines.indices) keep.add(j)
-                    }
-                }
-            }
+            // (iteration 3 after run 40911779872): /dev/tty-string
+            // windows CANNOT catch the syscall result. The vendored
+            // x86_64 libproot.so verbose format (strings-verified in the
+            // shipped binary) prints syscall args as raw pointers:
+            //   vpid %lu: %s: %s(0x%lx, ...) = 0x%lx [0x%lx, %d]
+            // so the only lines literally containing "/dev/tty" are the
+            // path-translation markers (vpid %lu: -> "%s"). Correlate by
+            // vpid instead: collect the vpids from those markers, then
+            // keep EVERY line of those vpids - entry AND result/errno,
+            // immune to interleaving from other vpids and to the old
+            // "exited with status" windows eating the cap. The full
+            // stderr also lands in devttyTrace and streams out in the
+            // finally block, so evidence survives even if this parse
+            // misses.
+            devttyTrace.writeText(xtv.stderr)
+            val ttyVpids = xtv.stderr.lines().mapNotNull { l ->
+                if (!l.contains("/dev/tty")) null
+                else Regex("vpid ([0-9]+):").find(l)?.groupValues?.get(1)
+            }.toSet()
+            Log.i(TAG, "devtty trace vpids: " + ttyVpids)
             Log.i(TAG, "devtty xterm fake0 verbose: " + xtv.stdout.trim())
-            val trace = keep.take(40).joinToString("\n") { vLines[it] }
-            trace.chunked(3000).forEachIndexed { ci, chunk ->
-                Log.i(TAG, "devtty trace[" + ci + "]: " + chunk)
+            val trace = xtv.stderr.lines().filter { l ->
+                ttyVpids.any { v -> l.contains("vpid " + v + ":") }
+            }.take(120).joinToString("\n")
+            val traceChunks = trace.chunked(3000)
+            traceChunks.forEachIndexed { ci, chunk ->
+                Log.i(TAG, "devtty trace[" + ci + "/" + traceChunks.size + "]: " + chunk)
             }
         }
         val logFile = File(ctx.filesDir, "mobile-desktop.log")
@@ -207,6 +217,7 @@ class MobileShellSpikeTest {
         } finally {
             dumpLogTail("mobile-desktop.log", logFile)
             dumpLogTail("xserver.log", File(ctx.filesDir, "xserver.log"))
+            dumpLogTail("devtty-trace.log", devttyTrace, 262144)
         }
         MobileModeSettings.write(ctx, defaultPrefs)
         Log.i(TAG, "MOBILE-SHELL-OK sessions alive, rendered at 3 scales, windows mapped, trees torn down")
@@ -221,7 +232,7 @@ class MobileShellSpikeTest {
         val skip = (len - maxBytes).coerceAtLeast(0L)
         val text = f.inputStream().use { it.skip(skip); it.readBytes().toString(Charsets.UTF_8) }
         Log.i(TAG, name + " DUMP BEGIN (" + len + "B, last " + text.length + " chars)")
-        for (chunk in text.chunked(3000)) Log.i(TAG, chunk)
+        for (chunk in text.chunked(3000)) { Log.i(TAG, chunk); Thread.sleep(15) }
         Log.i(TAG, name + " DUMP END")
     }
 
