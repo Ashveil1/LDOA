@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       lanes:
-        description: "all (default, includes guest-arm64) | fast = build + emulator-test only | guest-arm = build + guest-arm64 only | focus-x86 = build + emulator-test + ubuntu-gnome-spike (no ARM lanes)"
+        description: "all (default, includes guest-arm64) | fast = build + emulator-test only | guest-arm = build + guest-arm64 only | focus-x86 = build + emulator-test + ubuntu-gnome-spike (no ARM lanes) | gnome = build + ubuntu-gnome-spike only"
         default: "all"
         required: false
       arm_emulator:
@@ -42,7 +42,7 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
 
   emulator-test:
-    if: github.event.inputs.lanes != 'guest-arm'
+    if: github.event.inputs.lanes != 'guest-arm' && github.event.inputs.lanes != 'gnome'
     runs-on: ubuntu-latest
     needs: build
     steps:

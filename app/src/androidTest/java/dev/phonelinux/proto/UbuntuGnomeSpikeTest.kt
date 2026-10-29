@@ -252,9 +252,23 @@ class UbuntuGnomeSpikeTest {
                 Thread.sleep(3_000)
             }
             // Dismissal is not proof the storm is over: run 40953752639
-            // re-posted the dialog after EVERY attempt. A dialog still up
-            // after the bounded dismissals is the storm case -> one
-            // bounded recovery, never a dismiss loop.
+            // re-posted the dialog after EVERY attempt, and run 40967254694
+            // re-posted it ~1-4s AFTER a clean post-dismiss check, inside
+            // the guard-to-gesture gap. Watch a bounded window after any
+            // dismissal; a re-post is the storm case -> one bounded
+            // recovery, never a dismiss loop.
+            if (tries > 0 && !anrRecoveryUsed) {
+                val wEnd = System.currentTimeMillis() + 8_000
+                while (System.currentTimeMillis() < wEnd) {
+                    Thread.sleep(1_000)
+                    if (anrPresent()) {
+                        anrSeen++
+                        Log.i(TAG, "dock-interact: ANR re-posted inside post-dismiss window at " +
+                            stage + " (anrSeen=" + anrSeen + ")")
+                        break
+                    }
+                }
+            }
             if (anrPresent() && !anrRecoveryUsed) {
                 anrEnvRecover(stage)
             }
