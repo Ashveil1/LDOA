@@ -288,6 +288,30 @@ class UbuntuGnomeSpikeTest {
                 Math.abs(wAfter.second - wBefore.second - 120) < 30)
         Log.i(TAG, "UBUNTU-GNOME-INTERACTION-OK dock tap opened Files; continuous finger drag moved the window")
 
+        // Real Files operations through the desktop UI, not guest mkdir.
+        // Guest filesystem reads below verify the effects independently.
+        val ctrl = android.view.KeyEvent.META_CTRL_ON
+        device.pressKeyCode(android.view.KeyEvent.KEYCODE_N, ctrl or android.view.KeyEvent.META_SHIFT_ON)
+        Thread.sleep(2_000)
+        device.executeShellCommand("input text LDOA-proof-created")
+        device.pressEnter()
+        Thread.sleep(5_000)
+        Shot.save("23b-ubuntu-folder-created")
+        assertTrue("Files create-folder UI did not create directory",
+            File(rootfs, "root/LDOA-proof-created").isDirectory)
+        // Newly created folder is selected in Nautilus.
+        device.pressKeyCode(android.view.KeyEvent.KEYCODE_F2)
+        Thread.sleep(2_000)
+        device.pressKeyCode(android.view.KeyEvent.KEYCODE_A, ctrl)
+        device.executeShellCommand("input text LDOA-proof-renamed")
+        device.pressEnter()
+        Thread.sleep(5_000)
+        Shot.save("23c-ubuntu-folder-renamed")
+        assertTrue("Files rename UI did not rename directory",
+            File(rootfs, "root/LDOA-proof-renamed").isDirectory &&
+                !File(rootfs, "root/LDOA-proof-created").exists())
+        Log.i(TAG, "UBUNTU-FILEOPS-OK UI folder create and rename independently verified")
+
         // Kill a pid with all its /proc descendants (deepest first): guest
         // binaries exec under proot so their cmdline does not carry the
         // rootfs path - name/pattern kills miss them (run 40702734816 left
@@ -406,6 +430,13 @@ class UbuntuGnomeSpikeTest {
         Log.i(TAG, "restart: finger drag (" + rw.x + "," + rw.y + ") -> " + moved?.let { it.x.toString() + "," + it.y })
         assertTrue("Files did not follow finger drag after restart", moved != null &&
             Math.abs(moved.x - rw.x + 60) < 30 && Math.abs(moved.y - rw.y - 120) < 30)
+        assertTrue("renamed folder missing after session restart", File(rootfs, "root/LDOA-proof-renamed").isDirectory)
+        device.pressKeyCode(android.view.KeyEvent.KEYCODE_L, ctrl)
+        device.executeShellCommand("input text /root/LDOA-proof-renamed")
+        device.pressEnter()
+        Thread.sleep(5_000)
+        Shot.save("24d-ubuntu-restart-folder-opened")
+        Log.i(TAG, "UBUNTU-FILEOPS-PERSISTED session restart retained renamed folder; UI navigation captured")
         assertTrue("GNOME window manager identity/process missing after restart: " + lastIdentityEvidence, shellBack)
         Log.i(TAG, "UBUNTU-GNOME-RESTART-OK FIRST launch; live WM identity + finger Files launch + continuous drag")
 
