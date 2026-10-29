@@ -143,6 +143,23 @@ object GuestMobileShell {
             if ! awk -F: '${'$'}3 == g {f=1} END {exit !f}' g="${'$'}GID_NOW" /etc/group; then
               echo "plinux:x:${'$'}GID_NOW:" >> /etc/group
             fi
+            # X readiness gate (run 40882997830: XServer.start is async and
+            # this script connected before :0 accepted - xrdb/xsetroot could
+            # not open the display and jwm exited 1). Gate on a REAL guest
+            # connection (xset q), never socket-file existence; fail closed
+            # with evidence after the deadline.
+            ls -la /tmp/.X11-unix 2>&1
+            XWAIT=0
+            until xset q >/dev/null 2>&1; do
+              XWAIT=${'$'}((XWAIT+1))
+              if [ ${'$'}XWAIT -ge 90 ]; then
+                echo "mobile-launch: X :0 rejected guest connections for 90s - FAIL CLOSED"
+                ls -la /tmp/.X11-unix 2>&1
+                exit 1
+              fi
+              sleep 1
+            done
+            echo "mobile-launch: X ready after ${'$'}{XWAIT}s (guest xset q verified)"
             # Fresh session bus per launch (load-bearing, run 40729917335):
             # a killed session's bus address lingers in the X root window
             # while the shared X server keeps running.

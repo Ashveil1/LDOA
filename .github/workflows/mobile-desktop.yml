@@ -45,7 +45,9 @@ jobs:
             if [ "$(cat ci/launcher-suppression.conf 2>/dev/null || echo on)" = "on" ]; then adb -s emulator-5554 shell pm disable-user --user 0 com.google.android.apps.nexuslauncher || true; echo "launcher suppression: ON"; else echo "launcher suppression: OFF"; fi
             ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=dev.phonelinux.proto.MobileShellSpikeTest --info 2>&1 | tee /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
             grep -q "BUILD SUCCESSFUL" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
-            adb -s emulator-5554 shell run-as dev.phonelinux.proto cat files/mobile-desktop.log > mobile-desktop.log 2>/dev/null || true
+            adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/mobile-desktop.log > mobile-desktop.log || echo "MOBILE-LOG-PULL-FAILED rc=$?"
+            adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/xserver.log > xserver.log || echo "XSERVER-LOG-PULL-FAILED rc=$?"
+            ls -la mobile-desktop.log xserver.log || true
             adb -s emulator-5554 logcat -d > /tmp/shotlog.txt || true
             mkdir -p screenshots
             python3 .github/scripts/extract_shots.py /tmp/shotlog.txt screenshots || true
@@ -59,4 +61,5 @@ jobs:
           path: |
             screenshots/
             mobile-desktop.log
+            xserver.log
             /tmp/shotlog.txt

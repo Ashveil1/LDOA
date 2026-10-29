@@ -62,7 +62,12 @@ class MobileShellSpikeTest {
         assertTrue("jwm binary present", GuestMobileShell.hasMobileShell(rootfs))
 
         // Dedicated lane: the fresh emulator owns :0 for the whole run.
+        // XServer.start is fire-and-forget: log the ACTUAL X server process
+        // (vendored lorie runs as app_process com.termux.x11.CmdEntryPoint)
+        // so a missing/dying X is visible in the evidence; the guest script
+        // gates on a real xset q connection before any X client runs.
         XServer.start(ctx)
+        Log.i(TAG, "xserver pids at launch: " + xServerPids())
         val logFile = File(ctx.filesDir, "mobile-desktop.log")
         val defaultPrefs = MobileModeSettings.read(ctx)
         var logOffset = 0L
@@ -142,6 +147,7 @@ class MobileShellSpikeTest {
                 return offset
             }
             if (text.contains("mobile-launch: jwm died") ||
+                text.contains("mobile-launch: X :0 rejected") ||
                 text.contains("Cannot open display") ||
                 text.contains("jwm: not found")) {
                 Log.i(TAG, "decisive failure marker in mobile log; failing fast")
@@ -151,8 +157,29 @@ class MobileShellSpikeTest {
             Thread.sleep(10_000)
         }
         Log.i(TAG, "mobile log tail: " + (if (logFile.isFile) logFile.readText().takeLast(1500) else "<missing>"))
+        Log.i(TAG, "xserver pids at failure: " + xServerPids())
         assertTrue("session script never reached the launch marker", sawLaunchMarker)
         throw AssertionError("jwm never reported alive")
+    }
+
+    /** Actual X server process evidence (host side): vendored lorie runs
+     *  as app_process com.termux.x11.CmdEntryPoint (XServer.kt:60). Returns
+     *  (pid, starttime) pairs so a dying or restarted X is identifiable. */
+    private fun xServerPids(): List<Pair<Int, String>> {
+        val out = ArrayList<Pair<Int, String>>()
+        val dir = File("/proc").listFiles { f -> f.name.matches(Regex("[0-9]+")) } ?: return out
+        for (f in dir) {
+            try {
+                val cmd = File(f, "cmdline").readText().replace('\u0000', ' ')
+                if (cmd.contains("com.termux.x11.CmdEntryPoint")) {
+                    val stat = File(f, "stat").readText()
+                    val close = stat.lastIndexOf(')')
+                    val rest = stat.substring(close + 1).trim().split(Regex("\\s+"))
+                    if (rest.size >= 20) out.add(f.name.toInt() to rest[19])
+                }
+            } catch (t: Throwable) { /* process vanished mid-scan */ }
+        }
+        return out
     }
 
     // ---- host process helpers (temporary, until the GNOME worker's
