@@ -674,15 +674,15 @@ for i in range(d.childCount):
         val bmpAfter = fullShot()
         Shot.save("23f-ubuntu-twofinger-scrolled")
         val smoothEvents = Regex("valuators:[^\\n]*3: -?\\d").findAll(scrollProbe).count()
-        val moved = regionDiff(bmpBefore, bmpAfter, scrollRect)
+        val movedFrac = regionDiff(bmpBefore, bmpAfter, scrollRect)
         Log.i(TAG, "twofinger-scroll: smoothValuatorEvents=" + smoothEvents +
-            " visibleChangeFraction=" + moved +
+            " visibleChangeFraction=" + movedFrac +
             " probeTail=" + scrollProbe.takeLast(400).replace("\n", " | "))
         assertTrue("two-finger drag delivered no scroll-valuator motion to :0 (probeTail=" +
             scrollProbe.takeLast(300).replace("\n", " | ") + ")", smoothEvents > 0)
-        assertTrue("Files content did not visibly move after two-finger drags (diff=" + moved + ")",
-            moved > 0.05)
-        Log.i(TAG, "UBUNTU-TWOFINGER-SCROLL-OK injected scroll and visible movement (" + moved + ")")
+        assertTrue("Files content did not visibly move after two-finger drags (diff=" + movedFrac + ")",
+            movedFrac > 0.05)
+        Log.i(TAG, "UBUNTU-TWOFINGER-SCROLL-OK injected scroll and visible movement (" + movedFrac + ")")
 
         // (e) Legacy client coverage: xterm has no XI2 smooth scrolling;
         // it scrolls only if the server converts the valuators to button
