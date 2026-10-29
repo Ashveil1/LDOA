@@ -145,8 +145,14 @@ QkQxMzg0NAA=, verbatim paraphrase):
    install/entry/controls verification, license, money, and security
    verification are NOT waived.)
 
-## Cohesive plan v2 (post-19:17 answers) - PROPOSAL, not approved
-   implementation
+## Cohesive plan v2 (post-19:17 answers) - ACCEPTED 19:26 by Ash
+   ("ตามนั้นเก่งมาก", WhatsApp wamid...QzBCNDAyOUQ0Q0UwOTUxRDBE
+   MTc5RENGQjg0OTc4NgA=) via the delivered requirements File
+   https://files.instinct.com/frd1ut0pg8th-ldoa (PRIVATE, gen 2).
+   Acceptance covers the shown scope/direction incl. the 5-step
+   order; it is NOT proof anything is implemented, and implies no
+   spending/license/account changes/compositor rewrite. Design
+   choices shown there are settled - do not re-ask them.
 
 Design principles (locked by Ash's answers):
 - P1 Finger-first, iOS-grade polish is the primary bar; full Linux
