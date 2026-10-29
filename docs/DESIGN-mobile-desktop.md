@@ -68,3 +68,31 @@ offer fades default-OFF + reduced-motion toggle first.
 Early trial APK ships first (GNOME track); mobile mode never gates it.
 No APK readiness claims from the dispatch lane alone. ARM execution is
 unproven everywhere until real-device evidence exists.
+
+## Direction note 2026-10-29 19:07 (Ash, verbatim intent): finger-first
+   input/control surface
+
+Ash's raw direction (WhatsApp wamid...Q0ZCOUY3QkVFMDYxQUI4MkU2RTZB
+QkIyNzVDRDJERQA, paraphrase boundary marked): Termux:X11's built-in
+controls (mouse, scroll mechanisms, toolbars) do not serve finger-first
+use, and some finger gestures are unusable. Conditional authority: IF
+the existing input layer cannot be fixed, THEN rebuild the remaining
+control/input layers while KEEPING Termux:X11's display/stability
+parts ("เอาส่วนแสดงผลและความเสถียรของ termux x11 มา แต่ส่วนที่เหลือ
+แก้เองให้เข้า").
+
+Recorded scope implications for the mobile desktop plan:
+
+- The custom shell's touch control surface is the primary path: legacy
+  mouse/toolbar style controls become OPTIONAL, not default clutter.
+- The display/render path (vendored lorie X server, composition) stays;
+  the rebuild candidate is the CONTROL and INPUT-GESTURE layer only.
+  No X server rewrite is authorized by this.
+- CONDITIONAL: a rebuild of the input layer is authorized to be PLANNED
+  only after the fix path on the existing vendored input emulation is
+  proven to hit a limit (2-finger right-click currently UNSOLVED after
+  7c8a9f4's falsified hypothesis; legacy scroll still unproven). No
+  blanket "implement all gestures" grant.
+- Input-layer work itself belongs to the app/input worker lane; this
+  doc only carries the requirement for the frontend shell plan and the
+  coordinated boundary.
