@@ -8,8 +8,12 @@ on:
   workflow_dispatch:
     inputs:
       lanes:
-        description: "all (default) or fast = build + emulator-test only (skips the 30-150m cold-chain and arm64 jobs)"
+        description: "all (default, includes guest-arm64) | fast = build + emulator-test only | guest-arm = build + guest-arm64 only"
         default: "all"
+        required: false
+      arm_emulator:
+        description: "Opt-in repro of the known-doomed macOS arm64 AVD config (hosted macOS has no HVF: HV_UNSUPPORTED, job log 123418088373). Keep false."
+        default: "false"
         required: false
 
 jobs:
@@ -38,6 +42,7 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
 
   emulator-test:
+    if: github.event.inputs.lanes != 'guest-arm'
     runs-on: ubuntu-latest
     needs: build
     steps:
@@ -121,7 +126,7 @@ jobs:
   # is unproven; becomes gating only after a green real-render verdict.
   # apt-in-emulator is slow - its own job so the every-push lane stays fast.
   ubuntu-gnome-spike:
-    if: github.event.inputs.lanes != 'fast'
+    if: github.event.inputs.lanes != 'fast' && github.event.inputs.lanes != 'guest-arm'
     runs-on: ubuntu-latest
     needs: build
     continue-on-error: true
@@ -221,11 +226,13 @@ jobs:
   # No new accounts or spend (public repo minutes). Experimental lane: it
   # does not gate the ubuntu lane while it stabilizes.
   emulator-test-arm64:
-    # GATED to manual dispatch: hosted macos-14 runners do NOT expose
-    # Hypervisor.framework (HVF error: HV_UNSUPPORTED, run 772fadb), and an
-    # arm64 Android image cannot boot without hardware acceleration. Kept
-    # for reproduction; not a per-push lane until ARM-capable runners exist.
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.lanes != 'fast'
+    # DEFAULT OFF: hosted macos-14 runners do NOT expose Hypervisor.framework
+    # (HVF error: HV_UNSUPPORTED - job log 123418088373), and an arm64 Android
+    # image cannot boot without hardware acceleration; GitHub staff confirm
+    # the hosted ARM64 fleet has no nested KVM either (runner-images #14062,
+    # 2026-08-20). Retained as OPT-IN (arm_emulator=true) for repro or if
+    # GitHub ever exposes HVF. ARM coverage now lives in the guest-arm64 job.
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.arm_emulator == 'true'
     runs-on: macos-14
     needs: build
     continue-on-error: true
@@ -276,3 +283,49 @@ jobs:
           path: |
             screenshots/
             /tmp/shotlog.txt
+
+  # Guest-side ARM64 lane: host AND guest are aarch64, no Android, no
+  # emulator, no KVM (proot is userspace ptrace). Validates the two ARM
+  # unknowns an x86_64 emulator cannot: (a) the arm64 ubuntu-base rootfs +
+  # our exact GNOME package list actually install on aarch64, (b) proot
+  # syscall mediation on aarch64 Linux during apt. LIMITS (do not
+  # overclaim): host proot is Ubuntu's build, NOT the Termux-built proot
+  # the APK ships; the kernel is Azure's, not Android/HyperOS; there is NO
+  # display server here, so the session stage is error-class data only -
+  # never a GNOME startup verdict. Android app layer (APK install, lorie
+  # X server, input) is NOT covered by this lane.
+  guest-arm64:
+    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.lanes == 'all' || github.event.inputs.lanes == 'guest-arm')
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Runner reality check
+        run: |
+          uname -m
+          test "$(uname -m)" = "aarch64"
+          ls -l /dev/kvm 2>&1 || echo "/dev/kvm absent (expected; not needed - proot is userspace)"
+      - name: Install host proot
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq proot
+          proot --version
+      - name: Fetch the exact arm64 rootfs the app would use
+        run: |
+          UBUNTU_BASE=$(grep -o 'UBUNTU_BASE = "[^"]*"' app/src/main/java/dev/phonelinux/proto/DistroInstaller.kt | cut -d'"' -f2)
+          UBUNTU_VER=$(grep -o 'UBUNTU_VER = "[^"]*"' app/src/main/java/dev/phonelinux/proto/DistroInstaller.kt | cut -d'"' -f2)
+          echo "rootfs URL: $UBUNTU_BASE/ubuntu-base-$UBUNTU_VER-base-arm64.tar.gz"
+          curl -fSL "$UBUNTU_BASE/ubuntu-base-$UBUNTU_VER-base-arm64.tar.gz" -o /tmp/rootfs.tar.gz
+          mkdir -p /tmp/rootfs
+          tar -xzf /tmp/rootfs.tar.gz -C /tmp/rootfs
+      - name: GATE - proot + apt install of the exact GNOME package list
+        run: |
+          PKGS=$(sed -n '/GNOME_PACKAGES = listOf(/,/) *$/p' app/src/main/java/dev/phonelinux/proto/GuestUbuntu.kt | grep -o '"[^"]*"' | tr -d '"' | tr '\n' ' ')
+          echo "package list from GuestUbuntu.kt: $PKGS"
+          run_guest() { proot --link2symlink -0 -r /tmp/rootfs -b /dev -b /proc -b /sys -w /root env DEBIAN_FRONTEND=noninteractive "$@"; }
+          run_guest apt-get update || run_guest apt-get update
+          run_guest apt-get install -y --no-install-recommends $PKGS || run_guest apt-get install -y --no-install-recommends $PKGS
+      - name: Diagnostic only - session launch attempt WITHOUT display server
+        run: |
+          echo "NO DISPLAY SERVER in this lane (no lorie, no Xvfb): output below is error-class data only, NOT a GNOME startup verdict. Android display/input path untested here."
+          proot --link2symlink -0 -r /tmp/rootfs -b /dev -b /proc -b /sys -w /root dbus-launch gnome-session --session=ubuntu 2>&1 | head -50 || true
