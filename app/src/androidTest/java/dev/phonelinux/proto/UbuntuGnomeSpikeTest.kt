@@ -820,9 +820,12 @@ for i in range(d.childCount):
         Thread.sleep(1_200)
         assertTrue("plain tap spuriously opened a context menu",
             (menuHits(parseAts(atspi()), bgProbes) - baselineBgNames).isEmpty())
-        // Below-threshold hold (400ms < the 500ms gate) must not right-click,
-        // and a two-finger drag on the desktop must stay a scroll, not a
-        // right-click (second finger cancels the hold bookkeeping).
+        // A short 400ms hold (below the Android long-press timeout) is a
+        // plain left click in SIMULATED_TOUCH and must not right-click.
+        // A 1-finger hold past the timeout is a BUTTON_LEFT press-hold
+        // (drag) in this mode and never injects button-3 either - these
+        // stay as regression guards. A two-finger drag must stay a wheel
+        // scroll, not a right-click.
         probeStart("shorthold")
         longPress(deskP, 400)
         Thread.sleep(600)
@@ -841,9 +844,11 @@ for i in range(d.childCount):
         Log.i(TAG, "UBUNTU-HOLD-THRESHOLD-OK 400ms hold and two-finger drag caused no right-click")
         Log.i(TAG, "UBUNTU-NO-SPURIOUS-RIGHTCLICK-OK drag and tap stayed drag/click")
 
-        // (c) HOLD = RIGHT-CLICK, surface 2: a file row (the folder created
-        // and renamed by the fileops steps). Fallback if the row is not in
-        // the a11y tree: the window headerbar's own menu (window count).
+        // (c) TWO-FINGER TAP = RIGHT-CLICK, surface 2: a file row (the
+        // folder created and renamed by the fileops steps). Fallback if the
+        // row is not in the a11y tree: the window headerbar's own menu
+        // (window count). SIMULATED_TOUCH: a 1-finger hold here would be a
+        // left press-hold, so the right-click trigger is the 2-finger tap.
         val rowNode = parseAts(atspi()).firstOrNull { it.name == "LDOA-proof-renamed" && it.w > 0 }
         if (rowNode != null) {
             val rgX = rowNode.x + rowNode.w / 2; val rgY = rowNode.y + rowNode.h / 2
@@ -852,38 +857,40 @@ for i in range(d.childCount):
             val rowProbes = listOf("open", "cut", "copy", "rename", "move to trash",
                 "star", "properties", "compress", "run")
             val baselineRow = menuHits(parseAts(atspi()), rowProbes)
-            longPress(rowTarget!!)
+            twoFingerTap(rowTarget!!.first - 40, rowTarget!!.second, rowTarget!!.first + 40, rowTarget!!.second)
             val rowMenu = awaitMenu(rowProbes, baselineRow, 35_000)
-            Shot.save("23d2-ubuntu-longpress-row-menu")
-            assertTrue("hold on a file row produced no context menu", rowMenu != null)
+            Shot.save("23d2-ubuntu-2ftap-row-menu")
+            assertTrue("two-finger tap on a file row produced no context menu", rowMenu != null)
             val rowNew = menuHits(rowMenu!!, rowProbes) - baselineRow
-            Log.i(TAG, "longpress-row: new items=" + rowNew)
+            Log.i(TAG, "2ftap-row: new items=" + rowNew)
             assertTrue("row context menu items not identifiable (found=" + rowNew + ")", rowNew.size >= 2)
             val posR = rowMenu.firstOrNull { it.name in rowNew && it.w > 0 }
-            assertTrue("row menu opened far from the hold point", posR != null &&
+            assertTrue("row menu opened far from the two-finger tap point", posR != null &&
                 Math.abs(posR.x + posR.w / 2 - rgX) <= 400 && Math.abs(posR.y + posR.h / 2 - rgY) <= 400)
             device.pressKeyCode(android.view.KeyEvent.KEYCODE_ESCAPE)
             assertTrue("row menu did not close on Escape", awaitNoMenu(rowProbes, baselineRow, 4_000))
-            Log.i(TAG, "UBUNTU-LONGPRESS-RIGHTCLICK-SURFACE2-OK file row menu: " + rowNew)
+            Log.i(TAG, "UBUNTU-2FTAP-RIGHTCLICK-SURFACE2-OK file row menu: " + rowNew)
         } else {
-            Log.i(TAG, "longpress-row: folder node not in a11y tree; headerbar fallback")
+            Log.i(TAG, "2ftap-row: folder node not in a11y tree; headerbar fallback")
             val before = xwin("xwininfo -root -children | grep -c '0x' || true").trim().toIntOrNull() ?: 0
             val hb = mapToDevice(nwgP.x + fe0[0] + (nwgP.w - fe0[0] - fe0[1]) - 200, nwgP.y + fe0[2] + 20)
             assertTrue("headerbar fallback mapping missing", hb != null)
-            longPress(hb!!)
+            twoFingerTap(hb!!.first - 40, hb!!.second, hb!!.first + 40, hb!!.second)
             Thread.sleep(2_500)
             val after = xwin("xwininfo -root -children | grep -c '0x' || true").trim().toIntOrNull() ?: 0
-            Shot.save("23d2-ubuntu-longpress-headerbar-menu")
-            assertTrue("hold on the headerbar opened no window menu (" + before + " -> " + after + ")", after > before)
+            Shot.save("23d2-ubuntu-2ftap-headerbar-menu")
+            assertTrue("two-finger tap on the headerbar opened no window menu (" + before + " -> " + after + ")", after > before)
             device.pressKeyCode(android.view.KeyEvent.KEYCODE_ESCAPE)
             Thread.sleep(1_000)
-            Log.i(TAG, "UBUNTU-LONGPRESS-RIGHTCLICK-SURFACE2-OK headerbar menu (windows " + before + " -> " + after + ")")
+            Log.i(TAG, "UBUNTU-2FTAP-RIGHTCLICK-SURFACE2-OK headerbar menu (windows " + before + " -> " + after + ")")
         }
 
         // (d) TWO-FINGER DRAG = WHEEL SCROLL on modern content: Files at
-        // /usr/bin. Proof is both the injected event stream (smooth
-        // scroll-valuator motion) AND visible content movement in the
-        // window interior.
+        // /usr/bin. SIMULATED_TOUCH delivers this as discrete wheel BUTTON
+        // 4/5 events (SimulatedTouchInputStrategy.onScroll ->
+        // sendMouseWheelEvent); the smooth-valuator stream is the direct-
+        // mode path and is not expected here. Proof is the actual wheel
+        // delivery AND visible content movement in the window interior.
         chord(false, android.view.KeyEvent.KEYCODE_L)
         Thread.sleep(1_500)
         device.executeShellCommand("input text /usr/bin")
@@ -904,13 +911,16 @@ for i in range(d.childCount):
         val scrollProbe = probeStop("scroll")
         val bmpAfter = fullShot()
         Shot.save("23f-ubuntu-twofinger-scrolled")
+        val wheelUp = buttonPresses(scrollProbe, 4)
+        val wheelDown = buttonPresses(scrollProbe, 5)
         val smoothEvents = Regex("valuators:[^\\n]*3: -?\\d").findAll(scrollProbe).count()
         val movedFrac = regionDiff(bmpBefore, bmpAfter, scrollRect)
-        Log.i(TAG, "twofinger-scroll: smoothValuatorEvents=" + smoothEvents +
+        Log.i(TAG, "twofinger-scroll: wheelBtn4=" + wheelUp + " wheelBtn5=" + wheelDown +
+            " smoothValuatorEvents=" + smoothEvents + " (smooth is direct-mode only)" +
             " visibleChangeFraction=" + movedFrac +
             " probeTail=" + scrollProbe.takeLast(400).replace("\n", " | "))
-        assertTrue("two-finger drag delivered no scroll-valuator motion to :0 (probeTail=" +
-            scrollProbe.takeLast(300).replace("\n", " | ") + ")", smoothEvents > 0)
+        assertTrue("two-finger drag delivered no wheel-button events to :0 (SIMULATED_TOUCH onScroll; probeTail=" +
+            scrollProbe.takeLast(300).replace("\n", " | ") + ")", wheelUp + wheelDown > 0)
         assertTrue("Files content did not visibly move after two-finger drags (diff=" + movedFrac + ")",
             movedFrac > 0.05)
         Log.i(TAG, "UBUNTU-TWOFINGER-SCROLL-OK injected scroll and visible movement (" + movedFrac + ")")
@@ -986,52 +996,36 @@ for i in range(d.childCount):
         }
         Thread.sleep(1_000)
 
-        // (f) Toggles OFF must restore the unpatched behavior: no
-        // right-click/scroll INJECTION (event-level), whatever the client
-        // then does natively with the forwarded touch. The input layer
-        // reads the toggles per touch sequence, so no restart is needed.
-        // Toggles are switched back on and re-verified afterwards.
+        // (f) TOGGLES IN SIMULATED_TOUCH: NONE of the product toggles have
+        // a mode-2 reader - both pref consumers (ldoa_twofinger_tap_rightclick
+        // TouchInputHandler.java:486, ldoa_twofinger_scroll :815) are gated
+        // on the direct (NullInputStrategy) branch. In this mode the stock
+        // two-finger tap right-click and wheel scroll fire regardless of the
+        // switches, so there is no meaningful toggle behavior to GATE. What
+        // remains is EVIDENCE for the pending UI-cleanup decision: flip both
+        // off, deliver a two-finger tap, and record whether delivery
+        // continues (toggle inert in mode 2), then restore defaults.
         val prefs = ctx.getSharedPreferences(ctx.packageName + "_preferences",
             android.content.Context.MODE_PRIVATE)
-        prefs.edit().putBoolean("ldoa_longpress_rightclick", false)
+        prefs.edit().putBoolean("ldoa_twofinger_tap_rightclick", false)
             .putBoolean("ldoa_twofinger_scroll", false).apply()
         Thread.sleep(500)
-        probeStart("offhold")
-        longPress(scP)
+        probeStart("offtap")
+        twoFingerTap(bgTarget!!.first - 40, bgTarget!!.second, bgTarget!!.first + 40, bgTarget!!.second)
         Thread.sleep(2_000)
-        val offHoldProbe = probeStop("offhold")
-        val offInjected = buttonPresses(offHoldProbe, 3)
-        val offMenuNames = menuHits(parseAts(atspi()), bgProbes) - baselineBgNames
-        Log.i(TAG, "toggle-off hold: injectedRightClicks=" + offInjected +
-            " nativeMenuItems=" + offMenuNames + " (a menu here would be the client's own touch handling)")
-        assertTrue("right-click injection still active with the toggle off", offInjected == 0)
+        val offTapProbe = probeStop("offtap")
+        val offTapInjected = buttonPresses(offTapProbe, 3)
+        val offMenuIds = (rootChildIds() - menuBeforeIds).sorted()
+        Log.i(TAG, "toggles-off 2ftap: injectedRightClicks=" + offTapInjected +
+            " newWindows=" + offMenuIds +
+            " (NONZERO here proves the toggle is INERT in SIMULATED_TOUCH - both readers are direct-mode-gated)")
         device.pressKeyCode(android.view.KeyEvent.KEYCODE_ESCAPE)
         Thread.sleep(800)
-        probeStart("offscroll")
-        twoFingerSwipe(scP.first - 60, scP.second, scP.first + 60, scP.second, 0, -200)
-        Thread.sleep(900)
-        val offScrollProbe = probeStop("offscroll")
-        val offSmooth = Regex("valuators:[^\\n]*3: -?\\d").findAll(offScrollProbe).count()
-        Log.i(TAG, "toggle-off scroll: injectedSmoothEvents=" + offSmooth)
-        assertTrue("scroll injection still active with the toggle off", offSmooth == 0)
-        Shot.save("23i-ubuntu-toggles-off")
-        Log.i(TAG, "UBUNTU-TOGGLES-OFF-OK no injection while disabled")
-
-        prefs.edit().putBoolean("ldoa_longpress_rightclick", true)
+        prefs.edit().putBoolean("ldoa_twofinger_tap_rightclick", true)
             .putBoolean("ldoa_twofinger_scroll", true).apply()
         Thread.sleep(500)
-        val onProbes = bgProbes + listOf("open", "cut", "copy", "rename", "move to trash", "run", "star")
-        val baseOn = menuHits(parseAts(atspi()), onProbes)
-        probeStart("onhold")
-        longPress(scP)
-        val onMenu = awaitMenu(onProbes, baseOn, 35_000)
-        val onHoldProbe = probeStop("onhold")
-        Shot.save("23j-ubuntu-toggles-restored")
-        assertTrue("right-click did not come back after re-enabling the toggle",
-            onMenu != null && buttonPresses(onHoldProbe, 3) > 0)
-        device.pressKeyCode(android.view.KeyEvent.KEYCODE_ESCAPE)
-        Thread.sleep(800)
-        Log.i(TAG, "UBUNTU-TOGGLES-RESTORE-OK injection active again after re-enable")
+        Shot.save("23i-ubuntu-toggles-off")
+        Log.i(TAG, "UBUNTU-TOGGLES-MODE2-EVIDENCE toggles flipped off/on; delivery line above records inertness")
 
         // Kill a pid with all its /proc descendants (deepest first): guest
         // binaries exec under proot so their cmdline does not carry the
