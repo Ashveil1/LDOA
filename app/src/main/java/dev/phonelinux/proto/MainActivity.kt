@@ -186,7 +186,7 @@ class MainActivity : ComponentActivity() {
                             }) { Text("Download and start") } },
                             dismissButton = { TextButton(onClick = { vm.pendingDesktop = null }) { Text("Not now") } },
                             title = { Text("Ubuntu desktop - first start") },
-                            text = { Text("The first start downloads the desktop packages - a large download (several hundred MB; the exact size is not measured). Use Wi-Fi, not mobile data.\n\nThis can take several minutes. Keep the app open.") })
+                            text = { Text("The first start downloads the desktop packages - a large download; the exact size is not measured. Use Wi-Fi, not mobile data.\n\nThis can take several minutes. Keep the app open.") })
                     }
                     if (vm.desktopPrep) {
                         Column(Modifier.fillMaxSize().padding(32.dp),

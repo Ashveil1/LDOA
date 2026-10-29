@@ -14,10 +14,13 @@ import java.io.File
 
 /**
  * User-spec proof (GNOME lane, runs BEFORE UbuntuGnomeSpikeTest on a fresh
- * install): ONE tap on Install Ubuntu -> install -> GNOME provisioning ->
- * desktop session -> X11 surface, with NO further taps. The auto-enter is
- * product code (MainActivity + XServer), not test glue: the test only taps
- * once and then watches files/logcat + screenshots.
+ * install): tap Install Ubuntu -> install -> FIRST-START DOWNLOAD CONSENT
+ * dialog (verified, screenshotted) -> one consent tap -> GNOME provisioning
+ * -> desktop session -> X11 surface. The consent tap is user-mandated
+ * (2026-10-29): the multi-hundred-MB apt download must never start without
+ * an explicit choice. Auto-enter + consent are product code (MainActivity +
+ * XServer), not test glue: the test only taps install + consent and then
+ * watches files/logcat + screenshots.
  */
 @RunWith(AndroidJUnit4::class)
 class UbuntuDesktopAutoEnterTest {
@@ -43,8 +46,20 @@ class UbuntuDesktopAutoEnterTest {
         val installBtn = device.wait(Until.findObject(By.desc("install-ubuntu")), 30_000)
         assertTrue("install-ubuntu button not found on the picker", installBtn != null)
         installBtn.click()
-        Log.i(TAG, "auto-enter: install tapped - NO further taps from here")
+        Log.i(TAG, "auto-enter: install tapped; awaiting first-start consent dialog")
         Shot.save("28-ubuntu-installing")
+
+        // Consent gate: after install, the first desktop start must show
+        // the large-download warning BEFORE any GNOME apt traffic, and the
+        // user chooses. Verify the dialog, then tap through it.
+        val consent = device.wait(Until.findObject(By.text("Download and start")), 30 * 60_000)
+        assertTrue("first-start consent dialog did not appear after install", consent != null)
+        Shot.save("28b-ubuntu-consent-dialog")
+        consent.click()
+        Log.i(TAG, "auto-enter: consent tapped - NO further taps from here")
+        val prep = device.wait(Until.findObject(By.text("Starting Ubuntu desktop")), 30_000)
+        assertTrue("preparing state not shown after consent", prep != null)
+        Shot.save("28c-ubuntu-preparing")
 
         // Auto-enter chain: install -> VM autoDesktop -> XServer.openDesktop
         // -> GNOME provision (long) -> session launch writes guest-gnome.log.
