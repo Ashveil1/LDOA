@@ -146,6 +146,18 @@ class MainActivity : ComponentActivity() {
                 // First start of the Ubuntu desktop downloads the GNOME
                 // package set (large). Ask BEFORE that download starts;
                 // everything else goes straight through.
+                // Stage sink: apt/dpkg progress spam is throttled to one
+                // line per 250ms; milestone lines always pass so the
+                // overlay never sits stale through a long stage.
+                val lastStageAt = longArrayOf(0L)
+                val stageSink: (String) -> Unit = { s ->
+                    val spam = s.startsWith("Get:") || s.startsWith("Progress") || s.startsWith("Fetched")
+                    val now = System.currentTimeMillis()
+                    if (!spam || now - lastStageAt[0] > 250) {
+                        lastStageAt[0] = now
+                        runOnUiThread { vm.desktopStage = s.take(160) }
+                    }
+                }
                 val requestDesktop: (Distro) -> Unit = { d ->
                     vm.log += "[tap] open-desktop " + d.id + "\n"
                     val needsProvision = d.pkgMgr == PkgMgr.APT &&
@@ -158,7 +170,7 @@ class MainActivity : ComponentActivity() {
                         vm.desktopError = null
                         vm.desktopStage = ""
                         XServer.openDesktop(this@MainActivity, d,
-                            onStage = { s -> runOnUiThread { vm.desktopStage = s } },
+                            onStage = stageSink,
                             onError = { m -> runOnUiThread { vm.desktopPrep = false; vm.desktopError = m } })
                     }
                 }
@@ -185,7 +197,7 @@ class MainActivity : ComponentActivity() {
                         vm.desktopError = null
                         vm.desktopStage = ""
                         XServer.openDesktop(this@MainActivity, Distros.UBUNTU,
-                            onStage = { s -> runOnUiThread { vm.desktopStage = s } },
+                            onStage = stageSink,
                             onError = { m -> runOnUiThread { vm.desktopPrep = false; vm.desktopError = m } })
                     }
                 }
@@ -200,7 +212,7 @@ class MainActivity : ComponentActivity() {
                                 vm.desktopError = null
                                 vm.desktopStage = ""
                                 XServer.openDesktop(this@MainActivity, pd,
-                                    onStage = { s -> runOnUiThread { vm.desktopStage = s } },
+                                    onStage = stageSink,
                                     onError = { m -> runOnUiThread { vm.desktopPrep = false; vm.desktopError = m } })
                             }) { Text("Download and start") } },
                             dismissButton = { TextButton(onClick = { vm.pendingDesktop = null }) { Text("Not now") } },

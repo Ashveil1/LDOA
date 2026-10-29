@@ -69,6 +69,23 @@ object XServer {
         Log.i(TAG, "X server spawned; log=$log")
     }
 
+    /** Poll until the session script's alive/fallback marker appears in the
+     *  NEW portion of the session log (past logBase), the process dies, or
+     *  the budget runs out. Returns the matched marker line, or null. */
+    private fun awaitSessionMarker(p: Process, log: File, logBase: Long, budgetMs: Long, vararg markers: String): String? {
+        val deadline = System.currentTimeMillis() + budgetMs
+        while (System.currentTimeMillis() < deadline) {
+            if (!p.isAlive) return null
+            if (log.isFile && log.length() > logBase) {
+                val fresh = log.readText().substring(logBase.toInt().coerceAtMost(log.length().toInt()))
+                val hit = fresh.lineSequence().firstOrNull { line -> markers.any { line.contains(it) } }
+                if (hit != null) return hit.trim()
+            }
+            Thread.sleep(2_000)
+        }
+        return null
+    }
+
     /** Open the desktop fail-CLOSED: the X11 activity only launches when a
      *  desktop session actually started; every failure path reports through
      *  onError with detail instead of opening a silent black screen
@@ -108,8 +125,14 @@ object XServer {
                             if (failure == null && GuestDesktop.hasDesktopShell(rootfs)) {
                                 onStage("Launching desktop session")
                                 val p = GuestDesktop.launchDesktopSession(ctx, rootfs)
+                                // Alpine's session script has no alive
+                                // marker; bounded gate = still alive after
+                                // an 8s grace (a dead exec/proot surfaces
+                                // inside that window).
+                                var grace = 0
+                                while (grace < 8 && p.isAlive) { Thread.sleep(1_000); grace++ }
                                 launched = p.isAlive
-                                if (!launched) failure = "Desktop session died immediately after launch"
+                                if (!launched) failure = "Desktop session died within " + grace + "s of launch"
                             } else if (failure == null) {
                                 failure = "Desktop shell unavailable after install; desktop would be empty"
                             }
@@ -126,12 +149,29 @@ object XServer {
                                     "GNOME package install failed (exit " + add.exitCode + ")\n" + (add.stdout + add.stderr).takeLast(1200)
                             }
                             if (failure == null && GuestUbuntu.hasGnome(rootfs)) {
-                                ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
-                                    .edit().putBoolean("ubuntu_desktop_active", true).apply()
                                 onStage("Launching GNOME session")
+                                // Gate on SESSION EVIDENCE, not the spawn
+                                // event: the session script logs its alive
+                                // marker ~20s in; only log lines written
+                                // after THIS launch count (the log is
+                                // append-only across retries).
+                                val gnomeLog = File(ctx.filesDir, "guest-gnome.log")
+                                val logBase = if (gnomeLog.isFile) gnomeLog.length() else 0L
                                 val p = launchOrReuseGnomeSession(ctx, distro, rootfs)
-                                launched = p.isAlive
-                                if (!launched) failure = "GNOME session died immediately after launch; see guest-gnome.log"
+                                val marker = awaitSessionMarker(p, gnomeLog, logBase, 45_000,
+                                    "gnome-launch: gnome-session alive", "falling back to bare gnome-shell")
+                                if (marker != null) {
+                                    Log.i(TAG, "GNOME session evidence: " + marker)
+                                    ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
+                                        .edit().putBoolean("ubuntu_desktop_active", true).apply()
+                                    launched = true
+                                } else {
+                                    val tail = if (gnomeLog.isFile && gnomeLog.length() > logBase)
+                                        gnomeLog.readText().substring(logBase.toInt().coerceAtMost((gnomeLog.length()).toInt())).takeLast(1500)
+                                        else "(guest-gnome.log has no new output)"
+                                    failure = "GNOME session did not come up (no alive marker in 45s, process " +
+                                        (if (p.isAlive) "still running" else "exited") + "). Log tail:\n" + tail
+                                }
                             } else if (failure == null) {
                                 failure = "GNOME unavailable after package install; desktop would be empty"
                             }
