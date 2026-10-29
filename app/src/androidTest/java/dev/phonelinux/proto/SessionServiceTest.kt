@@ -2,6 +2,7 @@ package dev.phonelinux.proto
 
 import android.Manifest
 import android.app.NotificationManager
+import android.util.Log
 import android.content.Intent
 import android.content.pm.PackageManager
 import org.junit.Assert.assertEquals
@@ -26,6 +27,7 @@ import org.junit.runners.MethodSorters
 @RunWith(AndroidJUnit4::class)
 @FixMethodOrder(MethodSorters.NAME_ASCENDING)
 class SessionServiceTest {
+    private val TAG = "SessionServiceTest"
     private val instr get() = InstrumentationRegistry.getInstrumentation()
     private val ctx get() = instr.targetContext
     private val device get() = UiDevice.getInstance(instr)
@@ -96,12 +98,25 @@ class SessionServiceTest {
         // on-state pixel remains an open verification item, not replaced
         // by this assertion.
         val nm3 = ctx.getSystemService(NotificationManager::class.java)
-        awaitTrue(5_000, "active notification text shows wakelock on") {
-            nm3.activeNotifications.any {
-                it.id == SessionService.NOTIF_ID &&
-                    (it.notification.extras.getCharSequence("android.text") ?: "")
-                        .contains("Wakelock: on")
+        // Run 40925177246: the held-await passed but this await timed out -
+        // the service flips wakelockHeld and re-posts synchronously, so the
+        // question is NMS-side state at failure. Capture it (evidence only).
+        try {
+            awaitTrue(5_000, "active notification text shows wakelock on") {
+                nm3.activeNotifications.any {
+                    it.id == SessionService.NOTIF_ID &&
+                        (it.notification.extras.getCharSequence("android.text") ?: "")
+                            .contains("Wakelock: on")
+                }
             }
+        } catch (t: AssertionError) {
+            val seen = nm3.activeNotifications.filter { it.id == SessionService.NOTIF_ID }
+                .map { "text=" + (it.notification.extras.getCharSequence("android.text") ?: "<none>") +
+                    " postTime=" + it.postTime }
+            Log.e(TAG, "a03 notification-text await failed; active matches: " + seen)
+            Log.e(TAG, "a03 dumpsys notification (pkg slice): " +
+                shell("dumpsys notification --noredact | grep -A12 dev.phonelinux.proto | head -60"))
+            throw t
         }
         // Pixel evidence: notification text reflects the held wakelock.
         device.openNotification()
