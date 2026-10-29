@@ -75,6 +75,11 @@ class MobileShellSpikeTest {
         // One full launch->evidence->verified-teardown cycle per scale.
         // Default gets early+settled shots and the xwininfo window proof;
         // min/max add one settled shot each for readability pixel review.
+        // try/finally: whatever happens below, the device-side session and
+        // X server logs stream to logcat (captured by the workflow) BEFORE
+        // the test task uninstalls the app - run 40892838123 lost both
+        // logs to that uninstall and the failure was undiagnosable.
+        try {
         for (round in listOf(
             Triple(defaultPrefs.scale, "40-mobile-desktop-early", "41-mobile-desktop-settled"),
             Triple(0.75f, "", "42-mobile-scale-min"),
@@ -124,8 +129,25 @@ class MobileShellSpikeTest {
             assertTrue("session tree not empty after teardown (scale=$scale): $left", left.isEmpty())
             Log.i(TAG, "mobile round scale=$scale torn down clean")
         }
+        } finally {
+            dumpLogTail("mobile-desktop.log", logFile)
+            dumpLogTail("xserver.log", File(ctx.filesDir, "xserver.log"))
+        }
         MobileModeSettings.write(ctx, defaultPrefs)
         Log.i(TAG, "MOBILE-SHELL-OK sessions alive, rendered at 3 scales, windows mapped, trees torn down")
+    }
+
+    /** Stream a bounded tail of a device-side log into logcat with explicit
+     *  markers. logcat outlives the app (the post-run uninstall kills
+     *  run-as pulls); 3000-char chunks stay under the per-line limit. */
+    private fun dumpLogTail(name: String, f: File, maxBytes: Int = 65536) {
+        if (!f.isFile) { Log.i(TAG, name + " DUMP: <missing>"); return }
+        val len = f.length()
+        val skip = (len - maxBytes).coerceAtLeast(0L)
+        val text = f.inputStream().use { it.skip(skip); it.readBytes().toString(Charsets.UTF_8) }
+        Log.i(TAG, name + " DUMP BEGIN (" + len + "B, last " + text.length + " chars)")
+        for (chunk in text.chunked(3000)) Log.i(TAG, chunk)
+        Log.i(TAG, name + " DUMP END")
     }
 
     /** Poll the session log (new bytes only) for the jwm-alive marker with
@@ -158,6 +180,7 @@ class MobileShellSpikeTest {
         }
         Log.i(TAG, "mobile log tail: " + (if (logFile.isFile) logFile.readText().takeLast(1500) else "<missing>"))
         Log.i(TAG, "xserver pids at failure: " + xServerPids())
+        dumpLogTail("xserver.log", File(logFile.parentFile, "xserver.log"), 32768)
         assertTrue("session script never reached the launch marker", sawLaunchMarker)
         throw AssertionError("jwm never reported alive")
     }
