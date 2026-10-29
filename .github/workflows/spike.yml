@@ -348,6 +348,12 @@ jobs:
           curl -fSL "$UBUNTU_BASE/ubuntu-base-$UBUNTU_VER-base-arm64.tar.gz" -o /tmp/rootfs.tar.gz
           mkdir -p /tmp/rootfs
           tar -xzf /tmp/rootfs.tar.gz -C /tmp/rootfs
+          # Guest DNS (mirrors DistroInstaller.kt:143-150): ubuntu-base ships
+          # resolv.conf as a dangling symlink into /run/systemd/resolve/;
+          # replace it with the app's exact nameservers (job 123514685930:
+          # apt ran under termux-proot but could not resolve ports.ubuntu.com).
+          rm -f /tmp/rootfs/etc/resolv.conf
+          printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /tmp/rootfs/etc/resolv.conf
       - name: GATE - proot + apt install of the exact GNOME package list
         run: |
           PKGS=$(sed -n '/GNOME_PACKAGES = listOf(/,/) *$/p' app/src/main/java/dev/phonelinux/proto/GuestUbuntu.kt | grep -o '"[^"]*"' | tr -d '"' | tr '\n' ' ')
