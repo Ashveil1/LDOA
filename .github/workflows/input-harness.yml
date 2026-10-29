@@ -1,6 +1,10 @@
 name: input-harness
 on:
   push:
+    # Narrowed 2026-10-29 (task-owner): only the app/entry branch triggers
+    # this lane. Parallel feature branches (custom desktop) must not spend
+    # 2h harness runs per push.
+    branches: [gnome/evidence]
   workflow_dispatch:
 
 jobs:
