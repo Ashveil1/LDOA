@@ -223,6 +223,9 @@ run {
                             mRenderData.mapScreenPoint(mHoldDownX, mHoldDownY, mappedPoint);
                             mInjector.sendCursorMove(mappedPoint[0], mappedPoint[1], false);
                             mInjector.sendMouseClick(InputStub.BUTTON_RIGHT, false);
+                            android.util.Log.i("LorieTouch", "LDOA-HOLD-FIRE right-click guest("
+                                + (int) mappedPoint[0] + "," + (int) mappedPoint[1] + ") heldMs="
+                                + (event.getEventTime() - mHoldDownTime));
                         }
                         mHoldDownTime = 0L;
                     }

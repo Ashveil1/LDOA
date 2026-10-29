@@ -410,7 +410,7 @@ for i in range(d.childCount):
 """.trimIndent())
         fun atspi(): String = xwin(
             "export DBUS_SESSION_BUS_ADDRESS=\"${'$'}(cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n' | grep -m1 '^DBUS_SESSION_BUS_ADDRESS=' | cut -d= -f2-)\"; " +
-                "timeout 30 python3 /root/atspi_dump.py 2>/dev/null | head -c 60000 || true")
+                "timeout 30 python3 /root/atspi_dump.py 2>/dev/null | head -c 200000 || true")
         class ANode(val depth: Int, val role: String, val x: Int, val y: Int,
                     val w: Int, val h: Int, val name: String)
         fun parseAts(dump: String): List<ANode> = dump.lines().mapNotNull { ln ->
@@ -426,6 +426,22 @@ for i in range(d.childCount):
             nodes.filter { n -> n.role.lowercase().contains("menu") &&
                 probes.any { pr -> n.name.lowercase().contains(pr) } }
                 .map { it.name }.distinct()
+        fun rootChildIds(): Set<String> =
+            xwin("xwininfo -root -children | awk '{print ${'$'}1}' | grep '^0x' || true")
+                .split(Regex("\\s+")).filter { it.startsWith("0x") }.toSet()
+        fun geomLine(id: String): String =
+            xwin("xwininfo -id " + id + " | grep -E 'Absolute upper-left|Width:|Height:'").replace("\n", " | ")
+        // Window-level menu proof, independent of the (slow, possibly
+        // GTK4-blind) atspi dump: the set of new top-level X windows.
+        fun awaitMenuWindow(beforeIds: Set<String>, timeoutMs: Long): Pair<List<String>, String>? {
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (System.currentTimeMillis() < deadline) {
+                val added = (rootChildIds() - beforeIds).sorted()
+                if (added.isNotEmpty()) return Pair(added, geomLine(added.first()))
+                Thread.sleep(700)
+            }
+            return null
+        }
         fun awaitMenu(probes: List<String>, baseline: List<String>, timeoutMs: Long): List<ANode>? {
             val deadline = System.currentTimeMillis() + timeoutMs
             while (System.currentTimeMillis() < deadline) {
@@ -596,33 +612,40 @@ for i in range(d.childCount):
             "open in terminal", "sort", "undo", "redo", "restore", "empty trash")
         val baselineBgNames = menuHits(parseAts(atspi()), bgProbes)
         Log.i(TAG, "longpress-bg: baseline item names=" + baselineBgNames)
-        val menuWinsBefore = xwin("xwininfo -root -children | grep -c '0x' || true").trim().toIntOrNull() ?: 0
+        val menuBeforeIds = rootChildIds()
         probeStart("menu")
         longPress(bgTarget!!)
-        val menuNodes = awaitMenu(bgProbes, baselineBgNames, 6_000)
+        // Fast window-level signal first (the atspi dump can take 10-30s
+        // per call, so a short atspi-only wait misses a slow dump).
+        val menuWin = awaitMenuWindow(menuBeforeIds, 15_000)
         val menuProbe = probeStop("menu")
         Shot.save("23d-ubuntu-longpress-menu")
-        assertTrue("hold on Files background produced no context menu (no new items)", menuNodes != null)
+        val menuNodes = awaitMenu(bgProbes, baselineBgNames, 35_000)
+        Log.i(TAG, "longpress-bg: menuWin=" + menuWin + " rightClickInjections=" +
+            buttonPresses(menuProbe, 3) + " probeTail=" + menuProbe.takeLast(300).replace("\n", " | ") +
+            " atspiNull=" + (menuNodes == null))
+        assertTrue("hold on Files background produced no menu window " +
+            "(atspi items=" + (menuNodes?.let { menuHits(it, bgProbes) - baselineBgNames } ?: "dump-pending") +
+            ", probeTail=" + menuProbe.takeLast(300).replace("\n", " | ") + ")",
+            menuWin != null || menuNodes != null)
+        assertTrue("expected exactly one new menu window, added=" + (menuWin?.first ?: emptyList<String>()) +
+            " (native+injected duplicate?)", menuWin != null && menuWin.first.size == 1)
+        assertTrue("expected exactly one injected button-3 press, got " + buttonPresses(menuProbe, 3),
+            buttonPresses(menuProbe, 3) == 1)
+        val mwX = Regex("Absolute upper-left X:\\s+(-?\\d+)").find(menuWin!!.second)?.groupValues?.get(1)?.toIntOrNull() ?: -10000
+        val mwY = Regex("Absolute upper-left Y:\\s+(-?\\d+)").find(menuWin.second)?.groupValues?.get(1)?.toIntOrNull() ?: -10000
+        assertTrue("menu window opened far from the hold point (menu at " + mwX + "," + mwY +
+            " vs hold " + bgGuestX + "," + bgGuestY + ")",
+            Math.abs(mwX - bgGuestX) <= 400 && Math.abs(mwY - bgGuestY) <= 400)
+        assertTrue("menu opened but atspi saw no items - GTK4 a11y blindness " +
+            "or a truncated dump; item names are required proof", menuNodes != null)
         val bgNew = menuHits(menuNodes!!, bgProbes) - baselineBgNames
         val hitIdx = menuNodes.mapIndexedNotNull { idx, n -> if (n.name in bgNew) idx else null }
         val spread = if (hitIdx.isEmpty()) -1 else hitIdx.last() - hitIdx.first()
-        Log.i(TAG, "longpress-bg: new menu items=" + bgNew + " idxSpread=" + spread +
-            " rightClickInjections=" + buttonPresses(menuProbe, 3))
+        Log.i(TAG, "longpress-bg: new menu items=" + bgNew + " idxSpread=" + spread)
         assertTrue("context menu items not identifiable (found=" + bgNew + ")", bgNew.size >= 2)
         assertTrue("menu items not contiguous - more than one menu? (spread=" + spread + ")",
             spread in 0..(bgNew.size * 4))
-        val posNode = menuNodes.firstOrNull { it.name in bgNew && it.w > 0 }
-        assertTrue("menu position evidence missing (no sized item node)", posNode != null)
-        assertTrue("menu opened far from the hold point", posNode != null &&
-            Math.abs(posNode.x + posNode.w / 2 - bgGuestX) <= 400 &&
-            Math.abs(posNode.y + posNode.h / 2 - bgGuestY) <= 400)
-        val menuWinsAfter = xwin("xwininfo -root -children | grep -c '0x' || true").trim().toIntOrNull() ?: 0
-        Log.i(TAG, "longpress-bg: menu windows before=" + menuWinsBefore + " after=" + menuWinsAfter)
-        assertTrue("expected exactly one injected button-3 press, got " + buttonPresses(menuProbe, 3) +
-            " (probeTail=" + menuProbe.takeLast(300).replace("\n", " | ") + ")",
-            buttonPresses(menuProbe, 3) == 1)
-        assertTrue("expected exactly one new menu window, delta=" + (menuWinsAfter - menuWinsBefore) +
-            " (native+injected duplicate?)", menuWinsAfter - menuWinsBefore == 1)
         device.pressKeyCode(android.view.KeyEvent.KEYCODE_ESCAPE)
         assertTrue("context menu did not close on Escape", awaitNoMenu(bgProbes, baselineBgNames, 4_000))
         Log.i(TAG, "UBUNTU-LONGPRESS-RIGHTCLICK-OK Files background menu: " + bgNew)
@@ -676,7 +699,7 @@ for i in range(d.childCount):
                 "star", "properties", "compress", "run")
             val baselineRow = menuHits(parseAts(atspi()), rowProbes)
             longPress(rowTarget!!)
-            val rowMenu = awaitMenu(rowProbes, baselineRow, 6_000)
+            val rowMenu = awaitMenu(rowProbes, baselineRow, 35_000)
             Shot.save("23d2-ubuntu-longpress-row-menu")
             assertTrue("hold on a file row produced no context menu", rowMenu != null)
             val rowNew = menuHits(rowMenu!!, rowProbes) - baselineRow
@@ -847,7 +870,7 @@ for i in range(d.childCount):
         val baseOn = menuHits(parseAts(atspi()), onProbes)
         probeStart("onhold")
         longPress(scP)
-        val onMenu = awaitMenu(onProbes, baseOn, 6_000)
+        val onMenu = awaitMenu(onProbes, baseOn, 35_000)
         val onHoldProbe = probeStop("onhold")
         Shot.save("23j-ubuntu-toggles-restored")
         assertTrue("right-click did not come back after re-enabling the toggle",
