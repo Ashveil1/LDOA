@@ -92,26 +92,30 @@ class MobileShellSpikeTest {
             Shot.save(shotSettled)
             assertTrue("mobile session died during the render window (scale=$scale)", proc.isAlive)
 
-            if (shotEarly.isNotEmpty()) {
-                // Client-window evidence via the guest's own xwininfo on :0.
-                val wins = GuestDesktop.guestShell(ctx, rootfs,
-                    "DISPLAY=:0 xwininfo -root -children 2>/dev/null | grep -i -e xterm -e pcmanfm || true",
-                    extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"))
-                Log.i(TAG, "mobile windows: $wins")
-                assertTrue("no xterm window mapped on :0", wins.contains("xterm"))
-            }
+            // Client-window evidence via the guest's own xwininfo on :0.
+            // EVERY round: a failed render must never count as a visual pass.
+            val wins = GuestDesktop.guestShell(ctx, rootfs,
+                "DISPLAY=:0 xwininfo -root -children 2>/dev/null | grep -i -e xterm -e pcmanfm || true",
+                extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"))
+            Log.i(TAG, "mobile windows (scale=$scale): $wins")
+            assertTrue("no xterm window mapped on :0 (scale=$scale)", wins.contains("xterm"))
 
             // TEARDOWN PROOF (every round): host-parentage kill walk from
-            // the tracked proot root PLUS the recorded session-bus PID
-            // (dbus-daemon reparents to init and escapes the parentage
-            // walk). TERM, re-verify, KILL survivors, verify empty. A
-            // guest-global PLINUX_SESSION scan is unsafe: /proc is
-            // host-bound into every proot and GNOME/Alpine share one tag.
+            // the tracked proot root PLUS the session bus (dbus-daemon
+            // reparents to init and escapes the parentage walk). Identity
+            // is captured NOW, at launch-confirmed time - the script writes
+            // the pidfile before starting jwm, so jwm-alive implies THIS
+            // launch wrote it - because reading starttime at kill time
+            // cannot guard a PID reused after the session died. Every
+            // signal is re-verified against the captured (starttime, uid)
+            // pair, so a stale pidfile or reused PID kills nothing.
             val rootPid = hostPidOf(proc)
             assertTrue("proot root PID unreadable - cannot prove teardown", rootPid != null)
-            val busPid = File(rootfs, "root/.mobile-bus.pid")
+            val busIdentity = File(rootfs, "root/.mobile-bus.pid")
                 .takeIf { it.isFile }?.readText()?.trim()?.toIntOrNull()
-            val left = killTreeVerified(rootPid!!, setOfNotNull(busPid))
+                ?.let { identityOf(it) }
+            Log.i(TAG, "mobile bus identity: $busIdentity")
+            val left = killTreeVerified(rootPid!!, setOfNotNull(busIdentity))
             assertTrue("session tree not empty after teardown (scale=$scale): $left", left.isEmpty())
             Log.i(TAG, "mobile round scale=$scale torn down clean")
         }
@@ -189,29 +193,48 @@ class MobileShellSpikeTest {
         return out
     }
 
-    /** TERM the snapshot tree (+ explicitly named extra PIDs such as the
-     *  reparented session bus), verify, KILL survivors, verify empty.
-     *  PID reuse is guarded by starttime. Anything that escaped both the
-     *  snapshot and the extras is reported as a leftover and fails the
-     *  assert - fail closed, never claim a clean kill we did not verify. */
-    private fun killTreeVerified(root: Int, extraPids: Set<Int> = emptySet()): List<Int> {
-        val all0 = scanProc()
-        val snapshot = treeOf(root, all0) + extraPids.filter { all0.containsKey(it) }
-        val starts = HashMap<Int, String>()
-        for (pid in snapshot) all0[pid]?.let { starts[pid] = it.start }
-        for (sig in listOf(android.system.OsConstants.SIGTERM, android.system.OsConstants.SIGKILL)) {
-            for (pid in snapshot) {
-                try { android.os.Process.sendSignal(pid, sig) } catch (t: Throwable) { }
-            }
-            Thread.sleep(if (sig == android.system.OsConstants.SIGTERM) 3_000 else 2_000)
-            if (survivors(snapshot, starts).isEmpty()) return emptyList()
-        }
-        Thread.sleep(2_000)
-        return survivors(snapshot, starts)
+    private class PIdent(val pid: Int, val start: String, val uid: Int)
+
+    /** Identity of one live process, or null if it is gone or NOT ours
+     *  (all guest processes run as the app uid). */
+    private fun identityOf(pid: Int): PIdent? {
+        val info = scanProc()[pid] ?: return null
+        val uid = try { android.system.Os.stat("/proc/$pid").st_uid } catch (t: Throwable) { return null }
+        if (uid != android.os.Process.myUid()) return null
+        return PIdent(pid, info.start, uid)
     }
 
-    private fun survivors(snapshot: Set<Int>, starts: Map<Int, String>): List<Int> {
-        val now = scanProc()
-        return snapshot.filter { pid -> now[pid]?.let { starts[pid] == it.start } == true }
+    /** TERM the snapshot tree (+ explicitly captured identities such as
+     *  the reparented session bus), verify, KILL survivors, verify empty.
+     *  Before EVERY signal the PID's current (starttime, uid) must match
+     *  the identity captured at snapshot/launch time - a reused PID is
+     *  never signaled. Leftovers fail the caller's assert: fail closed,
+     *  never claim a clean kill we did not verify. */
+    private fun killTreeVerified(root: Int, extraIdents: Set<PIdent?> = emptySet()): List<Int> {
+        val all0 = scanProc()
+        val idents = HashMap<Int, PIdent>()
+        for (pid in treeOf(root, all0)) identityOf(pid)?.let { idents[pid] = it }
+        for (e in extraIdents) if (e != null) idents[e.pid] = e
+        fun signal(sig: Int) {
+            for (id in idents.values) {
+                val cur = identityOf(id.pid)
+                if (cur != null && cur.start == id.start && cur.uid == id.uid) {
+                    try { android.os.Process.sendSignal(id.pid, sig) } catch (t: Throwable) { }
+                }
+            }
+        }
+        signal(android.system.OsConstants.SIGTERM)
+        Thread.sleep(3_000)
+        if (survivors(idents).isEmpty()) return emptyList()
+        signal(android.system.OsConstants.SIGKILL)
+        Thread.sleep(2_000)
+        return survivors(idents)
+    }
+
+    private fun survivors(idents: Map<Int, PIdent>): List<Int> {
+        return idents.values.filter { id ->
+            val cur = identityOf(id.pid)
+            cur != null && cur.start == id.start && cur.uid == id.uid
+        }.map { it.pid }
     }
 }
