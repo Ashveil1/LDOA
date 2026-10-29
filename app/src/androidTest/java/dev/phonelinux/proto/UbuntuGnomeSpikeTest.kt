@@ -221,12 +221,29 @@ class UbuntuGnomeSpikeTest {
             val y = Regex("Y=(-?\\d+)").find(out)?.groupValues?.get(1)?.toIntOrNull()
             return if (x != null && y != null) Pair(x, y) else null
         }
+        // A shown soft keyboard covers the lower surface and eats probe
+        // swipes (5544785: post-fileops Gboard swallowed probe (700,1700),
+        // degenerating the mapping to a (0,0) drag target that crashed
+        // injection with RemoteException). Back hides the IME without
+        // reaching the app only when it is actually shown.
+        fun hideSoftKeyboardIfShown() {
+            val dump = device.executeShellCommand("dumpsys input_method")
+            if (dump.contains("mInputShown=true")) {
+                device.pressBack()
+                Thread.sleep(1_000)
+            }
+        }
+        hideSoftKeyboardIfShown()
         var p1 = probeX(300, 1200)
         var p2 = probeX(700, 1700)
         Log.i(TAG, "dock-interact: mapping probes dev(300,1200)->" + p1 + " dev(700,1700)->" + p2)
         fun mapToDevice(x: Int, y: Int): Pair<Int, Int>? {
             val first = p1 ?: return null
             val second = p2 ?: return null
+            // Identical/degenerate probes cannot define a mapping; a zero
+            // divisor turns into NaN -> (0,0), never a usable target.
+            if (Math.abs(second.first - first.first) < 10 ||
+                Math.abs(second.second - first.second) < 10) return null
             val ax = (700 - 300).toDouble() / (second.first - first.first)
             val bx = 300 - ax * first.first
             val ay = (1700 - 1200).toDouble() / (second.second - first.second)
@@ -439,6 +456,7 @@ class UbuntuGnomeSpikeTest {
         assertTrue("finger press did not reopen Files after restart", reopened != null)
         val rw = reopened!!
         val re = frameExtents(rw.id)
+        hideSoftKeyboardIfShown()
         p1 = probeX(300, 1200)
         p2 = probeX(700, 1700)
         Log.i(TAG, "restart: fresh mapping probes " + p1 + " and " + p2)
