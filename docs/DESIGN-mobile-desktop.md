@@ -96,3 +96,34 @@ Recorded scope implications for the mobile desktop plan:
 - Input-layer work itself belongs to the app/input worker lane; this
   doc only carries the requirement for the frontend shell plan and the
   coordinated boundary.
+
+## Direction note 2026-10-29 19:11 (Ash, verbatim intent): design north
+   star
+
+Ash's raw direction (WhatsApp wamid...QzdBRjI2OUJBQ0I1M0M0RjJBRkRE
+MjczMzY2RTI4RAA): usage should FEEL like Ubuntu Touch / Android / iOS,
+but everything underneath stays FULL Linux desktop capability. Visual
+beauty like iOS is the PRIMARY bar. Stock Termux:X11 control UI cannot
+deliver that as the final product - which is why it cannot be used
+as-is as the end state.
+
+Recorded scope implications:
+
+- NORTH STAR: finger-first mobile usability (Ubuntu Touch class) with
+  iOS-grade visual polish, on top of the unchanged full Linux desktop
+  capability. No capability cuts, no "mobile = reduced Linux".
+- REJECTED as final product: stock Termux:X11 control UI (mouse
+  emulation, scroll mechanisms, toolbar clutter). It may remain only
+  as an optional legacy layer, never the default experience.
+- KEEP: the working display/render core (vendored lorie X server). The
+  rejection is of the CONTROL UI, not necessarily the display core.
+- Custom surface owns: Home/launcher, window switching, gestures,
+  control shell, theming toward iOS-class polish (within what noble
+  compositor options actually deliver - see Phase B note: picom gives
+  fades/opacity only; real iOS-style window motion needs a compositor
+  decision that is still unapproved).
+- Per-Linux-app internals may need separate adaptation; no universal
+  "every X app becomes finger-perfect" promise.
+- Implementation gate unchanged: current approved Phase A + trial entry
+  work first; any bigger build follows read-code -> bounded plan ->
+  approval. No full-Linux replacement, no silent capability cut.
