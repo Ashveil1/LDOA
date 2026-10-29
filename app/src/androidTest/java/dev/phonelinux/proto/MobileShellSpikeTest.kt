@@ -53,32 +53,30 @@ class MobileShellSpikeTest {
         assertTrue("guest exec must exit 0. stderr=${g.stderr}", g.exitCode == 0)
         assertTrue("guest must be Ubuntu, got: ${g.stdout}", g.stdout.contains("Ubuntu"))
 
-        // Bounded /dev/tty probe (xterm Error 14 = ERROR_OPDEVTTY, errno 38
-        // ENOSYS, run 40898320897). NO guest strace: a process cannot have
-        // two ptracers and proot already traces the guest
-        // (github.com/proot-me/proot/issues/9), so a guest strace would be
-        // an altered environment, not product evidence. Instead: dash
-        // opens /dev/tty in xterm's exact mode (O_RDWR via the POSIX <>
-        // operator, error.h: ERROR_OPDEVTTY = spawn/startup open of
-        // /dev/tty), read-only + /dev/null controls, and the proot layer's
-        // own view via PROOT_VERBOSE (termux/proot cli.c:467-474 honors
-        // the env var; the vendored libproot.so is the Termux build).
-        // (publish-side fixes by the app worker, behavior-preserving:
-        //  the patch's nested double quotes did not compile in Kotlin -
-        //  switched the echo wrappers to single quotes; and `head -c 1
-        //  /dev/tty` would BLOCK forever if the open succeeded (tty read
-        //  with no input) - replaced with a pure O_RDONLY open test via
-        //  the POSIX `:` builtin, matching the open-only control intent.)
-        val ttyProbe = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c",
-            ": <> /dev/tty 2>/tmp/ttyrw.err; echo 'dev_tty_rdwr rc='${'$'}? 'err='${'$'}(cat /tmp/ttyrw.err); " +
-            ": < /dev/tty 2>/tmp/ttyr.err; echo 'dev_tty_rd rc='${'$'}? 'err='${'$'}(cat /tmp/ttyr.err); " +
-            "head -c 1 /dev/null >/dev/null 2>&1; echo 'dev_null_rd rc='${'$'}?; " +
-            "grep TracerPid /proc/self/status; " +
-            "ls -la /dev/tty 2>&1; ls /dev/pts 2>&1"),
-            extraEnv = mapOf("PROOT_VERBOSE" to "5"))
-        Log.i(TAG, "devtty probe exit=" + ttyProbe.exitCode +
-            " stdout: " + ttyProbe.stdout.trim() +
-            " proot-stderr tail: " + ttyProbe.stderr.takeLast(4000))
+        // /dev/tty matrix (xterm Error 14 = spawn open("/dev/tty", O_RDWR)
+        // -> ENOSYS(38) in the SESSION context, run 40898320897/40902982729;
+        // the dash pre-X probe returned ENXIO - the errno xterm TOLERATES
+        // (main.c:3266-3300, tolerated set ENXIO/EIO/ENOENT/ENODEV/EINVAL/
+        // ENOTTY/EACCES; ENOSYS excluded). Same noble glibc on both sides
+        // and fake_id0 passes non-creating opens through untouched
+        // (termux/proot fake_id0/open.c: no metafile + no O_CREAT ->
+        // return 0), so source alone does NOT explain the errno
+        // difference: trace the ACTUAL binary in the ACTUAL context
+        // (fakeRoot -0 like the session, same binds) against controls.
+        // No guest strace: a process cannot have two ptracers and proot
+        // already traces the guest (proot-me/proot#9); PROOT_VERBOSE
+        // (termux/proot cli.c:467-474) is the honest trace at the proot
+        // layer. NOTE: a failed redirect on a dash SPECIAL builtin aborts
+        // the whole -c script (run 40902982729 killed its own controls),
+        // so every probe open runs in a subshell.
+        val dashNo0 = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c",
+            "( : < /dev/tty ) 2>/tmp/e1; echo 'dash_no0 rc='${'$'}? 'err='${'$'}(cat /tmp/e1); " +
+            "grep TracerPid /proc/self/status; ls -la /dev/tty 2>&1; ls /dev/pts 2>&1"))
+        Log.i(TAG, "devtty dash no0: " + dashNo0.stdout.trim())
+        val dashF0 = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c",
+            "( : < /dev/tty ) 2>/tmp/e2; echo 'dash_f0 rc='${'$'}? 'err='${'$'}(cat /tmp/e2)"),
+            fakeRoot = true)
+        Log.i(TAG, "devtty dash fake0: " + dashF0.stdout.trim())
 
         // Provision the mobile set (bounded: jwm + xterm + pcmanfm + utils).
         if (!GuestMobileShell.hasMobileShell(rootfs)) {
@@ -95,6 +93,53 @@ class MobileShellSpikeTest {
         // gates on a real xset q connection before any X client runs.
         XServer.start(ctx)
         Log.i(TAG, "xserver pids at launch: " + xServerPids())
+
+        // xterm cells need a live display: wait for the guest-visible X
+        // connection first (same xset q semantics as the session gate),
+        // then run the actual failing binary in the session's context
+        // (fakeRoot -0, X socket bind), quiet and PROOT_VERBOSE=5. The
+        // verbose cell's proot stderr is the syscall-disposition evidence
+        // (what proot saw and returned), kept to tty/ENOSYS lines + tail.
+        val xtermBind = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix")
+        var xUp = false
+        val xDeadline = System.currentTimeMillis() + 90_000
+        while (System.currentTimeMillis() < xDeadline) {
+            if (GuestDesktop.guestOk(ctx, rootfs, "DISPLAY=:0 xset q")) { xUp = true; break }
+            Thread.sleep(2_000)
+        }
+        Log.i(TAG, "devtty xterm probe X readiness: " + xUp)
+        if (xUp) {
+            // `timeout 20s` bounds runGuest: a hanging xterm cell must not
+            // block the session (and the artifact dump) indefinitely.
+            // (publish-side fix; 124 = timed out, distinct from xterm's
+            // own failure text.)
+            val xt = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c",
+                "DISPLAY=:0 timeout 20s xterm -e /bin/true 2>&1 | head -6"),
+                extraBinds = xtermBind, fakeRoot = true)
+            Log.i(TAG, "devtty xterm fake0: " + xt.stdout.trim())
+            val xtv = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c",
+                "DISPLAY=:0 timeout 20s xterm -e /bin/true 2>&1 | head -6"),
+                extraBinds = xtermBind, fakeRoot = true,
+                extraEnv = mapOf("PROOT_VERBOSE" to "5"))
+            // (publish-side fix) A bare '/dev/tty' filter keeps proot's
+            // translate lines but DROPS the openat sysenter/sysexit lines
+            // (they carry only hex pointers) - exactly the lines that
+            // attribute the returned errno. Keep a window around every
+            // /dev/tty or SIGSYS hit instead, plus each vpid exit.
+            val vLines = xtv.stderr.lines()
+            val keep = sortedSetOf<Int>()
+            vLines.forEachIndexed { i, l ->
+                if (l.contains("/dev/tty") || l.contains("SIGSYS") ||
+                    l.contains("exited with status")) {
+                    for (j in (i - 4)..(i + 10)) {
+                        if (j in vLines.indices) keep.add(j)
+                    }
+                }
+            }
+            Log.i(TAG, "devtty xterm fake0 verbose: " + xtv.stdout.trim() +
+                " proot-trace-window: " +
+                keep.take(80).joinToString(" | ") { vLines[it] })
+        }
         val logFile = File(ctx.filesDir, "mobile-desktop.log")
         val defaultPrefs = MobileModeSettings.read(ctx)
         var logOffset = 0L
