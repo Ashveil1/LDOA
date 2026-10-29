@@ -117,7 +117,13 @@ class SessionService : Service() {
             wakelockHeld = true
             Log.i(TAG, "wakelock ACQUIRED by user toggle (manual only)")
         }
-        getSystemService(NotificationManager::class.java).notify(NOTIF_ID, buildNotification())
+        // Trace the ACTUAL posted text (run 40925177246: held-flag flipped but
+        // the active notification kept the old text; NMS-side capture lives in
+        // SessionServiceTest.a03's failure path).
+        val n = buildNotification()
+        Log.i(TAG, "posting toggle notification text=[" +
+            n.extras.getCharSequence("android.text") + "] wakelockHeld=" + wakelockHeld)
+        getSystemService(NotificationManager::class.java).notify(NOTIF_ID, n)
     }
 
     /** Session end = service end: when the tracked guest session process
