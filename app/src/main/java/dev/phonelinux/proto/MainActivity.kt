@@ -196,22 +196,25 @@ private fun PickerScreen(distros: List<Distro>, vm: SpikeViewModel, onPrimary: (
 
 @Composable
 private fun GestureToggles() {
-    // Finger interaction map (user-approved 2026-10-29, option A): tap =
-    // click, hold ~0.5s without moving = right-click on release, one-finger
-    // drag native (hold-then-drag keeps working), two-finger drag = scroll.
-    // Each extra gesture can be switched off here; the lorie input layer
+    // Finger interaction map (native-first, user-delegated UX pick
+    // 2026-10-29): tap = click; one-finger drag stays native (scroll,
+    // window move, selection); one-finger hold = native press-and-hold
+    // where the toolkit supports it (GTK context menu at the timeout, text
+    // selection preserved); two-finger tap = right-click everywhere via
+    // lorie injection; two-finger drag = wheel scroll for legacy clients.
+    // Each injected gesture can be switched off here; the lorie input layer
     // reads these keys per gesture (TouchInputHandler patch).
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val prefs = remember { ctx.getSharedPreferences(ctx.packageName + "_preferences", android.content.Context.MODE_PRIVATE) }
-    var longPress by remember { mutableStateOf(prefs.getBoolean("ldoa_longpress_rightclick", true)) }
+    var twoFingerTap by remember { mutableStateOf(prefs.getBoolean("ldoa_twofinger_tap_rightclick", true)) }
     var twoFinger by remember { mutableStateOf(prefs.getBoolean("ldoa_twofinger_scroll", true)) }
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(CardBg).padding(horizontal = 16.dp, vertical = 6.dp)) {
         Text("Touch gestures", color = TextDim, fontSize = 13.sp)
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Hold = right-click", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
-            Switch(checked = longPress, onCheckedChange = {
-                longPress = it; prefs.edit().putBoolean("ldoa_longpress_rightclick", it).apply()
-            }, modifier = Modifier.semantics { contentDescription = "toggle-longpress-rightclick" })
+            Text("Two-finger tap = right-click", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Switch(checked = twoFingerTap, onCheckedChange = {
+                twoFingerTap = it; prefs.edit().putBoolean("ldoa_twofinger_tap_rightclick", it).apply()
+            }, modifier = Modifier.semantics { contentDescription = "toggle-twofinger-tap-rightclick" })
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Two-finger scroll", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))

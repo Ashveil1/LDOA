@@ -10,20 +10,37 @@ import org.junit.runner.RunWith
 import java.io.File
 
 /**
- * FOCUSED input-attribution harness (NOT a qualification lane): decides
- * what opens the Nautilus context menu on a stationary hold-release -
- * native GTK press-and-hold vs our lorie-mouse button-3 injection.
- * Evidence only: bootstrap facts are asserted, every experiment outcome is
- * LOGGED (harness: lines) and screenshotted, never asserted. A green job
- * means "harness executed", never "gesture qualified".
+ * FOCUSED gesture verification harness (NOT a qualification lane): verifies
+ * the native-first touch model in a warm GNOME session. Evidence only:
+ * bootstrap facts are asserted, every experiment outcome is LOGGED
+ * (harness: lines) and screenshotted, never asserted. A green job means
+ * "harness executed", never "gesture qualified".
  *
- * Arms (clean menu state between arms, ESC + baseline-id verify):
- *  0. guest-side watcher survival check (background proot children died
- *     with their exec session in run 1a73f8f - validate before trusting)
+ * Model under test (native-first, user-delegated UX pick 2026-10-29):
+ *   tap = click; 1-finger drag native (scroll / window move / selection);
+ *   1-finger hold = NATIVE GTK press-and-hold (menu at the timeout, text
+ *   selection preserved); 2-finger tap = injected right-click everywhere;
+ *   2-finger drag = wheel scroll for legacy clients.
+ *
+ * Arms (clean menu state between arms, ESC + synchronous window diffs):
  *  1. XTEST sanity: xdotool click 3 at the target -> visible menu reference
- *  2. toggle OFF (ldoa_longpress_rightclick=false, read live per event):
- *     hold 900ms -> any menu = NATIVE press-and-hold exists in this stack
- *  3. toggle ON: hold 900ms -> window + Map State + lifetime vs arm 2
+ *  2. native 1-finger hold 1200ms -> menu DURING hold, persists after
+ *     release (native GTK press-and-hold; no injection path exists anymore)
+ *  3. 2-finger tap -> injected right-click menu appears AND persists
+ *  4. 2-finger drag -> NO menu (movement cancels the tap: cancel proof)
+ *  5. 2-finger hold 1000ms -> NO menu (timeout cancels the tap: proof)
+ *  6. GTK scroll: populated folder window, 1-finger drag (native touch
+ *     scroll) + 2-finger drag (wheel injection), pixel before/after
+ *  7. GTK text selection best-effort: Ctrl+L location entry, typed text,
+ *     1-finger hold on the text -> pixel evidence of selection UI
+ *  8. legacy xterm (HELD proot process: backgrounded guest children die
+ *     with their exec session, runs 1a73f8f/40844558720): native 1-finger
+ *     drag selection, 2-finger tap -> button-3 selection extend, 2-finger
+ *     drag -> wheel scrollback scroll; all pixel evidence
+ *
+ * The guest-side window watcher was REMOVED: backgrounded proot children
+ * die with their exec session, so its zero-count logs were void evidence.
+ * Window attribution uses synchronous before/after root-window diffs.
  */
 @RunWith(AndroidJUnit4::class)
 class LdoaInputHarnessTest {
@@ -92,7 +109,7 @@ class LdoaInputHarnessTest {
         val readyDeadline = System.currentTimeMillis() + 240_000
         var shellWins = 0
         while (System.currentTimeMillis() < readyDeadline) {
-            shellWins = xwinEarly("xwininfo -root -tree 2>/dev/null | grep -ci 'gnome-shell' || true")
+            shellWins = xwinEarly("xwininfo -root -tree 2>/dev/null | grep -ciE 'gnome.shell|gnome-shell' || true")
                 .trim().toIntOrNull() ?: 0
             if (shellWins >= 3) break
             Thread.sleep(10_000)
@@ -108,6 +125,10 @@ class LdoaInputHarnessTest {
             " shell-name-owner=" + xwinEarly("dbus-send --session --dest=org.freedesktop.DBus --print-reply /org/freedesktop/DBus org.freedesktop.DBus.NameHasOwner string:org.gnome.Shell 2>/dev/null | tail -1 || true").trim() +
             " a11y-bus=" + xwinEarly("dbus-send --session --dest=org.freedesktop.DBus --print-reply /org/freedesktop/DBus org.freedesktop.DBus.NameHasOwner string:org.a11y.Bus 2>/dev/null | tail -1 || true").trim())
         Log.i(TAG, "harness: launch-mode=" + (if (logFile.isFile && logFile.readText().contains("falling back to bare gnome-shell")) "gnome-session exit=1 fallback -> bare gnome-shell --x11" else "gnome-session"))
+        Log.i(TAG, "harness: gtk-version=" + xwinEarly("dpkg -l libgtk-4-1 2>/dev/null | tail -1 || true").trim())
+        Log.i(TAG, "harness: gtk-settings-ini gtk4=[" + xwinEarly("cat /root/.config/gtk-4.0/settings.ini 2>/dev/null || echo absent").replace("\n", " | ") +
+            "] gtk3=[" + xwinEarly("cat /root/.config/gtk-3.0/settings.ini 2>/dev/null || echo absent").replace("\n", " | ") + "]")
+        Log.i(TAG, "harness: gtk4-query-settings=" + xwinEarly("gtk4-query-settings 2>/dev/null | grep -i long-press || echo unavailable").trim())
 
         fun xwin(cmd: String): String {
             val r = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c", "export DISPLAY=:0; " + cmd),
@@ -225,47 +246,15 @@ class LdoaInputHarnessTest {
         Log.i(TAG, "harness: hold target guest($bgGuestX,$bgGuestY) -> dev $bgTarget")
         Shot.save("h0-target")
 
-        // Guest-side watcher (ms timestamps, independent of proot-exec
-        // latency). Backgrounded proot children died with their exec
-        // session in run 1a73f8f, so arm 0 VALIDATES survival before any
-        // arm trusts it. setsid+nohup detach from the exec session.
-        fun watchStart(arm: String): Long {
-            xwin("xwininfo -root -children | awk '{print ${'$'}1}' | grep '^0x' | sort > /tmp/base-" + arm + ".ids; rm -f /tmp/watch-" + arm + ".log; " +
-                "(setsid nohup /bin/sh -c 'for i in ${'$'}(seq 1 90); do xwininfo -root -children | awk \"{print \\\"${'$'}1\"}\" | grep ^0x | sort > /tmp/now-" + arm + ".ids; " +
-                "comm -13 /tmp/base-" + arm + ".ids /tmp/now-" + arm + ".ids | while read id; do g=${'$'}(xwininfo -id ${'$'}id | grep -E \"Map State|Width:|Height:|Absolute upper-left\" | tr \"\\n\" \" \"); echo \"${'$'}(date +%s%3N) CREATE ${'$'}id ${'$'}g\" >> /tmp/watch-" + arm + ".log; done; " +
-                "comm -23 /tmp/base-" + arm + ".ids /tmp/now-" + arm + ".ids | while read id; do echo \"${'$'}(date +%s%3N) DESTROY ${'$'}id\" >> /tmp/watch-" + arm + ".log; done; " +
-                "mv /tmp/now-" + arm + ".ids /tmp/base-" + arm + ".ids; sleep 0.2; done' > /dev/null 2>&1 &)")
-            return System.currentTimeMillis()
-        }
-        fun watchStop(arm: String): String {
-            Thread.sleep(500)
-            xwin("pkill -f 'seq 1 90' 2>/dev/null || true")
-            Thread.sleep(300)
-            return xwin("cat /tmp/watch-" + arm + ".log 2>/dev/null || true")
-        }
-
-        // Arm 0: watcher survival validation with REAL window churn (an
-        // xterm maps and exits): if the backgrounded watcher died with its
-        // proot exec session, the CREATE/DESTROY pair never gets logged and
-        // the arms below rely on the pixel series instead.
-        watchStart("arm0")
-        Thread.sleep(1_000)
-        xwin("(setsid nohup xterm -e /bin/true > /dev/null 2>&1 &)")
-        Thread.sleep(4_000)
-        val arm0 = watchStop("arm0")
-        val watcherAlive = arm0.contains("CREATE")
-        Log.i(TAG, "harness: arm0 watcher-survival=" + (if (watcherAlive) "ALIVE" else "DEAD") +
-            " log=[" + arm0.trim().replace("\n", " || ") + "]" +
-            (if (watcherAlive) "" else " - during-hold attribution falls back to the pixel series"))
-
         val prefs = ctx.getSharedPreferences(ctx.packageName + "_preferences", android.content.Context.MODE_PRIVATE)
+        Log.i(TAG, "harness: pref read-back ldoa_twofinger_tap_rightclick=" +
+            prefs.getBoolean("ldoa_twofinger_tap_rightclick", true) +
+            " ldoa_twofinger_scroll=" + prefs.getBoolean("ldoa_twofinger_scroll", true))
+
         fun arm(arm: String, label: String, act: () -> Unit) {
             Log.i(TAG, "harness: arm=" + arm + " " + label + " START")
             val baseIds = rootChildIds()
-            val w0 = watchStart(arm)
             act()
-            val watchLog = watchStop(arm)
-            Log.i(TAG, "harness: arm=" + arm + " watcher wallStart=" + w0 + " events:\n" + watchLog.trim())
             val postNew = (rootChildIds() - baseIds).sorted()
             Log.i(TAG, "harness: arm=" + arm + " post-arm new windows=" + postNew +
                 postNew.map { " [" + it + "] " + geomLine(it) })
@@ -279,6 +268,130 @@ class LdoaInputHarnessTest {
             Thread.sleep(1_500)
         }
 
+        // ---- MotionEvent helpers (multi-pointer sequences) ----
+        fun props(id: Int) = android.view.MotionEvent.PointerProperties().apply {
+            this.id = id; toolType = android.view.MotionEvent.TOOL_TYPE_FINGER
+        }
+        fun coords(x: Float, y: Float) = android.view.MotionEvent.PointerCoords().apply {
+            this.x = x; this.y = y; pressure = 1f; size = 1f
+        }
+        fun ev1(down: Long, action: Int, x: Float, y: Float) = android.view.MotionEvent.obtain(down,
+            android.os.SystemClock.uptimeMillis(), action, 1,
+            arrayOf(props(0)), arrayOf(coords(x, y)), 0, 0, 1f, 1f, 0, 0,
+            android.view.InputDevice.SOURCE_TOUCHSCREEN, 0)
+        fun ev2(down: Long, action: Int, actionIndex: Int,
+                x0: Float, y0: Float, x1: Float, y1: Float): android.view.MotionEvent {
+            val act = if (action == android.view.MotionEvent.ACTION_POINTER_DOWN ||
+                action == android.view.MotionEvent.ACTION_POINTER_UP)
+                action or (actionIndex shl android.view.MotionEvent.ACTION_POINTER_INDEX_SHIFT) else action
+            return android.view.MotionEvent.obtain(down,
+                android.os.SystemClock.uptimeMillis(), act, 2,
+                arrayOf(props(0), props(1)), arrayOf(coords(x0, y0), coords(x1, y1)), 0, 0, 1f, 1f, 0, 0,
+                android.view.InputDevice.SOURCE_TOUCHSCREEN, 0)
+        }
+        fun send(e: android.view.MotionEvent) { try { instr.sendPointerSync(e) } finally { e.recycle() } }
+        fun tap(x: Float, y: Float) {
+            val down = android.os.SystemClock.uptimeMillis()
+            send(ev1(down, android.view.MotionEvent.ACTION_DOWN, x, y))
+            Thread.sleep(60)
+            send(ev1(down, android.view.MotionEvent.ACTION_UP, x, y))
+        }
+        fun oneFingerHold(x: Float, y: Float, holdMs: Long, tag: String, baseIds: Set<String>) {
+            val down = android.os.SystemClock.uptimeMillis()
+            Log.i(TAG, "harness: " + tag + " DOWN at wall=" + System.currentTimeMillis())
+            send(ev1(down, android.view.MotionEvent.ACTION_DOWN, x, y))
+            Thread.sleep(holdMs)
+            Shot.save("h-" + tag + "-during-hold")
+            val duringNew = (rootChildIds() - baseIds).sorted()
+            Log.i(TAG, "harness: " + tag + " during-hold new windows=" + duringNew +
+                duringNew.map { " [" + it + "] " + geomLine(it) })
+            send(ev1(down, android.view.MotionEvent.ACTION_UP, x, y))
+            Log.i(TAG, "harness: " + tag + " UP at wall=" + System.currentTimeMillis())
+        }
+        fun twoFingerTap(x: Float, y: Float, tag: String) {
+            val down = android.os.SystemClock.uptimeMillis()
+            Log.i(TAG, "harness: " + tag + " 2ftap DOWN at wall=" + System.currentTimeMillis())
+            send(ev1(down, android.view.MotionEvent.ACTION_DOWN, x, y))
+            Thread.sleep(60)
+            send(ev2(down, android.view.MotionEvent.ACTION_POINTER_DOWN, 1, x, y, x + 60f, y))
+            Thread.sleep(120)
+            send(ev2(down, android.view.MotionEvent.ACTION_POINTER_UP, 1, x, y, x + 60f, y))
+            Thread.sleep(40)
+            send(ev1(down, android.view.MotionEvent.ACTION_UP, x, y))
+            Log.i(TAG, "harness: " + tag + " 2ftap UP at wall=" + System.currentTimeMillis())
+        }
+        fun twoFingerDrag(x: Float, y: Float, dy: Float, tag: String) {
+            val down = android.os.SystemClock.uptimeMillis()
+            Log.i(TAG, "harness: " + tag + " 2fdrag DOWN at wall=" + System.currentTimeMillis())
+            send(ev1(down, android.view.MotionEvent.ACTION_DOWN, x, y))
+            Thread.sleep(80)
+            send(ev2(down, android.view.MotionEvent.ACTION_POINTER_DOWN, 1, x, y, x + 60f, y))
+            Thread.sleep(80)
+            val steps = 8
+            for (i in 1..steps) {
+                send(ev2(down, android.view.MotionEvent.ACTION_MOVE, 0,
+                    x, y + dy * i / steps, x + 60f, y + dy * i / steps))
+                Thread.sleep(50)
+            }
+            send(ev2(down, android.view.MotionEvent.ACTION_POINTER_UP, 1, x, y + dy, x + 60f, y + dy))
+            Thread.sleep(40)
+            send(ev1(down, android.view.MotionEvent.ACTION_UP, x, y + dy))
+            Log.i(TAG, "harness: " + tag + " 2fdrag UP at wall=" + System.currentTimeMillis())
+        }
+        fun twoFingerHold(x: Float, y: Float, holdMs: Long, tag: String) {
+            val down = android.os.SystemClock.uptimeMillis()
+            Log.i(TAG, "harness: " + tag + " 2fhold DOWN at wall=" + System.currentTimeMillis())
+            send(ev1(down, android.view.MotionEvent.ACTION_DOWN, x, y))
+            Thread.sleep(60)
+            send(ev2(down, android.view.MotionEvent.ACTION_POINTER_DOWN, 1, x, y, x + 60f, y))
+            Thread.sleep(holdMs)
+            send(ev2(down, android.view.MotionEvent.ACTION_POINTER_UP, 1, x, y, x + 60f, y))
+            Thread.sleep(40)
+            send(ev1(down, android.view.MotionEvent.ACTION_UP, x, y))
+            Log.i(TAG, "harness: " + tag + " 2fhold UP at wall=" + System.currentTimeMillis())
+        }
+        fun oneFingerDrag(x: Float, y: Float, dx: Float, dy: Float, tag: String) {
+            val down = android.os.SystemClock.uptimeMillis()
+            Log.i(TAG, "harness: " + tag + " 1fdrag DOWN at wall=" + System.currentTimeMillis())
+            send(ev1(down, android.view.MotionEvent.ACTION_DOWN, x, y))
+            val steps = 10
+            for (i in 1..steps) {
+                send(ev1(down, android.view.MotionEvent.ACTION_MOVE, x + dx * i / steps, y + dy * i / steps))
+                Thread.sleep(40)
+            }
+            send(ev1(down, android.view.MotionEvent.ACTION_UP, x + dx, y + dy))
+            Log.i(TAG, "harness: " + tag + " 1fdrag UP at wall=" + System.currentTimeMillis())
+        }
+        fun keyEvent(code: Int, action: Int) {
+            val now = android.os.SystemClock.uptimeMillis()
+            instr.sendKeySync(android.view.KeyEvent(now, now, action, code, 0))
+        }
+        fun typeKeys(codes: List<Int>) {
+            for (c in codes) {
+                keyEvent(c, android.view.KeyEvent.ACTION_DOWN)
+                keyEvent(c, android.view.KeyEvent.ACTION_UP)
+                Thread.sleep(100)
+            }
+        }
+        fun winGeom(id: String): NauWin? {
+            val st = xwin("xwininfo -id " + id + " -stats")
+            val map = Regex("Map State: (\\w+)").find(st)?.groupValues?.get(1)
+            val w = Regex("Width: (\\d+)").find(st)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            val h = Regex("Height: (\\d+)").find(st)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            if (map != "IsViewable") return null
+            val x = Regex("Absolute upper-left X:\\s+(-?\\d+)").find(st)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            val y = Regex("Absolute upper-left Y:\\s+(-?\\d+)").find(st)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            return NauWin(id, x, y, w, h)
+        }
+        fun menuCheck(tag: String, pre: Set<String>, moment: String) {
+            val newWins = (rootChildIds() - pre).sorted()
+            Log.i(TAG, "harness: " + tag + " " + moment + " new windows=" + newWins +
+                newWins.map { " [" + it + "] " + geomLine(it) })
+        }
+
+        val bx = bgTarget!!.first.toFloat()
+        val by = bgTarget.second.toFloat()
+
         // Arm 1: XTEST sanity - a synthetic button-3 through XTEST must open
         // a visible menu (reference behavior, run 1a73f8f pixel-proven).
         arm("arm1", "XTEST sanity xdotool click 3") {
@@ -289,72 +402,217 @@ class LdoaInputHarnessTest {
         }
         escClean()
 
-        // Arm 2: toggle OFF - our injection disabled; any menu = NATIVE
-        // GTK press-and-hold. Pref is read live per event by
-        // TouchInputHandler (line 433), no restart needed.
-        prefs.edit().putBoolean("ldoa_longpress_rightclick", false).commit()
-        Log.i(TAG, "harness: toggle ldoa_longpress_rightclick=false committed")
-        arm("arm2", "toggle OFF hold 900ms (native probe)") {
-            val down = android.os.SystemClock.uptimeMillis()
-            Log.i(TAG, "harness: arm2 DOWN at wall=" + System.currentTimeMillis())
-            val props = android.view.MotionEvent.PointerProperties().apply {
-                id = 0; toolType = android.view.MotionEvent.TOOL_TYPE_FINGER
-            }
-            val coords = android.view.MotionEvent.PointerCoords().apply {
-                x = bgTarget!!.first.toFloat(); y = bgTarget.second.toFloat(); pressure = 1f; size = 1f
-            }
-            fun ev(action: Int) = android.view.MotionEvent.obtain(down,
-                android.os.SystemClock.uptimeMillis(), action, 1,
-                arrayOf(props), arrayOf(coords), 0, 0, 1f, 1f, 0, 0,
-                android.view.InputDevice.SOURCE_TOUCHSCREEN, 0)
-            var e = ev(android.view.MotionEvent.ACTION_DOWN)
-            try { instr.sendPointerSync(e) } finally { e.recycle() }
-            Thread.sleep(900)
-            Shot.save("h-arm2-during-hold")
-            e = ev(android.view.MotionEvent.ACTION_UP)
-            try { instr.sendPointerSync(e) } finally { e.recycle() }
-            Log.i(TAG, "harness: arm2 UP at wall=" + System.currentTimeMillis())
+        // Arm 2: native 1-finger hold. No injection path exists for a
+        // one-finger hold anymore, so any menu is NATIVE GTK press-and-hold.
+        // Expected model behavior: menu appears DURING the hold (native
+        // timeout) and persists after release (a real menu, not a flash).
+        arm("arm2", "native 1-finger hold 1200ms (no injection exists for 1-finger hold)") {
+            val pre = rootChildIds()
+            oneFingerHold(bx, by, 1_200, "arm2", pre)
             Thread.sleep(500)
             Shot.save("h-arm2-at-up-plus-500ms")
-            Thread.sleep(3_000)
-            Shot.save("h-arm2-at-up-plus-3s5")
-            Thread.sleep(6_000)
+            menuCheck("arm2", pre, "at up+0.5s")
+            Thread.sleep(4_500)
+            Shot.save("h-arm2-at-up-plus-5s")
+            menuCheck("arm2", pre, "at up+5s (persistence)")
         }
         escClean()
 
-        // Arm 3: toggle ON - hold; menu window timing/Map State/lifetime vs
-        // arm 2 attributes native vs injected.
-        prefs.edit().putBoolean("ldoa_longpress_rightclick", true).commit()
-        Log.i(TAG, "harness: toggle ldoa_longpress_rightclick=true committed")
-        arm("arm3", "toggle ON hold 900ms (injection arm)") {
-            val down = android.os.SystemClock.uptimeMillis()
-            Log.i(TAG, "harness: arm3 DOWN at wall=" + System.currentTimeMillis())
-            val props = android.view.MotionEvent.PointerProperties().apply {
-                id = 0; toolType = android.view.MotionEvent.TOOL_TYPE_FINGER
-            }
-            val coords = android.view.MotionEvent.PointerCoords().apply {
-                x = bgTarget!!.first.toFloat(); y = bgTarget.second.toFloat(); pressure = 1f; size = 1f
-            }
-            fun ev(action: Int) = android.view.MotionEvent.obtain(down,
-                android.os.SystemClock.uptimeMillis(), action, 1,
-                arrayOf(props), arrayOf(coords), 0, 0, 1f, 1f, 0, 0,
-                android.view.InputDevice.SOURCE_TOUCHSCREEN, 0)
-            var e = ev(android.view.MotionEvent.ACTION_DOWN)
-            try { instr.sendPointerSync(e) } finally { e.recycle() }
-            Thread.sleep(900)
-            Shot.save("h-arm3-during-hold")
-            e = ev(android.view.MotionEvent.ACTION_UP)
-            try { instr.sendPointerSync(e) } finally { e.recycle() }
-            Log.i(TAG, "harness: arm3 UP at wall=" + System.currentTimeMillis())
-            Thread.sleep(500)
-            Shot.save("h-arm3-at-up-plus-500ms")
-            Thread.sleep(3_000)
-            Shot.save("h-arm3-at-up-plus-3s5")
-            Thread.sleep(6_000)
+        // Arm 3: 2-finger tap -> injected right-click. Expect exactly one
+        // menu (no native 2-finger-tap menu exists in GTK) that PERSISTS
+        // (the arm3 run-40844558720 failure mode was a menu that flashed
+        // and vanished under the old duplicated injection).
+        arm("arm3", "2-finger tap -> injected right-click, persistence") {
+            val pre = rootChildIds()
+            twoFingerTap(bx, by, "arm3")
+            Thread.sleep(1_000)
+            Shot.save("h-arm3-at-tap-plus-1s")
+            menuCheck("arm3", pre, "at tap+1s")
+            Thread.sleep(5_000)
+            Shot.save("h-arm3-at-tap-plus-6s")
+            menuCheck("arm3", pre, "at tap+6s (persistence)")
         }
         escClean()
+
+        // Arm 4: 2-finger DRAG must NOT fire the tap right-click (movement
+        // cancels). Any new menu-like window here = spurious right-click.
+        arm("arm4", "2-finger drag cancel-safety (no menu may appear)") {
+            val pre = rootChildIds()
+            twoFingerDrag(bx, by, -300f, "arm4")
+            Thread.sleep(2_000)
+            val spurious = (rootChildIds() - pre).filter { plausibleMenuGeom(it) }
+            Log.i(TAG, "harness: arm4 cancel-check spurious=" + spurious +
+                if (spurious.isEmpty()) " CANCEL-OK" else " SPURIOUS-RIGHT-CLICK")
+            Shot.save("h-arm4-after-drag")
+        }
+        escClean()
+
+        // Arm 5: 2-finger HOLD (both fingers down 1000ms, no movement) must
+        // NOT fire (350ms tap timeout cancels).
+        arm("arm5", "2-finger hold cancel-safety (no menu may appear)") {
+            val pre = rootChildIds()
+            twoFingerHold(bx, by, 1_000, "arm5")
+            Thread.sleep(2_000)
+            val spurious = (rootChildIds() - pre).filter { plausibleMenuGeom(it) }
+            Log.i(TAG, "harness: arm5 cancel-check spurious=" + spurious +
+                if (spurious.isEmpty()) " CANCEL-OK" else " SPURIOUS-RIGHT-CLICK")
+            Shot.save("h-arm5-after-hold")
+        }
+        escClean()
+
+        // Arm 6: GTK scroll outcomes in a populated folder. The new window
+        // is opened via the RUNNING nautilus instance (GApplication dbus
+        // handoff), so it survives this runGuest call returning.
+        arm("arm6", "GTK scroll: 1-finger native + 2-finger wheel, populated folder") {
+            Log.i(TAG, "harness: arm6 populate=" + xwin(
+                "mkdir -p /root/scrolltest && for i in ${'$'}(seq 1 300); do : > /root/scrolltest/file-${'$'}i.txt; done && echo scrolltest-ready").trim())
+            val preNau = windowIds("nautilus").toSet()
+            xwin("timeout 20 nautilus /root/scrolltest 2>&1 || true")
+            var sw: NauWin? = null
+            val swDeadline = System.currentTimeMillis() + 30_000
+            while (System.currentTimeMillis() < swDeadline && sw == null) {
+                val newId = (windowIds("nautilus").toSet() - preNau).firstOrNull()
+                if (newId != null) sw = winGeom(newId)
+                if (sw == null) Thread.sleep(2_000)
+            }
+            Log.i(TAG, "harness: arm6 scroll window=" + sw)
+            if (sw != null) {
+                val c = mapToDevice(sw.x + sw.w / 2, sw.y + sw.h / 2)
+                if (c != null) {
+                    Thread.sleep(3_000)
+                    Shot.save("h-arm6-before-scroll")
+                    oneFingerDrag(c.first.toFloat(), c.second.toFloat(), 0f, -400f, "arm6-1f")
+                    Thread.sleep(1_500)
+                    Shot.save("h-arm6-after-1f-drag")
+                    twoFingerDrag(c.first.toFloat(), c.second.toFloat(), 400f, "arm6-2f")
+                    Thread.sleep(1_500)
+                    Shot.save("h-arm6-after-2f-drag")
+                } else Log.i(TAG, "harness: arm6 no device mapping for scroll window")
+                xwin("xdotool windowclose " + sw.id + " 2>/dev/null || true")
+                Thread.sleep(1_500)
+            }
+        }
+        escClean()
+
+        // Arm 7: GTK text selection, best-effort. Ctrl+L opens the Files
+        // location entry (explicit modifier down/up events: meta-only
+        // KeyEvents never press X modifiers on lorie); type text, then a
+        // 1-finger hold on the typed text. Native GTK entry press-and-hold
+        // should show selection UI. Pixel evidence only, position of the
+        // entry is estimated from the header bar.
+        arm("arm7", "GTK text selection best-effort (location entry)") {
+            tap(bx, by)  // ensure the Files window has focus
+            Thread.sleep(800)
+            keyEvent(android.view.KeyEvent.KEYCODE_CTRL_LEFT, android.view.KeyEvent.ACTION_DOWN)
+            keyEvent(android.view.KeyEvent.KEYCODE_L, android.view.KeyEvent.ACTION_DOWN)
+            keyEvent(android.view.KeyEvent.KEYCODE_L, android.view.KeyEvent.ACTION_UP)
+            keyEvent(android.view.KeyEvent.KEYCODE_CTRL_LEFT, android.view.KeyEvent.ACTION_UP)
+            Thread.sleep(1_000)
+            typeKeys(listOf(android.view.KeyEvent.KEYCODE_E, android.view.KeyEvent.KEYCODE_T,
+                android.view.KeyEvent.KEYCODE_C))
+            Thread.sleep(800)
+            Shot.save("h-arm7-entry-typed")
+            val entryY = nw!!.y + fe[2] + 24
+            val entryTarget = mapToDevice(bgGuestX, entryY)
+            Log.i(TAG, "harness: arm7 entry target guest(" + bgGuestX + "," + entryY + ") -> dev " + entryTarget)
+            if (entryTarget != null) {
+                val pre = rootChildIds()
+                oneFingerHold(entryTarget.first.toFloat(), entryTarget.second.toFloat(), 1_200, "arm7", pre)
+                Thread.sleep(1_000)
+                Shot.save("h-arm7-after-hold")
+                menuCheck("arm7", pre, "after entry hold")
+            }
+        }
+        escClean()
+
+        // Arm 8: legacy client (xterm) via a HELD proot process - a
+        // backgrounded launch would die with its runGuest exec session.
+        arm("arm8", "legacy xterm: drag selection, 2ftap extend, 2fdrag scroll") {
+            val nd = ctx.applicationInfo.nativeLibraryDir
+            val xtermLog = File(ctx.filesDir, "guest-xterm.log")
+            val pb = ProcessBuilder(listOf(
+                File(nd, "libproot.so").absolutePath, "--link2symlink", "-0",
+                "-r", rootfs.absolutePath,
+                "-b", "/dev", "-b", "/proc", "-b", "/sys",
+                "-b", XServer.socketDir(ctx).absolutePath + ":/tmp/.X11-unix",
+                "-w", "/root",
+                "/usr/bin/xterm", "-fa", "Monospace", "-fs", "14", "-geometry", "100x30+80+80"))
+            pb.environment().putAll(mapOf(
+                "PROOT_LOADER" to File(nd, "libproot_loader.so").absolutePath,
+                "PROOT_LOADER_32" to File(nd, "libproot_loader32.so").absolutePath,
+                "LD_LIBRARY_PATH" to nd,
+                "HOME" to "/root",
+                "DISPLAY" to ":0",
+                "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "PROOT_TMP_DIR" to Proot.prootTmpDir(ctx).absolutePath,
+                "TMPDIR" to "/tmp"))
+            pb.redirectErrorStream(true)
+            pb.redirectOutput(ProcessBuilder.Redirect.appendTo(xtermLog))
+            val xtermProc = pb.start()
+            Log.i(TAG, "harness: arm8 xterm held process launched")
+            try {
+                var xt: NauWin? = null
+                val xtDeadline = System.currentTimeMillis() + 45_000
+                while (System.currentTimeMillis() < xtDeadline && xt == null) {
+                    for (id in windowIds("xterm")) {
+                        val g = winGeom(id)
+                        if (g != null && g.w > 200 && g.h > 150) { xt = g; break }
+                    }
+                    if (xt == null) Thread.sleep(2_000)
+                }
+                Log.i(TAG, "harness: arm8 xterm window=" + xt)
+                if (xt != null) {
+                    val xc = mapToDevice(xt.x + xt.w / 2, xt.y + xt.h / 2)
+                    if (xc != null) {
+                        tap(xc.first.toFloat(), xc.second.toFloat())  // focus
+                        Thread.sleep(1_000)
+                        typeKeys(listOf(
+                            android.view.KeyEvent.KEYCODE_S, android.view.KeyEvent.KEYCODE_E,
+                            android.view.KeyEvent.KEYCODE_Q, android.view.KeyEvent.KEYCODE_SPACE,
+                            android.view.KeyEvent.KEYCODE_1, android.view.KeyEvent.KEYCODE_SPACE,
+                            android.view.KeyEvent.KEYCODE_3, android.view.KeyEvent.KEYCODE_0,
+                            android.view.KeyEvent.KEYCODE_0, android.view.KeyEvent.KEYCODE_ENTER))
+                        Thread.sleep(2_000)
+                        Shot.save("h-arm8-filled")
+                        // (a) native 1-finger drag = xterm text selection
+                        val s0 = mapToDevice(xt.x + 30, xt.y + 60)
+                        val s1 = mapToDevice(xt.x + xt.w / 2, xt.y + 60)
+                        if (s0 != null && s1 != null) {
+                            val down = android.os.SystemClock.uptimeMillis()
+                            send(ev1(down, android.view.MotionEvent.ACTION_DOWN,
+                                s0.first.toFloat(), s0.second.toFloat()))
+                            for (i in 1..10) {
+                                send(ev1(down, android.view.MotionEvent.ACTION_MOVE,
+                                    s0.first + (s1.first - s0.first) * i / 10f,
+                                    s0.second.toFloat()))
+                                Thread.sleep(40)
+                            }
+                            send(ev1(down, android.view.MotionEvent.ACTION_UP,
+                                s1.first.toFloat(), s1.second.toFloat()))
+                            Thread.sleep(800)
+                            Shot.save("h-arm8-drag-selection")
+                        }
+                        // (b) 2-finger tap -> injected button-3 = extend selection
+                        twoFingerTap(xc.first.toFloat(), (xc.second + 120).toFloat(), "arm8")
+                        Thread.sleep(1_000)
+                        Shot.save("h-arm8-2ftap-extend")
+                        // (c) 2-finger drag -> wheel -> scrollback scroll
+                        twoFingerDrag(xc.first.toFloat(), xc.second.toFloat(), 300f, "arm8")
+                        Thread.sleep(1_000)
+                        Shot.save("h-arm8-2fdrag-scroll")
+                    } else Log.i(TAG, "harness: arm8 no device mapping for xterm")
+                } else Log.i(TAG, "harness: arm8 xterm window never appeared; log tail: " +
+                    (if (xtermLog.isFile) xtermLog.readText().takeLast(300) else "no log"))
+            } finally {
+                xtermProc.destroy()
+                Log.i(TAG, "harness: arm8 held xterm process destroyed")
+            }
+        }
+        escClean()
+
         Log.i(TAG, "harness: HARNESS-EVIDENCE-ONLY - no gesture qualification asserted; " +
-            "attribute via arm2 (native) vs arm3 (injection) window create timing vs DOWN/UP wall times " +
-            "and LDOA-HOLD-FIRE logcat lines; arm1 proves menus can be visible at all")
+            "arm2=native-hold, arm3=2ftap injection+persistence, arm4/arm5=drag/hold cancel-safety, " +
+            "arm6=GTK scroll (pixel), arm7=text selection (best-effort pixel), arm8=legacy xterm; " +
+            "LDOA-2FTAP-FIRE logcat lines corroborate injection in arm3/arm8")
     }
 }

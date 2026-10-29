@@ -55,9 +55,12 @@ for (rel in listOf("third_party/termux-x11/lorie/build.gradle", "third_party/ter
     }
 }
 
-// Vendored patch (LDOA gestures): direct-touch stationary hold 500ms+ =
-// right-click injected on release (movement keeps the sequence a native
-// drag, so press-hold-drag works) and two-finger drag = wheel scroll, each
+// Vendored patch (LDOA gestures, native-first model 2026-10-29):
+// one-finger gestures stay fully native (tap = click, drag = scroll /
+// window-move / selection, hold = toolkit press-and-hold where supported);
+// a two-finger TAP (second finger down+up within 350ms, both fingers under
+// 30px slop) injects a right-click at the midpoint, and two-finger drag =
+// wheel scroll for legacy clients, each
 // behind an app-level toggle read from the app's default SharedPreferences
 // (defaults on, user-approved gesture map 2026-10-29). InputEventSender
 // gains endAllTouches(x, y) so a scroll takeover ends the touch sequence at
@@ -75,7 +78,7 @@ run {
 
     /**
      * LDOA: end every currently tracked touch pointer. Used when an
-     * Android-side gesture (long-press right-click, two-finger scroll)
+     * Android-side gesture (two-finger-tap right-click, two-finger scroll)
      * takes over a direct-touch sequence, so the X client sees a clean
      * sequence end instead of a stuck pointer.
      */
@@ -100,13 +103,15 @@ run {
     /** LDOA: true while an Android-side gesture (two-finger scroll) has
      * taken over the current direct-touch sequence. */
     private boolean mSuppressDirectTouch;
-    /** LDOA hold-release right-click bookkeeping: a stationary one-finger
-     * hold of 500ms+ injects a right-click on release; any movement turns
-     * the sequence into a native drag and cancels the injection, so
-     * press-hold-drag keeps working everywhere. */
-    private long mHoldDownTime;
-    private float mHoldDownX, mHoldDownY;
-    private boolean mHoldMoved;
+    /** LDOA two-finger-tap right-click bookkeeping: a two-finger tap
+     * (second finger down+up within 350ms, both fingers under 30px slop)
+     * injects a right-click at the midpoint; movement or a longer hold
+     * keeps the sequence native (scroll/pinch) and never fires. One-finger
+     * hold is deliberately NOT injected: GTK press-and-hold owns it where
+     * supported, and duplicating it raced the native menu (run 40844558720). */
+    private long mTwoTapDownTime;
+    private float mTwoTapX1, mTwoTapY1, mTwoTapX2, mTwoTapY2;
+    private boolean mTwoTapMoved;
 """
             val text = f.readText()
             if (orig in text && patched !in text) f.writeText(text.replace(orig, patched))
@@ -135,10 +140,6 @@ run {
             val patched = """                case MotionEvent.ACTION_DOWN:
                     mSuppressCursorMovement = false;
                     mSuppressDirectTouch = false;
-                    mHoldDownTime = event.getEventTime();
-                    mHoldDownX = event.getX();
-                    mHoldDownY = event.getY();
-                    mHoldMoved = false;
 """
             val text = f.readText()
             if (orig in text && patched !in text) f.writeText(text.replace(orig, patched))
@@ -196,39 +197,62 @@ run {
 """
             val patched = """                case MotionEvent.ACTION_POINTER_DOWN:
                     mTotalMotionY = 0;
-                    // LDOA: a second finger cancels hold-release right-click.
-                    mHoldMoved = true;
+                    // LDOA: a second finger's down opens the two-finger-tap
+                    // window; anything but exactly two fingers cancels it.
+                    if (event.getPointerCount() == 2) {
+                        int tapAi = event.getActionIndex();
+                        int tapOi = tapAi == 0 ? 1 : 0;
+                        mTwoTapDownTime = event.getEventTime();
+                        mTwoTapX1 = event.getX(tapOi);
+                        mTwoTapY1 = event.getY(tapOi);
+                        mTwoTapX2 = event.getX(tapAi);
+                        mTwoTapY2 = event.getY(tapAi);
+                        mTwoTapMoved = false;
+                    } else {
+                        mTwoTapDownTime = 0L;
+                    }
                     break;
 
                 case MotionEvent.ACTION_MOVE:
-                    // LDOA hold tracking: movement beyond slop makes this a
-                    // native drag; no right-click fires on release.
-                    if (mHoldDownTime != 0L
-                            && (Math.abs(event.getX() - mHoldDownX) > 30f
-                                || Math.abs(event.getY() - mHoldDownY) > 30f))
-                        mHoldMoved = true;
+                    // LDOA two-finger-tap tracking: either finger moving
+                    // beyond slop makes this a native scroll/pinch; no
+                    // right-click fires on lift.
+                    if (mTwoTapDownTime != 0L && event.getPointerCount() >= 2
+                            && (Math.abs(event.getX(0) - mTwoTapX1) > 30f
+                                || Math.abs(event.getY(0) - mTwoTapY1) > 30f
+                                || Math.abs(event.getX(1) - mTwoTapX2) > 30f
+                                || Math.abs(event.getY(1) - mTwoTapY2) > 30f))
+                        mTwoTapMoved = true;
+                    break;
+
+                case MotionEvent.ACTION_POINTER_UP:
+                    // LDOA direct touch: a two-finger tap (second finger
+                    // lifted within 350ms, both fingers under 30px slop)
+                    // becomes a right-click at the midpoint. Moved or held
+                    // two-finger sequences stay native (scroll/pinch) and
+                    // never fire. One-finger hold is NOT injected: GTK's
+                    // native press-and-hold owns that gesture where the
+                    // toolkit supports it, and duplicating it raced the
+                    // native menu (run 40844558720 arm3). The raw taps are
+                    // forwarded all along; their focus/select side effect
+                    // mirrors a real touchscreen's.
+                    if (mTwoTapDownTime != 0L) {
+                        if (!mTwoTapMoved && event.getEventTime() - mTwoTapDownTime <= 350
+                                && mInputStrategy instanceof InputStrategyInterface.NullInputStrategy
+                                && directTouchPrefs(mActivity).getBoolean("ldoa_twofinger_tap_rightclick", true)) {
+                            mRenderData.mapScreenPoint((mTwoTapX1 + mTwoTapX2) / 2f, (mTwoTapY1 + mTwoTapY2) / 2f, mappedPoint);
+                            mInjector.sendCursorMove(mappedPoint[0], mappedPoint[1], false);
+                            mInjector.sendMouseClick(InputStub.BUTTON_RIGHT, false);
+                            android.util.Log.i("LorieTouch", "LDOA-2FTAP-FIRE right-click guest("
+                                + (int) mappedPoint[0] + "," + (int) mappedPoint[1] + ") dtMs="
+                                + (event.getEventTime() - mTwoTapDownTime));
+                        }
+                        mTwoTapDownTime = 0L;
+                    }
                     break;
 
                 case MotionEvent.ACTION_UP:
-                    // LDOA direct touch: a stationary one-finger hold of
-                    // half a second or longer becomes a right-click at the
-                    // held point, injected on release. A moved hold stays a
-                    // native drag (press-hold-drag keeps working). The raw
-                    // tap was forwarded all along; its select side effect
-                    // mirrors a real right-click's.
-                    if (mHoldDownTime != 0L) {
-                        if (!mHoldMoved && event.getEventTime() - mHoldDownTime >= 500
-                                && mInputStrategy instanceof InputStrategyInterface.NullInputStrategy
-                                && directTouchPrefs(mActivity).getBoolean("ldoa_longpress_rightclick", true)) {
-                            mRenderData.mapScreenPoint(mHoldDownX, mHoldDownY, mappedPoint);
-                            mInjector.sendCursorMove(mappedPoint[0], mappedPoint[1], false);
-                            mInjector.sendMouseClick(InputStub.BUTTON_RIGHT, false);
-                            android.util.Log.i("LorieTouch", "LDOA-HOLD-FIRE right-click guest("
-                                + (int) mappedPoint[0] + "," + (int) mappedPoint[1] + ") heldMs="
-                                + (event.getEventTime() - mHoldDownTime));
-                        }
-                        mHoldDownTime = 0L;
-                    }
+                    mTwoTapDownTime = 0L;
                     break;
 """
             val text = f.readText()
