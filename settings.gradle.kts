@@ -29,6 +29,43 @@ run {
         check(patched in f.readText()) { "lorie Gradle 8.9 compat patch failed to apply" }
     }
 }
+// Vendored patch (d): phone-native simulated-touch mode (approved plan
+// 2026-10-29 23:19) - never composite the X software cursor sprite when
+// LORIE_HIDE_CURSOR is set (XServer.start sets it). Renderer-only: input
+// injection, cursor position tracking and app-drawn text carets are
+// untouched. The lorie preferences screen keeps its touchMode entry (the
+// Prefs class is generated from preferences.xml - removing the entry
+// breaks lorie compilation), but MainActivity re-forces the mode on
+// every launch so a manual change never survives an app start.
+run {
+    val f = File(rootDir, "third_party/termux-x11/lorie/src/main/cpp/lorie/renderer.cpp")
+    if (f.exists()) {
+        val origInc = """#include <unistd.h>
+#include "list.h""""
+        val patchedInc = """#include <unistd.h>
+#include <cstdlib>
+#include "list.h""""
+
+        val origDraw = """    state->cursor.moved = FALSE;
+    drawCursor(sourceWidth, sourceHeight, sourceLeft, sourceTop, cursorX, cursorY);
+"""
+        val patchedDraw = """    state->cursor.moved = FALSE;
+    // LDOA: LORIE_HIDE_CURSOR skips compositing the X software cursor
+    // sprite (phone-native simulated-touch mode). Injection and
+    // app-drawn text carets are unaffected.
+    static const bool ldoaHideCursor = getenv("LORIE_HIDE_CURSOR") != nullptr;
+    if (!ldoaHideCursor)
+        drawCursor(sourceWidth, sourceHeight, sourceLeft, sourceTop, cursorX, cursorY);
+"""
+        var text = f.readText()
+        if (origInc in text && patchedInc !in text) text = text.replace(origInc, patchedInc)
+        if (origDraw in text && patchedDraw !in text) text = text.replace(origDraw, patchedDraw)
+        f.writeText(text)
+        check(patchedInc in f.readText()) { "LDOA cursor-hide include patch failed" }
+        check(patchedDraw in f.readText()) { "LDOA cursor-hide drawCursor patch failed" }
+    }
+}
+
 // Vendored patch (c): CmdEntryPoint.initEntryPoint loads libXlorie via a
 // classloader resource URL, which only works with extractNativeLibs=false.
 // We must keep extractNativeLibs=true (W^X blocks filesDir exec at

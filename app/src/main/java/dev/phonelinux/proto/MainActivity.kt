@@ -138,12 +138,15 @@ class MainActivity : ComponentActivity() {
         if (android.os.Build.VERSION.SDK_INT >= 33) {
             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
         }
-        // Phone-native default: tap-to-point (direct touch), not termux-x11's
-        // trackpad default. Only when never set; the lorie preferences
-        // screen remains free to change it.
+        // Simulated touch is the only product mode (plan approved by Ash
+        // 2026-10-29 23:19): tap-to-point with stock gesture injection
+        // (1-finger tap = left, 2-finger tap = right, long-press = drag).
+        // Forced on EVERY launch, migrating existing installs; the lorie
+        // preferences screen entry is removed by the settings.gradle.kts
+        // vendored patch so the mode is not user-switchable.
         val touchPrefs = getSharedPreferences(packageName + "_preferences", MODE_PRIVATE)
-        if (!touchPrefs.contains("touchMode")) {
-            touchPrefs.edit().putString("touchMode", "3").apply()
+        if (touchPrefs.getString("touchMode", null) != "2") {
+            touchPrefs.edit().putString("touchMode", "2").apply()
         }
         val distros = Distros.ALL
         setContent {

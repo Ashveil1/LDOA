@@ -79,6 +79,13 @@ class LdoaInputHarnessTest {
         val kill = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c",
             "for f in /proc/[0-9]*/cmdline; do c=${'$'}(tr '\\0' ' ' < ${'$'}f 2>/dev/null); case ${'$'}c in *cmdline*) ;; *gnome-session*|*gnome-shell*) echo ${'$'}f | cut -d/ -f3;; esac; done | xargs -r kill 2>/dev/null; sleep 3; echo reset-done"))
         Log.i(TAG, "harness: session reset exit=${kill.exitCode}")
+        // These arms test the PARKED direct-mode injection (deferred-fire
+        // two-finger tap). The product default is simulated touch since the
+        // 2026-10-29 23:19 approved plan, so pin the mode explicitly or the
+        // arms would silently test the stock simulated path instead.
+        // Simulated-mode verification arms are the follow-up increment.
+        ctx.getSharedPreferences(ctx.packageName + "_preferences", android.content.Context.MODE_PRIVATE)
+            .edit().putString("touchMode", "3").apply()
         XServer.start(ctx)
         val proc = XServer.launchOrReuseGnomeSession(ctx, d, rootfs)
         val logFile = File(ctx.filesDir, "guest-gnome.log")

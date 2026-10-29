@@ -78,6 +78,10 @@ object XServer {
         env["XKB_CONFIG_ROOT"] = XkbData.root(ctx).absolutePath
         env["XSERVER_LIB"] = lib.absolutePath
         env["LD_LIBRARY_PATH"] = ctx.applicationInfo.nativeLibraryDir
+        // Phone-native mode: never composite the X software cursor sprite
+        // (renderer.cpp, settings.gradle.kts vendored patch). Injection and
+        // app-drawn text carets are unaffected.
+        env["LORIE_HIDE_CURSOR"] = "1"
         pb.redirectErrorStream(true)
         pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))
         process = pb.start()
