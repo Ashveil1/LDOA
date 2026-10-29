@@ -127,3 +127,68 @@ Recorded scope implications:
 - Implementation gate unchanged: current approved Phase A + trial entry
   work first; any bigger build follows read-code -> bounded plan ->
   approval. No full-Linux replacement, no silent capability cut.
+
+## Direction note 2026-10-29 19:17 (Ash): answers to the 4 design
+   questions + delegated style judgment
+
+Ash's answers (WhatsApp wamid...QzU1NDhGMDc1NjU4M0MyRjVGMjZFOEVB
+QkQxMzg0NAA=, verbatim paraphrase):
+1. Window behavior: full Linux flexibility - maximize to fullscreen,
+   minimize, multi-window, portrait AND landscape, all supported.
+2. Home pages: separate Android and Linux pages is fine; layout
+   adjustable in any case.
+3. Aesthetics: whatever looks beautiful and "wow"; if Liquid Glass can
+   be done beautifully, do it. Style judgment delegated to us.
+4. Apps: no specific list; wants ALL apps usable. WAIVES agent-side
+   per-app testing at this stage - he will test himself when it is
+   done. (Waiver scope: per-app compatibility testing only. Core
+   install/entry/controls verification, license, money, and security
+   verification are NOT waived.)
+
+## Cohesive plan v2 (post-19:17 answers) - PROPOSAL, not approved
+   implementation
+
+Design principles (locked by Ash's answers):
+- P1 Finger-first, iOS-grade polish is the primary bar; full Linux
+  capability untouched underneath.
+- P2 Windows behave like a real Linux desktop: fullscreen, minimize,
+  multi-window, both orientations - all supported, fullscreen-first
+  default on phone-sized screens.
+- P3 Home: separate Android and Linux pages, layout user-adjustable.
+- P4 Legacy mouse-emulation controls: optional layer, never default.
+- P5 Beauty target: Liquid Glass direction if it renders beautifully
+  AND performs acceptably; reduce/disable effects if heavy. No
+  performance promise - measure, then decide.
+
+Grounded feasibility for P5 (new evidence this round):
+- noble picom 10.2 man page (manpages.ubuntu.com/manpages/noble/
+  man1/picom.1.html) lists blur-method with dual_kawase available and
+  corner-radius VALUE - compositor-level background blur + rounded
+  corners + opacity IS feasible with the existing noble package set,
+  no new supply chain. iOS-STYLE WINDOW MOTION (spring transitions)
+  is still NOT in picom - that remains an unapproved compositor
+  decision.
+- Performance on Ash's ARM device: UNVERIFIED. dual_kawase blur is
+  GPU-fragment-shader work; on lorie's GLES path the cost is unknown
+  until measured on real hardware. Plan: ship glass default-ON in the
+  custom shell with an effects toggle, capture perf evidence in the
+  mobile lane before any "smooth" claim.
+
+Proposed build order (each step its own plan+approval gate, trial
+entry work unaffected):
+1. Phase A (approved): additive mobile session + evidence harness.
+2. Shell v2: window mode controls (fullscreen/minimize/restore,
+   orientation handling), window switcher via wmctrl/xdotool on the
+   jwm session, separate Android/Linux Home pages with adjustable
+   layout. NEW FILES in my lane only.
+3. Glass pass: picom config (dual_kawase blur, corner-radius, opacity
+   rules) for the mobile session + effects toggle + perf evidence.
+4. Input-layer verdict (app worker lane): fix-or-rebuild decision on
+   gesture emulation per the 19:07 conditional authority.
+5. Motion/compositor decision (only if glass+layout prove out and Ash
+   still wants iOS-style transitions): evaluate compositor options
+   with full supply-chain and perf review.
+
+Explicitly NOT in this plan: per-app adaptation testing (Ash waived,
+he tests), any X server rewrite, any capability reduction, any claim
+of smooth performance before measurement.
