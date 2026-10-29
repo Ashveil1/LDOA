@@ -3,6 +3,7 @@ package dev.phonelinux.proto
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -589,13 +590,23 @@ for i in range(d.childCount):
             xwin("xwininfo -id " + id + " | grep -E 'Absolute upper-left|Width:|Height:'").replace("\n", " | ")
         // Window-level menu proof, independent of the (slow, possibly
         // GTK4-blind) atspi dump: the set of new top-level X windows.
+        // Run 40960814746 showed a window can exist in the tree WITHOUT
+        // being shown (a menu-sized nautilus window that never rendered):
+        // require Map State IsViewable, and record name/class/type so a
+        // phantom is identifiable in the log.
+        fun windowInfo(id: String): String =
+            (xwin("xwininfo -id " + id) + " || " +
+                xwin("xprop -id " + id + " WM_NAME WM_CLASS _NET_WM_WINDOW_TYPE 2>/dev/null || true"))
+                .replace("\n", " | ")
+        fun isViewable(id: String): Boolean =
+            xwin("xwininfo -id " + id + " | grep 'Map State:' || true").contains("IsViewable")
         fun plausibleMenuGeom(id: String): Boolean {
             val g = geomLine(id)
             val w = Regex("Width:\\s+(\\d+)").find(g)?.groupValues?.get(1)?.toIntOrNull() ?: 0
             val h = Regex("Height:\\s+(\\d+)").find(g)?.groupValues?.get(1)?.toIntOrNull() ?: 0
             // Real context menus are at least tens of px in both axes; 1x1 /
             // origin-anchored windows are GNOME/mutter internals, not menus.
-            return w >= 20 && h >= 20
+            return w >= 20 && h >= 20 && isViewable(id)
         }
         fun awaitMenuWindow(beforeIds: Set<String>, timeoutMs: Long): Pair<List<String>, String>? {
             val deadline = System.currentTimeMillis() + timeoutMs
@@ -603,9 +614,9 @@ for i in range(d.childCount):
                 val added = (rootChildIds() - beforeIds).sorted()
                 val plausible = added.filter { plausibleMenuGeom(it) }
                 if (added.isNotEmpty() && plausible.isEmpty())
-                    Log.i(TAG, "awaitMenuWindow: ignoring implausible new windows " + added +
-                        " geom=" + geomLine(added.first()))
-                if (plausible.isNotEmpty()) return Pair(plausible, geomLine(plausible.first()))
+                    Log.i(TAG, "awaitMenuWindow: ignoring implausible/unmapped new windows " + added +
+                        " info=" + windowInfo(added.first()))
+                if (plausible.isNotEmpty()) return Pair(plausible, windowInfo(plausible.first()))
                 Thread.sleep(700)
             }
             return null
@@ -628,16 +639,56 @@ for i in range(d.childCount):
             return false
         }
         // Event-level probe of what the input layer injects into :0.
+        // A backgrounded xinput does NOT survive across runGuest calls
+        // (run 40960814746: the capture held 0 bytes even for an xdotool
+        // XTEST control click), so the capture now runs in the FOREGROUND
+        // of a concurrent coroutine xwin call spanning the gesture,
+        // bounded by `timeout`. Termination signals ONLY the recorded pid
+        // of the command this probe started (verified against /proc
+        // cmdline + uid first) - never a pattern kill. A zero-byte
+        // capture with a dead XTEST positive control is an INVALID
+        // NEGATIVE, never a product finding.
+        var probeJob: kotlinx.coroutines.Deferred<String>? = null
         fun probeStart(tag: String) {
-            xwin("pkill -f 'xinput test-xi2' 2>/dev/null; rm -f /root/probe-" + tag + ".log; " +
-                "(stdbuf -oL xinput test-xi2 --root > /root/probe-" + tag + ".log 2>&1 &)")
-            Thread.sleep(2_000)
+            val log = "/root/probe-" + tag + ".log"
+            val pidf = "/root/probe-" + tag + ".pid"
+            val ready = "/root/probe-" + tag + ".ready"
+            xwin("rm -f " + log + " " + pidf + " " + ready)
+            probeJob = async(kotlinx.coroutines.Dispatchers.IO) {
+                xwin("echo up > " + ready + "; " +
+                    "timeout 120 stdbuf -oL xinput test-xi2 --root > " + log + " 2>&1 & " +
+                    "echo ${'$'}! > " + pidf + "; wait")
+                "done"
+            }
+            // Readiness is the marker written by the capture shell
+            // itself, not a fixed sleep.
+            val dl = System.currentTimeMillis() + 15_000
+            var up = false
+            while (System.currentTimeMillis() < dl) {
+                if (xwin("cat " + ready + " 2>/dev/null || true").contains("up")) { up = true; break }
+                Thread.sleep(500)
+            }
+            assertTrue("event probe " + tag + " never started - capture architecture invalid, " +
+                "counts from it would be void", up)
+            Thread.sleep(1_500) // grace for xinput to attach to :0 after the marker
         }
         fun probeStop(tag: String): String {
+            val log = "/root/probe-" + tag + ".log"
+            val pidf = "/root/probe-" + tag + ".pid"
             Thread.sleep(500)
-            xwin("pkill -f 'xinput test-xi2' 2>/dev/null || true")
-            Thread.sleep(500)
-            return xwin("cat /root/probe-" + tag + ".log 2>/dev/null || true")
+            // Owned-pid termination only: signal the recorded pid only if
+            // /proc still shows our exact capture command, as root.
+            xwin("pid=${'$'}(cat " + pidf + " 2>/dev/null); " +
+                "if [ -n \"${'$'}pid\" ] && [ -r /proc/${'$'}pid/cmdline ] && " +
+                "tr '\\0' ' ' < /proc/${'$'}pid/cmdline | grep -q 'xinput test-xi2 --root' && " +
+                "[ \"${'$'}(awk '/^Uid:/{print ${'$'}2}' /proc/${'$'}pid/status)\" = \"0\" ]; " +
+                "then kill ${'$'}pid; fi; true")
+            val job = probeJob
+            if (job != null) {
+                runBlocking { kotlinx.coroutines.withTimeoutOrNull(20_000) { job.await() } }
+                probeJob = null
+            }
+            return xwin("cat " + log + " 2>/dev/null || true")
         }
         fun buttonPresses(probe: String, detail: Int): Int =
             Regex("ButtonPress\\)[\\s\\S]{0,200}?detail: " + detail).findAll(probe).count()
@@ -821,6 +872,7 @@ for i in range(d.childCount):
             ctx.getSharedPreferences(ctx.packageName + "_preferences",
                 android.content.Context.MODE_PRIVATE).getString("touchMode", null) +
             " (2 = SIMULATED_TOUCH; right-click via stock onTap(BUTTON_RIGHT), no LDOA-2FTAP-FIRE in this mode)")
+        val bmpPreMenu = fullShot()
         probeStart("menu")
         twoFingerTap(bgTarget!!.first - 40, bgTarget!!.second, bgTarget!!.first + 40, bgTarget!!.second)
         // Fast window-level signal first (the atspi dump can take 10-30s
@@ -830,22 +882,35 @@ for i in range(d.childCount):
         Shot.save("23d-ubuntu-2ftap-menu")
         val menuNodes = awaitMenu(bgProbes, baselineBgNames, 35_000)
         val injected3 = buttonPresses(menuProbe, 3)
+        // Pixel ground truth for "a menu appeared": the detected menu rect
+        // must visibly change against the pre-tap frame. A window in the X
+        // tree without pixels is not a menu the user can see (run
+        // 40960814746: tree window 0xc00025, zero rendered pixels).
+        var menuPixelFrac = 0.0
+        if (menuWin != null) {
+            val g = menuWin.second
+            val mx = Regex("Absolute upper-left X:\\s+(-?\\d+)").find(g)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            val my = Regex("Absolute upper-left Y:\\s+(-?\\d+)").find(g)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            val mw = Regex("Width:\\s+(\\d+)").find(g)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            val mh = Regex("Height:\\s+(\\d+)").find(g)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            if (mw >= 20 && mh >= 20)
+                menuPixelFrac = regionDiff(bmpPreMenu, fullShot(), devRectOf(mx, my, mw, mh))
+        }
         Log.i(TAG, "2ftap-bg: menuWin=" + menuWin + " rightClickInjections=" +
             injected3 + " probeBytes=" + menuProbe.length +
+            " menuPixelFrac=" + menuPixelFrac +
             " probeTail=" + menuProbe.takeLast(300).replace("\n", " | ") +
             " atspiNull=" + (menuNodes == null))
-        if (menuWin == null || injected3 != 1) {
-            // DIAGNOSTIC ONLY (never asserted): is the X input stack able to
-            // open a menu at that point at all? xdotool uses XTEST, an
-            // independent path from the lorie mouse injection. If XTEST
-            // opens a menu, the lorie mouse path is inert; if not, the
-            // client/point refuses right-click menus. The XTEST click is
-            // wrapped in its own probe window as a POSITIVE CONTROL: if the
-            // probe records the XTEST button-3, an earlier zero count for
-            // the product injection is a real negative; if it does not, the
-            // probe itself is unhealthy and zero counts are void. Runs on
-            // the original failure; the original asserts below still decide
-            // the verdict unchanged.
+        var probeHealthy: Boolean? = null // null = control not needed; set once it ran
+        if (injected3 != 1) {
+            // DIAGNOSTIC ONLY (the verdict asserts below still decide): the
+            // XTEST positive control decides what a zero count MEANS. The
+            // probe recording the XTEST button-3 -> probe healthy, an
+            // earlier zero is a real negative. The probe recording nothing
+            // even for XTEST -> probe dead, the zero is an INVALID
+            // NEGATIVE - a capture-architecture failure, not a product
+            // result. xdotool uses XTEST, an independent path from the
+            // lorie mouse injection.
             val xlist = xwin("xinput list 2>/dev/null | head -24 || true").replace("\n", " | ")
             val mloc = xwin("xdotool getmouselocation 2>/dev/null || true").replace("\n", " | ")
             Log.i(TAG, "2ftap-bg DIAG: xinput list=" + xlist)
@@ -855,8 +920,11 @@ for i in range(d.childCount):
             xwin("xdotool mousemove " + bgGuestX + " " + bgGuestY + " click 3 2>/dev/null || true")
             Thread.sleep(3_000)
             val hcProbe = probeStop("hc")
+            probeHealthy = buttonPresses(hcProbe, 3) > 0 || hcProbe.contains("Motion")
             Log.i(TAG, "2ftap-bg DIAG: health-check probe button3=" + buttonPresses(hcProbe, 3) +
-                " motion=" + hcProbe.contains("Motion") + " hcBytes=" + hcProbe.length)
+                " motion=" + hcProbe.contains("Motion") + " hcBytes=" + hcProbe.length +
+                " -> probeHealthy=" + probeHealthy +
+                (if (probeHealthy == false) " (zero counts are INVALID NEGATIVES, not product evidence)" else ""))
             val xdWin = (rootChildIds() - menuBeforeIds).sorted()
             Log.i(TAG, "2ftap-bg DIAG: xdotool right-click at the same point -> new windows=" + xdWin +
                 " plausible=" + xdWin.filter { plausibleMenuGeom(it) })
@@ -866,13 +934,16 @@ for i in range(d.childCount):
                 Thread.sleep(1_000)
             }
         }
-        assertTrue("two-finger tap on Files background produced no menu window (SIMULATED_TOUCH) " +
-            "(atspi items=" + (menuNodes?.let { menuHits(it, bgProbes) - baselineBgNames } ?: "dump-pending") +
-            ", probeTail=" + menuProbe.takeLast(300).replace("\n", " | ") + ")",
-            menuWin != null || menuNodes != null)
-        assertTrue("expected exactly one new menu window, added=" + (menuWin?.first ?: emptyList<String>()) +
+        assertTrue("two-finger tap on Files background produced no viewable, pixel-rendered menu " +
+            "(SIMULATED_TOUCH) (menuWin=" + (menuWin != null) + " menuPixelFrac=" + menuPixelFrac +
+            ", atspi items=" + (menuNodes?.let { menuHits(it, bgProbes) - baselineBgNames } ?: "dump-pending") + ")",
+            menuWin != null && menuPixelFrac > 0.02)
+        assertTrue("expected exactly one new viewable menu window, added=" + (menuWin?.first ?: emptyList<String>()) +
             " (native+injected duplicate?)", menuWin != null && menuWin.first.size == 1)
-        assertTrue("expected exactly one injected button-3 press, got " + injected3,
+        assertTrue("expected exactly one injected button-3 press, got " + injected3 +
+            (if (probeHealthy == false)
+                " - INVALID NEGATIVE: probe dead even for the XTEST control; capture architecture failure, not a product result"
+             else ""),
             injected3 == 1)
         val mwX = Regex("Absolute upper-left X:\\s+(-?\\d+)").find(menuWin!!.second)?.groupValues?.get(1)?.toIntOrNull() ?: -10000
         val mwY = Regex("Absolute upper-left Y:\\s+(-?\\d+)").find(menuWin.second)?.groupValues?.get(1)?.toIntOrNull() ?: -10000

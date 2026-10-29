@@ -161,18 +161,19 @@ mtime1 = marker_mtime()
 log("install complete, marker mtime=%s" % mtime1)
 
 # Product default, verified through the SHIPPED entry point (not the test
-# harness): the app's own first-launch onCreate sets direct touch
-# (tap-to-point) when the user has never chosen a mode. Data starts empty
+# harness): the shipped app forces SIMULATED_TOUCH (touchMode=2), the
+# selected input mode (user decision 2026-10-29). Data starts empty
 # here because the instrumentation job uninstalls both APKs before us.
 prefs = runas("cat shared_prefs/%s_preferences.xml 2>&1" % PKG)
 # SharedPreferences XML stores a string pref as ELEMENT TEXT:
-#   <string name="touchMode">3</string>
+#   <string name="touchMode">2</string>
 # not a value= attribute (that is the <int>/<long> form). Run 40632372282
 # showed the shipped app wrote the pref correctly and only this harness
-# string check was wrong.
-if '<string name="touchMode">3</string>' not in prefs:
-    fail("direct-touch default not written by shipped app entry; prefs=" + prefs[:600])
-log("direct-touch default present after first shipped-app launch")
+# string check was wrong; run 40960814746 showed the same check still
+# asserting the replaced direct-mode default (3) after the mode-2 decision.
+if '<string name="touchMode">2</string>' not in prefs:
+    fail("simulated-touch mode-2 pref not written by shipped app entry; prefs=" + prefs[:600])
+log("simulated-touch mode-2 pref present after first shipped-app launch")
 
 if not tap_desc("open-desktop-alpine", 60):
     fail("open-desktop button never appeared after install")
