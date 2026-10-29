@@ -52,9 +52,11 @@ run {
         val patchedDraw = """    state->cursor.moved = FALSE;
     // LDOA: LORIE_HIDE_CURSOR skips compositing the X software cursor
     // sprite (phone-native simulated-touch mode). Injection and
-    // app-drawn text carets are unaffected.
-    static const bool ldoaHideCursor = getenv("LORIE_HIDE_CURSOR") != nullptr;
-    if (!ldoaHideCursor)
+    // app-drawn text carets are unaffected. Read per frame: a
+    // function-local static would pull __cxa_guard_* which -nostdlib++
+    // lacks (build job 123582396701 link failure); getenv over ~30 env
+    // strings per frame is negligible.
+    if (getenv("LORIE_HIDE_CURSOR") == nullptr)
         drawCursor(sourceWidth, sourceHeight, sourceLeft, sourceTop, cursorX, cursorY);
 """
         var text = f.readText()
