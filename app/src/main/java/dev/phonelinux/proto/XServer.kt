@@ -6,6 +6,8 @@ import android.content.Intent
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.system.Os
+import android.system.OsConstants
 import java.io.File
 import kotlin.concurrent.thread
 
@@ -23,6 +25,11 @@ import kotlin.concurrent.thread
 object XServer {
     private const val TAG = "PhoneLinuxX"
     private var process: Process? = null
+
+    /** The guest session process (proot root) of the running desktop.
+     *  Tracked so the lifecycle service can watch session end and
+     *  stopDesktopMode can tear the session down by identity. */
+    @Volatile var sessionProcess: Process? = null
     @Volatile private var gnomeSession: Pair<String, Process>? = null
     @Volatile var preparing = false
         private set
@@ -156,6 +163,7 @@ object XServer {
                                 var grace = 0
                                 while (grace < 8 && p.isAlive) { Thread.sleep(1_000); grace++ }
                                 launched = p.isAlive
+                                if (launched) sessionProcess = p
                                 if (!launched) failure = "Desktop session died within " + grace + "s of launch"
                             } else if (failure == null) {
                                 failure = "Desktop shell unavailable after install; desktop would be empty"
@@ -196,6 +204,7 @@ object XServer {
                                     ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
                                         .edit().putBoolean("ubuntu_desktop_active", true).apply()
                                     launched = true
+                                    sessionProcess = p
                                 } else {
                                     val tail = if (gnomeLog.isFile && gnomeLog.length() > logBase)
                                         gnomeLog.readText().substring(logBase.toInt().coerceAtMost((gnomeLog.length()).toInt())).takeLast(1500)
@@ -219,6 +228,10 @@ object XServer {
             Handler(Looper.getMainLooper()).post {
                 preparing = false
                 if (launched) {
+                    // L1: persistent background notification + manual
+                    // wakelock toggle while the session lives (accepted
+                    // requirements File v2). Service watches session end.
+                    SessionService.start(ctx)
                     activity.startActivity(Intent(activity, com.termux.x11.MainActivity::class.java))
                 } else {
                     Log.e(TAG, "desktop open failed-closed: " + f)
@@ -226,5 +239,109 @@ object XServer {
                 }
             }
         }
+    }
+
+    /**
+     * End the desktop session (user stop): verified teardown of the guest
+     * session tree + X server. Every signal is re-verified against the
+     * (starttime, uid) pair captured at snapshot time - a reused PID is
+     * never signaled. The session bus (dbus-daemon reparents to init and
+     * escapes the parentage walk) is captured by pidfile identity under
+     * the same rule. Leftovers are logged, never hidden.
+     */
+    fun stopDesktopMode(ctx: Context) {
+        val root = sessionProcess
+        val rootPid = root?.let { pidOf(it) }
+        val busPid = sessionBusPid(ctx)
+        if (rootPid != null) {
+            val left = killTreeVerified(rootPid, busPid)
+            if (left.isNotEmpty()) Log.w(TAG, "stopDesktopMode: leftover pids after verified teardown: " + left)
+        }
+        if (root != null) { try { root.destroy() } catch (t: Throwable) { } }
+        sessionProcess = null
+        val xs = process
+        if (xs != null) { try { xs.destroy() } catch (t: Throwable) { }; process = null }
+        ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
+            .edit().putBoolean("ubuntu_desktop_active", false).apply()
+        Log.i(TAG, "stopDesktopMode: desktop session ended by user")
+    }
+
+    private fun sessionBusPid(ctx: Context): Int? = try {
+        val f = File(DistroInstaller(ctx).rootfsDir(Distros.UBUNTU), "root/.gnome-bus.pid")
+        if (f.isFile) f.readText().trim().toIntOrNull() else null
+    } catch (t: Throwable) { null }
+
+    private fun pidOf(p: Process): Int? = try {
+        val f = p.javaClass.getDeclaredField("pid"); f.isAccessible = true; f.getInt(p)
+    } catch (t: Throwable) { Log.e(TAG, "pid reflection failed", t); null }
+
+    private class PInfo(val ppid: Int, val start: String)
+
+    private fun scanProc(): Map<Int, PInfo> {
+        val out = HashMap<Int, PInfo>()
+        val dir = File("/proc").listFiles { f -> f.name.matches(Regex("[0-9]+")) } ?: return out
+        for (f in dir) {
+            try {
+                val stat = File(f, "stat").readText()
+                val close = stat.lastIndexOf(')')
+                if (close < 0) continue
+                val rest = stat.substring(close + 1).trim().split(Regex("\\s+"))
+                if (rest.size < 20) continue
+                out[f.name.toInt()] = PInfo(rest[1].toInt(), rest[19])
+            } catch (t: Throwable) { /* vanished mid-scan */ }
+        }
+        return out
+    }
+
+    private fun treeOf(root: Int, all: Map<Int, PInfo>): Set<Int> {
+        val kids = HashMap<Int, MutableList<Int>>()
+        for ((pid, info) in all) kids.getOrPut(info.ppid) { mutableListOf() }.add(pid)
+        val out = LinkedHashSet<Int>()
+        var frontier = listOf(root)
+        while (frontier.isNotEmpty()) {
+            out.addAll(frontier)
+            frontier = frontier.flatMap { kids[it] ?: emptyList() }.filter { it !in out }
+        }
+        return out
+    }
+
+    private class PIdent(val pid: Int, val start: String, val uid: Int)
+
+    /** Identity of one live process, or null if gone or NOT ours (all
+     *  guest processes run as the app uid). */
+    private fun identityOf(pid: Int): PIdent? {
+        val info = scanProc()[pid] ?: return null
+        val uid = try { Os.stat("/proc/" + pid).st_uid } catch (t: Throwable) { return null }
+        if (uid != android.os.Process.myUid()) return null
+        return PIdent(pid, info.start, uid)
+    }
+
+    /** TERM the snapshot tree (+ explicitly captured identities such as
+     *  the reparented session bus), verify, KILL survivors, verify empty.
+     *  Before EVERY signal the PID's current (starttime, uid) must match
+     *  the captured identity. Returns surviving pids (empty = clean). */
+    private fun killTreeVerified(root: Int, busPid: Int?): List<Int> {
+        val all0 = scanProc()
+        val idents = HashMap<Int, PIdent>()
+        for (pid in treeOf(root, all0)) identityOf(pid)?.let { idents[pid] = it }
+        if (busPid != null) identityOf(busPid)?.let { idents[it.pid] = it }
+        fun signal(sig: Int) {
+            for (id in idents.values) {
+                val cur = identityOf(id.pid)
+                if (cur != null && cur.start == id.start && cur.uid == id.uid) {
+                    try { android.os.Process.sendSignal(id.pid, sig) } catch (t: Throwable) { }
+                }
+            }
+        }
+        fun survivors(): List<Int> = idents.values.filter { id ->
+            val cur = identityOf(id.pid)
+            cur != null && cur.start == id.start && cur.uid == id.uid
+        }.map { it.pid }
+        signal(OsConstants.SIGTERM)
+        Thread.sleep(3_000)
+        if (survivors().isEmpty()) return emptyList()
+        signal(OsConstants.SIGKILL)
+        Thread.sleep(2_000)
+        return survivors()
     }
 }

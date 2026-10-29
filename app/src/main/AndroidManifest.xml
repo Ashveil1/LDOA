@@ -2,6 +2,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <application
         android:label="Phone Linux (proto)"
         android:extractNativeLibs="true"
@@ -26,5 +30,17 @@
             tools:node="merge">
             <intent-filter tools:node="removeAll" />
         </activity>
+        <!-- L1 lifecycle (accepted 2026-10-29): keep the Linux session
+             alive with a persistent notification + manual wakelock toggle.
+             specialUse = "not covered by other types"; dataSync would be a
+             mis-type. Same process as the app - no process move in L1. -->
+        <service
+            android:name=".SessionService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps the user's own local Linux desktop session (X server and terminal) alive while they use other apps, with a persistent notification they control and can stop." />
+        </service>
     </application>
 </manifest>

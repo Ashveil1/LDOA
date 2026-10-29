@@ -1,10 +1,16 @@
 package dev.phonelinux.proto
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -158,7 +164,19 @@ class MainActivity : ComponentActivity() {
                         runOnUiThread { vm.desktopStage = s.take(160) }
                     }
                 }
+                // POST_NOTIFICATIONS (API 33+): asked once, at the first
+                // desktop start - the session notification is user-facing
+                // value, but a denial must never block the desktop.
+                val notifPerm = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestPermission()) { granted ->
+                    vm.log += "[perm] POST_NOTIFICATIONS " + (if (granted) "granted" else "denied - session runs without notification") + "\n"
+                }
                 val requestDesktop: (Distro) -> Unit = { d ->
+                    if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
+                            applicationContext, Manifest.permission.POST_NOTIFICATIONS
+                        ) != PackageManager.PERMISSION_GRANTED) {
+                        notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    }
                     vm.log += "[tap] open-desktop " + d.id + "\n"
                     val needsProvision = d.pkgMgr == PkgMgr.APT &&
                         !GuestUbuntu.hasGnome(DistroInstaller(applicationContext).rootfsDir(d))

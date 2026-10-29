@@ -159,6 +159,7 @@ object GuestUbuntu {
             xprop -root -remove _DBUS_SESSION_BUS_PID 2>/dev/null
             eval $(dbus-launch --sh-syntax) 2>&1
             echo "gnome-launch: session bus ${'$'}DBUS_SESSION_BUS_ADDRESS"
+            echo ${'$'}DBUS_SESSION_BUS_PID > /root/.gnome-bus.pid 2>/dev/null
             # READINESS evidence for the app-side gate: org.gnome.Shell owned
             # on THIS launch's bus. A stalled shell (run 40864638283 re-enter:
             # fallback shell never registered, black screen) fails this poll.
