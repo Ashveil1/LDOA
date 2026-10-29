@@ -86,7 +86,7 @@ run {
     }
 """
             val text = f.readText()
-            if (orig in text) f.writeText(text.replace(orig, patched))
+            if (orig in text && patched !in text) f.writeText(text.replace(orig, patched))
             check(patched in f.readText()) { "LDOA gesture patch 0 failed for ${f.name}" }
         }
         run {
@@ -99,7 +99,7 @@ run {
     private boolean mSuppressDirectTouch;
 """
             val text = f.readText()
-            if (orig in text) f.writeText(text.replace(orig, patched))
+            if (orig in text && patched !in text) f.writeText(text.replace(orig, patched))
             check(patched in f.readText()) { "LDOA gesture patch 1 failed for ${f.name}" }
         }
         run {
@@ -114,7 +114,7 @@ run {
             } else
 """
             val text = f.readText()
-            if (orig in text) f.writeText(text.replace(orig, patched))
+            if (orig in text && patched !in text) f.writeText(text.replace(orig, patched))
             check(patched in f.readText()) { "LDOA gesture patch 2 failed for ${f.name}" }
         }
         run {
@@ -127,7 +127,7 @@ run {
                     mSuppressDirectTouch = false;
 """
             val text = f.readText()
-            if (orig in text) f.writeText(text.replace(orig, patched))
+            if (orig in text && patched !in text) f.writeText(text.replace(orig, patched))
             check(patched in f.readText()) { "LDOA gesture patch 3 failed for ${f.name}" }
         }
         run {
@@ -156,7 +156,7 @@ run {
                 mInputStrategy.onScroll(distanceX, distanceY);
 """
             val text = f.readText()
-            if (orig in text) f.writeText(text.replace(orig, patched))
+            if (orig in text && patched !in text) f.writeText(text.replace(orig, patched))
             check(patched in f.readText()) { "LDOA gesture patch 4 failed for ${f.name}" }
         }
         run {
@@ -190,7 +190,7 @@ run {
             }
 """
             val text = f.readText()
-            if (orig in text) f.writeText(text.replace(orig, patched))
+            if (orig in text && patched !in text) f.writeText(text.replace(orig, patched))
             check(patched in f.readText()) { "LDOA gesture patch 5 failed for ${f.name}" }
         }
         run {
@@ -205,7 +205,7 @@ run {
     public boolean shouldInterceptKeys() {
 """
             val text = f.readText()
-            if (orig in text) f.writeText(text.replace(orig, patched))
+            if (orig in text && patched !in text) f.writeText(text.replace(orig, patched))
             check(patched in f.readText()) { "LDOA gesture patch 6 failed for ${f.name}" }
         }
     }
