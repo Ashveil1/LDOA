@@ -4,6 +4,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.activity.viewModels
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -58,6 +59,10 @@ class SpikeViewModel : ViewModel() {
     var terminal by mutableStateOf<TerminalSession?>(null)
     var termText by mutableStateOf("")
     var termRunning by mutableStateOf(false)
+    /** Non-null while the first-start large-download warning is shown. */
+    var pendingDesktop by mutableStateOf<Distro?>(null)
+    /** True while XServer.openDesktop is provisioning/launching. */
+    var desktopPrep by mutableStateOf(false)
     /** Set by the activity: opens the desktop for a distro (XServer). */
     var autoDesktop: ((Distro) -> Unit)? = null
     var coldAutoEntered = false
@@ -107,6 +112,15 @@ class SpikeViewModel : ViewModel() {
 }
 
 class MainActivity : ComponentActivity() {
+    private val vm: SpikeViewModel by viewModels()
+
+    override fun onResume() {
+        super.onResume()
+        // Returning from the X view (or first resume): the picker is
+        // foreground, so any preparing overlay is stale.
+        vm.desktopPrep = false
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // The X server runs as a foreground service; ask for notifications
@@ -125,8 +139,22 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(
                 primary = Accent, secondary = Accent2, background = BgTop, surface = CardBg)) {
-                val vm: SpikeViewModel = viewModel()
-                vm.autoDesktop = { d -> XServer.openDesktop(this@MainActivity, d) }
+                // First start of the Ubuntu desktop downloads the GNOME
+                // package set (large). Ask BEFORE that download starts;
+                // everything else goes straight through.
+                val requestDesktop: (Distro) -> Unit = { d ->
+                    val needsProvision = d.pkgMgr == PkgMgr.APT &&
+                        !GuestUbuntu.hasGnome(DistroInstaller(applicationContext).rootfsDir(d))
+                    if (needsProvision) {
+                        vm.pendingDesktop = d
+                    } else {
+                        vm.desktopPrep = true
+                        XServer.openDesktop(this@MainActivity, d)
+                    }
+                }
+                // Post-install auto-enter goes through the same first-start
+                // download consent as the manual desktop button.
+                vm.autoDesktop = { d -> requestDesktop(d) }
                 LaunchedEffect(Unit) {
                     for (d in distros) {
                         if (DistroInstaller(applicationContext).isInstalled(d)) {
@@ -140,11 +168,38 @@ class MainActivity : ComponentActivity() {
                         prefs.getBoolean("ubuntu_desktop_active", false) &&
                         vm.stateFor(Distros.UBUNTU) == InstallState.Installed) {
                         vm.coldAutoEntered = true
+                        // GNOME is already provisioned on this path (the
+                        // marker is only set once it is), so no download
+                        // consent is needed here.
+                        vm.desktopPrep = true
                         XServer.openDesktop(this@MainActivity, Distros.UBUNTU)
                     }
                 }
                 Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(BgTop, BgBottom)))) {
-                    when (vm.screen) {
+                    vm.pendingDesktop?.let { pd ->
+                        AlertDialog(
+                            onDismissRequest = { vm.pendingDesktop = null },
+                            confirmButton = { TextButton(onClick = {
+                                vm.pendingDesktop = null
+                                vm.desktopPrep = true
+                                XServer.openDesktop(this@MainActivity, pd)
+                            }) { Text("Download and start") } },
+                            dismissButton = { TextButton(onClick = { vm.pendingDesktop = null }) { Text("Not now") } },
+                            title = { Text("Ubuntu desktop - first start") },
+                            text = { Text("The first start downloads the desktop packages - a large download (several hundred MB; the exact size is not measured). Use Wi-Fi, not mobile data.\n\nThis can take several minutes. Keep the app open.") })
+                    }
+                    if (vm.desktopPrep) {
+                        Column(Modifier.fillMaxSize().padding(32.dp),
+                            verticalArrangement = Arrangement.Center,
+                            horizontalAlignment = Alignment.CenterHorizontally) {
+                            CircularProgressIndicator(color = Accent)
+                            Spacer(Modifier.height(20.dp))
+                            Text("Starting Ubuntu desktop", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.height(10.dp))
+                            Text("First start downloads a large package set and can take several minutes. Keep the app open; your files stay on the device.",
+                                color = TextDim, fontSize = 14.sp)
+                        }
+                    } else when (vm.screen) {
                         Screen.PICKER -> PickerScreen(distros, vm,
                             onPrimary = { d ->
                                 when (vm.stateFor(d)) {
@@ -152,7 +207,7 @@ class MainActivity : ComponentActivity() {
                                     else -> vm.install(this@MainActivity, d)
                                 }
                             },
-                            onDesktop = { d -> XServer.openDesktop(this@MainActivity, d) })
+                            onDesktop = { d -> requestDesktop(d) })
                         Screen.TERMINAL -> TerminalScreen(vm, onBack = { vm.closeTerminal() })
                     }
                 }
