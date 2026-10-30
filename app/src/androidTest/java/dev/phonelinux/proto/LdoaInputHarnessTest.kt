@@ -204,40 +204,37 @@ class LdoaInputHarnessTest {
             return if (x != null && y != null) Pair(x, y) else null
         }
 
-        // Open Files from the dock (same proven taps as the spike lane).
+        // Settle taps kept from the spike-lane flow (swallowed under the
+        // pinned mode below; they only pace the desktop).
         device.swipe(540, 200, 540, 60, 20)
         Thread.sleep(1_000)
         device.click(540, 1200)
         Thread.sleep(2_000)
         val beforeIds = windowIds("nautilus")
         var nauWid: String? = null
-        // Retry-assisted SETUP only (never product fresh-entry evidence):
-        // record every tap; the whole assisted open is wall-bounded so a
-        // broken desktop fails fast instead of looping 6x120s.
-        val assistedOpenDeadline = System.currentTimeMillis() + 360_000
-        var assistedTaps = 0
-        for (round in 1..3) {
-            for (tapY in listOf(194, 264)) {
-                if (System.currentTimeMillis() > assistedOpenDeadline) break
-                assistedTaps++
-                device.swipe(30, tapY, 32, tapY, 25)
-                Log.i(TAG, "harness: assisted-setup tap " + assistedTaps + " (30,$tapY) round $round" +
-                    " at wall=" + System.currentTimeMillis() + " (gnome-session fallback exit=1 desktop)")
-                val openDeadline = minOf(System.currentTimeMillis() + 120_000, assistedOpenDeadline)
-                while (System.currentTimeMillis() < openDeadline) {
-                    val vis = nauVisible()
-                    if (vis != null && vis.id !in beforeIds) { nauWid = vis.id; break }
-                    Thread.sleep(3_000)
-                }
-                if (nauWid != null) break
-            }
-            if (nauWid != null) break
-            Log.i(TAG, "harness: window tree after failed round " + round + ": " +
+        // Assisted SETUP only (never product fresh-entry evidence, and no
+        // dock/touch readiness credit): touchMode is pinned to "3" (TOUCH ->
+        // NullInputStrategy: every finger event swallowed) for the parked-mode
+        // arms below, so UiAutomator dock taps can never open Files in this
+        // flow (deterministic failure in runs 41018478245+). Launch nautilus
+        // via guest exec instead - mode-independent, log+pid preserved.
+        xwin("( nautilus >/root/harness-nautilus-setup.log 2>&1 & echo ${'$'}! > /root/harness-nautilus-setup.pid )")
+        val setupOpenDeadline = System.currentTimeMillis() + 180_000
+        while (System.currentTimeMillis() < setupOpenDeadline) {
+            val vis = nauVisible()
+            if (vis != null && vis.id !in beforeIds) { nauWid = vis.id; break }
+            Thread.sleep(3_000)
+        }
+        Log.i(TAG, "harness: assisted-setup guest-exec nautilus opened=" + (nauWid != null) +
+            " pid=" + xwin("cat /root/harness-nautilus-setup.pid 2>/dev/null || echo unknown").trim() +
+            " pid-state=" + xwin("NP=${'$'}(cat /root/harness-nautilus-setup.pid 2>/dev/null); if kill -0 ${'$'}NP 2>/dev/null; then echo alive; else echo dead; fi").trim() +
+            " log-tail=[" + xwin("tail -3 /root/harness-nautilus-setup.log 2>/dev/null || echo none").replace("\n", " | ") + "]" +
+            " - diagnostic setup only, no product readiness credit")
+        if (nauWid == null) {
+            Log.i(TAG, "harness: window tree after failed guest-exec setup: " +
                 xwin("xwininfo -root -children | tail -10").replace("\n", " | "))
         }
         Thread.sleep(8_000)
-        Log.i(TAG, "harness: assisted-setup result taps=" + assistedTaps +
-            " opened=" + (nauWid != null) + " - diagnostic setup only, no product readiness credit")
         assertTrue("harness: Files window did not open", nauWid != null)
         val nw = nauVisible()
         assertTrue("harness: Files geometry unreadable", nw != null)

@@ -60,7 +60,7 @@ class NativeTerminalFakeRootTest {
             // captured outputs make the superuser-denial absence check
             // meaningful (review: redirected-then-deleted stderr proved
             // nothing). Markers bracket the dumps so the await is exact.
-            term.send("rm -rf /tmp/probe /tmp/probe.deb /tmp/probe.out /tmp/probe-build.out; mkdir -p /tmp/probe/DEBIAN && " +
+            term.send("rm -rf /tmp/probe /tmp/probe.deb /tmp/probe.out /tmp/probe-build.out; mkdir -p /tmp/probe/DEBIAN && chmod 755 /tmp/probe /tmp/probe/DEBIAN && " +
                 "printf 'Package: probe\\nVersion: 1\\nArchitecture: all\\nMaintainer: t\\nDescription: probe\\n' > /tmp/probe/DEBIAN/control && " +
                 "dpkg-deb --build /tmp/probe /tmp/probe.deb >/tmp/probe-build.out 2>&1; echo BUILD-RC=\$?; " +
                 "dpkg --no-act -i /tmp/probe.deb >/tmp/probe.out 2>&1; echo PROBE-RC=\$?; " +

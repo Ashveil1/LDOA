@@ -1715,7 +1715,14 @@ for i in range(d.childCount):
         assertTrue("xterm fixture unavailable (runtime check + bounded install both failed) - " +
             "environment/fixture gap, legacy scroll coverage unproven, not a product result",
             xtermBin.isNotEmpty())
-        xwin("(xterm -sb -geometry 100x30+200+250 -e /bin/sh -c 'seq 1 400; sleep 240' >/dev/null 2>&1 &) ; sleep 2")
+        // Launch with stderr + process identity preserved (files left in
+        // place): the previous form discarded xterm stderr, leaving any
+        // startup death (font/config/crash) unobservable (run 41030227812).
+        val xtLaunch = xwin("( xterm -sb -geometry 100x30+200+250 -e /bin/sh -c 'seq 1 400; sleep 240' " +
+            ">/root/xterm-fixture.log 2>&1 & echo ${'$'}! > /root/xterm-fixture.pid ); " +
+            "sleep 2; XTP=${'$'}(cat /root/xterm-fixture.pid 2>/dev/null); " +
+            "echo pid=${'$'}XTP; if kill -0 ${'$'}XTP 2>/dev/null; then echo alive-after-2s; else echo exited-early; fi")
+        Log.i(TAG, "xterm-scroll: launch " + xtLaunch.replace("\n", " | "))
         var xt: IntArray? = null
         val xtDeadline = System.currentTimeMillis() + 15_000
         while (System.currentTimeMillis() < xtDeadline) {
@@ -1723,7 +1730,13 @@ for i in range(d.childCount):
             if (xt != null) break
             Thread.sleep(1_000)
         }
-        assertTrue("xterm window never mapped", xt != null)
+        if (xt == null) {
+            Log.i(TAG, "xterm-scroll: gate timeout pid-state=" +
+                xwin("XTP=${'$'}(cat /root/xterm-fixture.pid 2>/dev/null); if kill -0 ${'$'}XTP 2>/dev/null; then echo alive; else echo dead; fi").trim() +
+                " log=[" + xwin("cat /root/xterm-fixture.log 2>/dev/null || echo none").replace("\n", " | ") + "]" +
+                " tree=[" + xwin("xwininfo -root -children | tail -12").replace("\n", " | ") + "]")
+        }
+        assertTrue("xterm window never mapped (see xterm-scroll gate diagnostics)", xt != null)
         val xtP = xt!!
         val xrect = devRectOf(xtP[0], xtP[1], xtP[2], xtP[3])
         val xc = mapToDevice(xtP[0] + xtP[2] / 2, xtP[1] + xtP[3] / 2)!!
