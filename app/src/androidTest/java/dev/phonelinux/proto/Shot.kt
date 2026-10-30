@@ -55,6 +55,13 @@ object Shot {
         registerAnrWatcher(device)
         repeat(6) {
             var clicked = false
+            // Staleness hygiene: ANR-storm dialogs re-render constantly, so
+            // a found UiObject2 can go stale between find and read/click
+            // (run 41010399546: DesktopClientTest.kt:208 and
+            // FailClosedDesktopTest.kt:55 both ended here). Skip to the next
+            // repeat and re-find FRESH objects; the dismiss logic is
+            // unchanged, only the object lifetime is respected.
+            try {
             val anrTitle = device.wait(androidx.test.uiautomator.Until.findObject(androidx.test.uiautomator.By.textContains("Not Responding")), 800)
                 ?: device.wait(androidx.test.uiautomator.Until.findObject(androidx.test.uiautomator.By.textContains("isn't responding")), 400)
             if (anrTitle != null) {
@@ -71,6 +78,11 @@ object Shot {
             if (allow != null) {
                 android.util.Log.i("PHONEDIAG", "answering app permission prompt: Allow")
                 allow.click(); clicked = true
+            }
+            } catch (e: androidx.test.uiautomator.StaleObjectException) {
+                android.util.Log.i("PHONEDIAG", "dismissSystemDialogs: dialog object went stale (re-render) - re-finding fresh objects")
+                Thread.sleep(500)
+                return@repeat
             }
             if (!clicked) { device.runWatchers(); return }
             device.waitForIdle(800)
