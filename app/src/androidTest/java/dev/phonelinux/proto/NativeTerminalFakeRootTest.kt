@@ -1,6 +1,7 @@
 package dev.phonelinux.proto
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import android.util.Log
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertTrue
@@ -22,7 +23,10 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class NativeTerminalFakeRootTest {
 
-    @Test
+    // JUnit timeout: convert any unbounded wait (install, session start,
+    // guest call) into an attributed failure with the stuck stack instead
+    // of a silent invocation stall. 20 min covers a fresh rootfs install.
+    @Test(timeout = 1_200_000)
     fun nativeTerminalRunsAsFakeRootAndDpkgAccepts(): Unit = runBlocking {
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
         val d = Distros.UBUNTU
@@ -34,6 +38,7 @@ class NativeTerminalFakeRootTest {
         }
         val rootfs = installer.rootfsDir(d)
 
+        Log.i("NativeFakeRoot", "ENTER nativeTerminalRunsAsFakeRootAndDpkgAccepts")
         val term = TerminalSession(ctx, rootfs) {}
         try {
             assertTrue("terminal session failed to start", term.start())

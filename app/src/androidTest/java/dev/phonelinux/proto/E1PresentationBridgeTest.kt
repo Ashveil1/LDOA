@@ -283,7 +283,9 @@ class E1PresentationBridgeTest {
         )
     )
 
-    @Test
+    // JUnit timeout: any unbounded guest/X-server wait becomes an
+    // attributed failure with the stuck stack, never a silent stall.
+    @Test(timeout = 1_200_000)
     fun e1PresentationBridge() {
         val app = InstrumentationRegistry.getInstrumentation().targetContext
         val args = InstrumentationRegistry.getArguments()
@@ -293,8 +295,18 @@ class E1PresentationBridgeTest {
         }
 
         val installer = DistroInstaller(app)
-        assertTrue("E1 invalid: ubuntu rootfs not installed by earlier lane steps",
-            installer.isInstalled(Distros.UBUNTU))
+        if (!installer.isInstalled(Distros.UBUNTU)) {
+            // Independent fixture: E1 needs only the BASE rootfs (proot guest
+            // probes: xdpyinfo/glxinfo/vulkaninfo/xwd + the test-owned lorie
+            // mirror) - never the GNOME package set. Install base here rather
+            // than depending on earlier lane steps (run 41052060565 declared
+            // E1-invalid on this precondition).
+            Log.i(tag, "E1: base rootfs absent - self-installing via DistroInstaller (base only, no GNOME)")
+            var last: InstallState = InstallState.NotInstalled
+            val ok = kotlinx.coroutines.runBlocking { installer.install(Distros.UBUNTU) { last = it } }
+            assertTrue("E1 invalid: base ubuntu rootfs install failed at state=" + last +
+                " - environment/fixture gap, not bridge evidence", ok)
+        }
         val rootfs = installer.rootfsDir(Distros.UBUNTU)
 
         // Fixture (runtime-only, never in the manifest): evidence tools.
@@ -306,6 +318,30 @@ class E1PresentationBridgeTest {
         ), timeoutSec = 600)
         Log.i(tag, "E1: fixture apt exit=" + apt.exitCode)
         assertEquals("fixture apt failed (see E1 logcat)", 0, apt.exitCode)
+        // Prerequisite provision check: apt exit 0 is not proof the probe
+        // tools resolve; verify each by name WITH its outcome logged.
+        val tools = listOf("xdpyinfo", "glxinfo", "vulkaninfo", "xwd", "xwininfo")
+        val missing = mutableListOf<String>()
+        for (tool in tools) {
+            val w = runGuest(app, rootfs, listOf("which", tool), timeoutSec = 20)
+            Log.i(tag, "E1: provision tool=" + tool + " exit=" + w.exitCode + " path=" + w.stdout.trim())
+            if (w.exitCode != 0) missing += tool
+        }
+        assertTrue("E1 invalid: probe tools missing after fixture apt: " + missing +
+            " - environment/fixture gap, not bridge evidence", missing.isEmpty())
+        // Driver candidate check: E1's scope is the software-WSI subset
+        // (lavapipe sw WSI + zink on swrast GLX). If neither candidate
+        // driver is present, no arm can produce bridge evidence - declare
+        // the fixture gap up front instead of failing mid-arm.
+        val vk = runGuest(app, rootfs, listOf("/bin/sh", "-c",
+            "vulkaninfo --summary 2>/dev/null | grep -iE 'llvmpipe|lavapipe|deviceName' | head -5"), timeoutSec = 60)
+        val gl = runGuest(app, rootfs, listOf("/bin/sh", "-c",
+            "glxinfo -B 2>/dev/null | grep -iE 'renderer string|Device:' | head -3"), timeoutSec = 60)
+        Log.i(tag, "E1: driver candidates vulkan=[" + vk.stdout.trim().replace("\n", " | ") +
+            "] glx=[" + gl.stdout.trim().replace("\n", " | ") + "]")
+        assertTrue("E1 invalid: no software driver candidate (lavapipe/llvmpipe absent from " +
+            "vulkaninfo) - environment/fixture gap, not bridge evidence",
+            vk.stdout.contains("llvmpipe") || vk.stdout.lowercase().contains("lavapipe"))
 
         // Server :0: reuse a live one READ-ONLY, else start a test-owned one.
         var serverProc: Process? = null

@@ -16,7 +16,7 @@ on:
 jobs:
   lorie-mouse-attribution:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -64,15 +64,25 @@ jobs:
             # EVIDENCE-ONLY harness: asserts bootstrap facts, logs/attaches
             # all gesture-attribution outcomes. A green job means "harness
             # executed", never "gesture qualified".
+            # Native-terminal discriminator FIRST, independently bounded: it has
+            # never completed in any run (blocked behind the harness stall); a
+            # later harness wedge must not leave it unmeasured again.
+            date -u +"NATIVE-FAKEROOT start %H:%M:%S"
+            timeout -s KILL 1500 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.NativeTerminalFakeRootTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-native.log | tail -15 || echo "NATIVE-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"
+            grep -q "OK (" /tmp/instr-native.log || touch /tmp/PHONELINUX_NATIVE_FAILED
+            if [ -f /tmp/PHONELINUX_NATIVE_FAILED ]; then echo "NATIVE-DIAG survivors at bound:"; adb -s emulator-5554 shell "ps -A -o PID,PPID,ARGS" | grep -E "phonelinux|proot|bash|Xlorie" || true; adb -s emulator-5554 shell am force-stop dev.phonelinux.proto || true; fi
             date -u +"HARNESS arms start %H:%M:%S"
-            adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.LdoaInputHarnessTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr.log | tail -15
+            timeout -s KILL 1500 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.LdoaInputHarnessTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr.log | tail -15 || echo "HARNESS-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"
             grep -q "OK (" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
+            if [ -f /tmp/PHONELINUX_TESTS_FAILED ]; then echo "HARNESS-DIAG survivors at bound:"; adb -s emulator-5554 shell "ps -A -o PID,PPID,ARGS" | grep -E "phonelinux|proot|nautilus|Xlorie|soffice" || true; adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/harness-owned-ledger.txt > harness-owned-ledger.txt 2>/dev/null || echo "LEDGER-PULL-FAILED rc=$? (ledger needs the test-side spawn-ledger patch)"; adb -s emulator-5554 shell am force-stop dev.phonelinux.proto || true; fi
             adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/guest-gnome.log > guest-gnome.log || echo "GNOME-LOG-PULL-FAILED rc=$?"
             adb -s emulator-5554 logcat -d > /tmp/shotlog.txt || true
             python3 .github/scripts/extract_shots.py /tmp/shotlog.txt screenshots || true
             python3 .github/scripts/extract_shots.py /tmp/instr.log screenshots || true
             find screenshots -type f | sort || true
+            if [ -f /tmp/PHONELINUX_NATIVE_FAILED ]; then echo "NATIVE-FAKEROOT-FAILED-OR-TIMEOUT"; fi
             if [ -f /tmp/PHONELINUX_TESTS_FAILED ]; then exit 1; fi
+            if [ -f /tmp/PHONELINUX_NATIVE_FAILED ]; then exit 1; fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -80,4 +90,5 @@ jobs:
           path: |
             screenshots/
             guest-gnome.log
+            harness-owned-ledger.txt
             /tmp/shotlog.txt

@@ -264,7 +264,11 @@ class XvncCompareTest {
         Log.i(TAG, "cmp: arm=$name session root identity: $rootIdent")
 
         var wins = 0
-        val readyDeadline = System.currentTimeMillis() + 240_000
+        // 600s: run 41052060565 showed wins=1/3, mode=bare-shell-fallback,
+        // proc alive at the old 240s budget - a SLOW cold start (instr1's
+        // full cold flow measured 460s on this emulator), not a structural
+        // wrong session; harness launch-watch uses the same 600s bound.
+        val readyDeadline = System.currentTimeMillis() + 600_000
         while (System.currentTimeMillis() < readyDeadline) {
             wins = guest(ctx, rootfs, display,
                 "xwininfo -root -tree 2>/dev/null | grep -ciE 'gnome.shell|gnome-shell' || true",

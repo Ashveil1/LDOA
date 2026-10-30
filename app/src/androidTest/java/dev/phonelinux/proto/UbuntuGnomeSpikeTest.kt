@@ -1674,6 +1674,42 @@ for i in range(d.childCount):
         val sc = mapToDevice(nws.x + nws.w / 2, nws.y + nws.h / 2)
         assertTrue("no device mapping for scroll center", sc != null)
         val scP = sc!!
+        // Settle before the baseline: nautilus can re-clear into a
+        // "Loading..." state after the population gate (run 41052060565:
+        // 23e empty+Loading, 23e5/23f populated identical at origin) - a
+        // baseline captured mid-load makes the movement gate measure the
+        // loading transition, not scroll. Wait for two consecutive stable
+        // frames over the content region; frames remain the semantic check.
+        // A stable frame ALONE is not a baseline: an empty/"Loading..."
+        // listing is perfectly stable. Require the same populated evidence
+        // as the population gate (>=3 of 5 content bands with distinct
+        // colors) AND consecutive stability, so the movement gate measures
+        // scroll against a settled populated listing, never a load transition.
+        var settlePrev: android.graphics.Bitmap? = null
+        var settled = false
+        val settleDeadline = System.currentTimeMillis() + 90_000
+        while (System.currentTimeMillis() < settleDeadline) {
+            val cur = fullShot()
+            val stable = settlePrev != null && regionDiff(settlePrev!!, cur, scrollRect) < 0.002
+            val content = android.graphics.Rect(scrollRect.left, scrollRect.top + 150,
+                scrollRect.right, (scrollRect.top + 550).coerceAtMost(scrollRect.bottom))
+            var bands = 0
+            if (stable) {
+                for (band in 0 until 5) {
+                    val br = android.graphics.Rect(content.left, content.top + band * content.height() / 5,
+                        content.right, content.top + (band + 1) * content.height() / 5)
+                    if (br.bottom <= cur.height && br.right <= cur.width && distinctColors(cur, br) > 10) bands++
+                }
+            }
+            Log.i(TAG, "scroll-diag: settle stable=" + stable + " bands=" + bands + "/5")
+            if (stable && bands >= 3) { settled = true; break }
+            settlePrev = cur
+            Thread.sleep(2_000)
+        }
+        Log.i(TAG, "scroll-diag: baseline settled=" + settled +
+            " (populated + stable listing required before scroll is measured)")
+        assertTrue("scroll baseline never settled to a populated stable listing - " +
+            "capture-invalid, not a scroll result", settled)
         val bmpBefore = fullShot()
         Shot.save("23e-ubuntu-scroll-target")
         // scroll-diag: the wheel path in SIMULATED_TOUCH (mode 2, the product
@@ -1736,6 +1772,19 @@ for i in range(d.childCount):
         assertTrue("xterm fixture unavailable (runtime check + bounded install both failed) - " +
             "environment/fixture gap, legacy scroll coverage unproven, not a product result",
             xtermBin.isNotEmpty())
+        // Fixture perms evidence before launch: "unable to reset uid" (run
+        // 41052060565) is xterm's privilege-reset path failing under proot
+        // fake-root. Strip the setuid bit ONLY if actually present (verified
+        // at runtime, not assumed); capture uid/perms either way so a
+        // non-setuid cause stays attributed.
+        Log.i(TAG, "xterm-scroll: fixture binary evidence: " +
+            xwin("ls -l " + xtermBin + "; id; stat -c '%A %a %U:%G' " + xtermBin + " 2>/dev/null || true").replace("\n", " | "))
+        if (xwin("[ -u " + xtermBin + " ] && echo yes || echo no").trim() == "yes") {
+            Log.i(TAG, "xterm-scroll: setuid bit present on fixture binary; stripping (test-only, proot fake-root makes the privilege reset fail)")
+            Log.i(TAG, "xterm-scroll: chmod result: " + xwin("chmod u-s " + xtermBin + " && echo u-s-done || echo u-s-failed").trim())
+        } else {
+            Log.i(TAG, "xterm-scroll: no setuid bit on fixture binary - reset-uid failure would be a proot syscall-faking gap, NOT the bit; leaving binary untouched")
+        }
         // Launch with stderr + process identity preserved (files left in
         // place): the previous form discarded xterm stderr, leaving any
         // startup death (font/config/crash) unobservable (run 41030227812).

@@ -57,7 +57,12 @@ import java.io.File
 class LdoaInputHarnessTest {
     private val TAG = "PHONELINUX_UBUNTU"
 
-    @Test
+    // JUnit timeout: an unbounded guest call (Proot.runGuest waitFor has no
+    // timeout) must surface as an ATTRIBUTED failure with the stuck stack,
+    // not a silent 45+ min invocation stall (runs 41035740162 / 41043553840).
+    // 20 min covers the worst-case bounded path (~10 min launch watch +
+    // ~4 min readiness + sleeps) with headroom; it cuts no ordinary work.
+    @Test(timeout = 1_200_000)
     fun lorieMouseRightClickAttribution(): Unit = runBlocking {
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
         val d = Distros.UBUNTU
@@ -76,6 +81,7 @@ class LdoaInputHarnessTest {
         Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c",
             "export DEBIAN_FRONTEND=noninteractive; apt-get install -y x11-utils xdotool"),
             fakeRoot = true)
+        Log.i(TAG, "harness: ENTER lorieMouseRightClickAttribution (touchMode=3 pinned parked path)")
         val kill = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c",
             "for f in /proc/[0-9]*/cmdline; do c=${'$'}(tr '\\0' ' ' < ${'$'}f 2>/dev/null); case ${'$'}c in *cmdline*) ;; *gnome-session*|*gnome-shell*) echo ${'$'}f | cut -d/ -f3;; esac; done | xargs -r kill 2>/dev/null; sleep 3; echo reset-done"))
         Log.i(TAG, "harness: session reset exit=${kill.exitCode}")
@@ -88,6 +94,22 @@ class LdoaInputHarnessTest {
             .edit().putString("touchMode", "3").apply()
         XServer.start(ctx)
         val proc = XServer.launchOrReuseGnomeSession(ctx, d, rootfs)
+        val ledger = java.io.File(ctx.filesDir, "harness-owned-ledger.txt")
+        fun ledgerNote(tag: String, pr: Process) {
+            val pid = try {
+                val m = pr.javaClass.methods.firstOrNull { it.name == "pid" && it.parameterCount == 0 }
+                (m?.invoke(pr) as? Number)?.toLong() ?: -1L
+            } catch (t: Throwable) { -1L }
+            val start = try { java.io.File("/proc/" + pid + "/stat").readText().split(" ")[21] } catch (t: Throwable) { "?" }
+            val uid = try { java.io.File("/proc/" + pid + "/status").readLines().first { it.startsWith("Uid:") } } catch (t: Throwable) { "?" }
+            ledger.appendText(tag + " pid=" + pid + " start=" + start + " " + uid + " alive=" + pr.isAlive + " wall=" + System.currentTimeMillis() + "\n")
+        }
+        // Owned-process ledger written as spawns happen, NOT only in finally:
+        // a JUnit timeout interrupts the test thread but cannot interrupt a
+        // stuck native waitFor, so the finally below may never run - the
+        // ledger is the post-mortem survivor record either way.
+        ledger.writeText("harness: owned ledger begin wall=" + System.currentTimeMillis() + "\n")
+        try {
         val logFile = File(ctx.filesDir, "guest-gnome.log")
         val deadline = System.currentTimeMillis() + 600_000
         var sawLaunchMarker = false
@@ -671,5 +693,22 @@ class LdoaInputHarnessTest {
             "arm4/arm5=drag/hold cancel-safety, arm6=GTK scroll real-content (pixel), " +
             "arm7=text selection (best-effort pixel), arm8=legacy xev DELIVERY-only; " +
             "LDOA-2FTAP-FIRE logcat deltas corroborate injection in arm3/arm8")
+        } finally {
+            // Owned-only teardown, best-effort, identity-revalidated through
+            // the ledger: stop the session THIS test started via the product
+            // calls (the product singleton trees are this test's here), then
+            // record post-teardown survivors explicitly.
+            try {
+                Log.i(TAG, "harness: teardown begin (owned-only)")
+                ledgerNote("pre-teardown gnome-launcher", proc)
+                try { proc.destroy() } catch (t: Throwable) { Log.i(TAG, "harness: proc.destroy threw " + t) }
+                try { XServer.stopDesktopMode(ctx) } catch (t: Throwable) { Log.i(TAG, "harness: stopDesktopMode threw " + t) }
+                Thread.sleep(2_000)
+                ledgerNote("post-teardown gnome-launcher", proc)
+                Log.i(TAG, "harness: teardown end; survivor state in filesDir/harness-owned-ledger.txt")
+            } catch (t: Throwable) {
+                Log.i(TAG, "harness: teardown threw (survivors possible, see ledger): " + t)
+            }
+        }
     }
 }
