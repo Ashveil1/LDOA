@@ -57,7 +57,28 @@ class UbuntuDesktopAutoEnterTest {
         val consent = device.wait(Until.findObject(By.text("Download and start")), 30 * 60_000)
         assertTrue("first-start consent dialog did not appear after install", consent != null)
         Shot.save("28b-ubuntu-consent-dialog")
-        consent.click()
+        // Staleness hygiene: the dialog re-renders as the install finishes,
+        // so a found UiObject2 can go stale between find and click (run
+        // 41001646953 instr1: StaleObjectException ended the leg). Re-find
+        // a FRESH object each attempt; a stale click performs no tap, so
+        // the dialog must still be there for the next attempt. The
+        // prep-state assert below remains the real success check.
+        var consentTapped = false
+        var lastConsentProblem = "none"
+        for (attempt in 1..4) {
+            val c = device.wait(Until.findObject(By.text("Download and start")), 15_000)
+            if (c == null) { lastConsentProblem = "dialog absent on attempt " + attempt; break }
+            try {
+                c.click()
+                consentTapped = true
+                break
+            } catch (e: androidx.test.uiautomator.StaleObjectException) {
+                lastConsentProblem = "stale object on attempt " + attempt
+                Log.i(TAG, "auto-enter: consent object stale (attempt " + attempt + ") - re-finding fresh object")
+                Thread.sleep(1_000)
+            }
+        }
+        assertTrue("first-start consent tap never landed (" + lastConsentProblem + ")", consentTapped)
         Log.i(TAG, "auto-enter: consent tapped - NO further taps from here")
         val prep = device.wait(Until.findObject(By.text("Starting Ubuntu desktop")), 30_000)
         assertTrue("preparing state not shown after consent", prep != null)

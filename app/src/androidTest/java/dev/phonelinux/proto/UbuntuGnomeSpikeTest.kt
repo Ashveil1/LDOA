@@ -69,6 +69,55 @@ class UbuntuGnomeSpikeTest {
 
         // Evidence window: poll guest-gnome.log for launch markers, up to 10 min.
         val logFile = File(ctx.filesDir, "guest-gnome.log")
+        fun xwin(cmd: String): String {
+            val r = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c", "export DISPLAY=:0; " + cmd),
+                extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"))
+            return r.stdout
+        }
+        /** Bounded READ-ONLY diagnostics at a desktop-gate failure, run on
+         *  the session's OWN tracked bus parsed from the launch log. (The
+         *  guest script's backgrounded diag inherits no bus address and
+         *  therefore always reports ServiceUnknown - its shell-mode lines
+         *  are void in BOTH green and red runs, 40996456682 vs 41001646953.)
+         *  Eval availability on this deployed shell is UNVERIFIED (modern
+         *  shells restrict Eval in initial-setup/gdm modes and
+         *  accountsservice is broken under proot), so the Eval round-trip
+         *  result is LOGGED as grounding data only - nothing gates on it. */
+        fun gnomeFailDiag(where: String) {
+            val logText = if (logFile.isFile) logFile.readText() else ""
+            val bus = logText.lineSequence().filter { it.contains("gnome-launch: session bus ") }
+                .lastOrNull()?.substringAfter("gnome-launch: session bus ")?.trim()
+            if (bus == null) {
+                Log.i(TAG, "diag[" + where + "]: no session bus line in guest-gnome.log")
+                return
+            }
+            val ping = xwin("DBUS_SESSION_BUS_ADDRESS='" + bus + "' gdbus call --session " +
+                "--dest org.gnome.Shell --object-path /org/gnome/Shell " +
+                "--method org.freedesktop.DBus.Peer.Ping 2>&1").trim()
+            Log.i(TAG, "diag[" + where + "]: tracked-bus ping=" + ping.take(200))
+            // SUPPORTED introspection (no Eval): the Mode property answers
+            // the session-mode question directly, and Introspect lists the
+            // interfaces THIS shell actually exports (Eval presence included).
+            val mode = xwin("DBUS_SESSION_BUS_ADDRESS='" + bus + "' gdbus call --session " +
+                "--dest org.gnome.Shell --object-path /org/gnome/Shell " +
+                "--method org.freedesktop.DBus.Properties.Get org.gnome.Shell Mode 2>&1").trim()
+            Log.i(TAG, "diag[" + where + "]: shell Mode property=" + mode.take(120))
+            val ifaces = xwin("DBUS_SESSION_BUS_ADDRESS='" + bus + "' gdbus call --session " +
+                "--dest org.gnome.Shell --object-path /org/gnome/Shell " +
+                "--method org.freedesktop.DBus.Introspectable.Introspect 2>&1 " +
+                "| grep -o 'interface name=\"[^\"]*\"' | sort -u").trim()
+            Log.i(TAG, "diag[" + where + "]: exported interfaces=" + ifaces.take(400))
+            val eval = xwin("DBUS_SESSION_BUS_ADDRESS='" + bus + "' gdbus call --session " +
+                "--dest org.gnome.Shell --object-path /org/gnome/Shell " +
+                "--method org.gnome.Shell.Eval \"'diag-alive'\" 2>&1").trim()
+            Log.i(TAG, "diag[" + where + "]: Eval round-trip (GROUNDING ONLY, never gated)=" + eval.take(200))
+            val tree = xwin("xwininfo -root -children | head -25").replace("\n", " | ")
+            Log.i(TAG, "diag[" + where + "]: chrome window tree=" + tree.take(600))
+        }
+        fun windowIds(pattern: String): List<String> =
+            xwin("xwininfo -root -tree | grep -i '" + pattern + "' | awk '{print ${'$'}1}'")
+                .lines().filter { it.trimStart().startsWith("0x") }
+
         val deadline = System.currentTimeMillis() + 600_000
         var sawLaunchMarker = false
         while (System.currentTimeMillis() < deadline) {
@@ -89,6 +138,7 @@ class UbuntuGnomeSpikeTest {
             Thread.sleep(10_000)
         }
         Log.i(TAG, "gnome log tail: " + (if (logFile.isFile) logFile.readText().takeLast(1500) else "<missing>"))
+        if (!sawLaunchMarker) gnomeFailDiag("launch-marker")
         assertTrue("session script never reached the launch marker", sawLaunchMarker)
         assertTrue("gnome session process died before the evidence window closed", proc.isAlive)
 
@@ -114,15 +164,6 @@ class UbuntuGnomeSpikeTest {
         // icon -> a real nautilus window must map; finger-drag its headerbar
         // -> the geometry must move. Verified through the guest's own
         // xwininfo against :0, like the Alpine desktop lane.
-        fun xwin(cmd: String): String {
-            val r = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c", "export DISPLAY=:0; " + cmd),
-                extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"))
-            return r.stdout
-        }
-        fun windowIds(pattern: String): List<String> =
-            xwin("xwininfo -root -tree | grep -i '" + pattern + "' | awk '{print ${'$'}1}'")
-                .lines().filter { it.trimStart().startsWith("0x") }
-
         /** The VISIBLE nautilus window: (id, x, y) of the first matching
          *  window that IsViewable and >200x200. Nautilus owns hidden 1x1
          *  utility windows (run 40675364228: windowIds matched one at
