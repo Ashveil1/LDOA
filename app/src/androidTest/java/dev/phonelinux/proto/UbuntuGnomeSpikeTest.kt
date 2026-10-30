@@ -1500,13 +1500,46 @@ for i in range(d.childCount):
                 "re-tap (geom=" + menuGeomNow() + ", classic=" + rmh + "px) - representation differs " +
                 "from the Nautilus 46 in-place page; frames 23d2/23d5a preserved, no blind leaf tap " +
                 "attempted", pageExpanded())
-            // Measured from run 41007543219's pixels (mapping probes showed
-            // device==guest with y offset +128): the header row occupies the
-            // parent item's row and the "Open" leaf sits 21px below it
-            // (dev-y 366.5 vs 345.5), same row width and x center.
-            val leafTap = mapToDevice(rmx + rmw / 2, rmy + 51)
-            Log.i(TAG, "2ftap-row: submenu leaf tap=" + leafTap)
-            if (leafTap != null) device.click(leafTap.first, leafTap.second)
+            // Structural leaf targeting, qualified against the DECISIVE
+            // expanded frame of run 41025407472 (shot 23d5, pixel-inspected):
+            // the in-place expanded page has FIVE rows - [0] back-arrow +
+            // "Open" header, [1] "Open" leaf (Return), [2] "Open in New
+            // Tab", [3] "Open in New Window", [4] "Open With...". The real
+            // leaf is ROW 1, not the last row (the last row is "Open
+            // With...", which opens a dialog - an unintended action).
+            // Run 41025407472's miss: the old fixed +51px offset landed in
+            // the header row. Targets are derived from the expanded page's
+            // OWN geometry (menuGeomNow): row height = H/5, leaf center at
+            // 1.5 row-heights from the page top. Fallback candidate is row
+            // 2 ("Open in New Tab" - still navigates INTO the fixture, so
+            // semantically a valid Open proof); rows 3-4 are never tapped.
+            // Unintended-action guard: the fallback fires only while the
+            // title is unchanged AND the menu is still open (geometry
+            // re-read non-null) - a late first-tap success or a closed menu
+            // can never receive a second blind tap. Bounded: max 2 taps.
+            fun tapLeafCandidates() {
+                fun menuStillOpen(): Boolean = menuGeomNow() != null
+                val g = menuGeomNow()
+                val rowH = (g?.third ?: 0) / 5
+                val leaf = if (g != null && rowH > 0)
+                    mapToDevice(g.first + rmw / 2, g.second + rowH + rowH / 2) else null
+                Log.i(TAG, "2ftap-row: expanded geom=" + g + " rowH=" + rowH + " leaf(row1) tap=" + leaf)
+                if (leaf != null) device.click(leaf.first, leaf.second)
+                Thread.sleep(2_000)
+                if (!titleHasFixture() && menuStillOpen()) {
+                    val g2 = menuGeomNow()
+                    val rowH2 = (g2?.third ?: 0) / 5
+                    val newTab = if (g2 != null && rowH2 > 0)
+                        mapToDevice(g2.first + rmw / 2, g2.second + 2 * rowH2 + rowH2 / 2) else null
+                    Log.i(TAG, "2ftap-row: row1 missed, menu still open - one bounded fallback " +
+                        "row2 (Open in New Tab, same into-fixture proof) geom=" + g2 + " tap=" + newTab)
+                    if (newTab != null) device.click(newTab.first, newTab.second)
+                    Thread.sleep(2_000)
+                } else if (!titleHasFixture()) {
+                    Log.i(TAG, "2ftap-row: row1 missed and menu already closed - no blind second tap")
+                }
+            }
+            tapLeafCandidates()
         }
         Thread.sleep(2_000)
         Shot.save("23d5-ubuntu-row-menu-open-clicked")

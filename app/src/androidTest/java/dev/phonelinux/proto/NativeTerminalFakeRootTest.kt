@@ -54,13 +54,22 @@ class NativeTerminalFakeRootTest {
             assertTrue("guest shell must observe uid 0 under proot -0, got:\n$idOut",
                 Regex("uid=0\\D").containsMatchIn(idOut))
 
-            term.send("rm -rf /tmp/probe /tmp/probe.deb /tmp/probe.out; mkdir -p /tmp/probe/DEBIAN && " +
+            // Every stage's output is echoed into the scrollback so a
+            // failure names its own cause: BUILD-RC isolates a probe-deb
+            // construction defect from a dpkg environment problem, and the
+            // captured outputs make the superuser-denial absence check
+            // meaningful (review: redirected-then-deleted stderr proved
+            // nothing). Markers bracket the dumps so the await is exact.
+            term.send("rm -rf /tmp/probe /tmp/probe.deb /tmp/probe.out /tmp/probe-build.out; mkdir -p /tmp/probe/DEBIAN && " +
                 "printf 'Package: probe\\nVersion: 1\\nArchitecture: all\\nMaintainer: t\\nDescription: probe\\n' > /tmp/probe/DEBIAN/control && " +
-                "dpkg-deb --build /tmp/probe /tmp/probe.deb >/dev/null 2>&1; " +
+                "dpkg-deb --build /tmp/probe /tmp/probe.deb >/tmp/probe-build.out 2>&1; echo BUILD-RC=\$?; " +
                 "dpkg --no-act -i /tmp/probe.deb >/tmp/probe.out 2>&1; echo PROBE-RC=\$?; " +
-                "rm -rf /tmp/probe /tmp/probe.deb")
-            val probeOut = await("PROBE-RC=", 60_000)
+                "echo PROBE-DUMP-BEGIN; cat /tmp/probe-build.out; cat /tmp/probe.out; echo PROBE-DUMP-END; " +
+                "rm -rf /tmp/probe /tmp/probe.deb /tmp/probe.out /tmp/probe-build.out")
+            val probeOut = await("PROBE-DUMP-END", 60_000)
             assertTrue("dpkg probe never completed:\n$probeOut", probeOut.contains("PROBE-RC="))
+            assertTrue("probe .deb failed to build (test fixture defect, not a product result):\n$probeOut",
+                probeOut.contains("BUILD-RC=0"))
             assertTrue("dpkg install-path privilege check must accept proot fake root (rc 0); scrollback:\n$probeOut",
                 probeOut.contains("PROBE-RC=0"))
             assertTrue("superuser denial must be gone:\n$probeOut",
