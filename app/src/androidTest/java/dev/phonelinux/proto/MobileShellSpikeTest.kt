@@ -255,7 +255,13 @@ class MobileShellSpikeTest {
             Log.i(TAG, "gate2 tree (scale=$scale): " + treeDets.joinToString { d -> d.comm + "[" + d.pid + "] ppid=" + d.ppid + " sid=" + d.sid + " tty=" + d.ttyNr })
             val scriptDet = treeDets.singleOrNull { it.comm == "script" }
             assertTrue("gate2: expected exactly one script layer as proot root's child (scale=$scale): " + treeDets.filter { it.comm == "script" }, scriptDet != null && scriptDet.ppid == rr)
-            val shellDet = treeDets.singleOrNull { it.comm == "sh" && it.sid == it.pid }
+            // Selector must discriminate the SESSION shell from terminal
+            // subshells: xterm setsid's its child shell, so a bare
+            // sid==pid match finds TWO leaders (run 41001661701:
+            // sh[15418] ppid=script vs sh[15463] ppid=xterm) and
+            // singleOrNull false-fails. The session shell is the leader
+            // that is script's DIRECT child; the ppid assert below stays.
+            val shellDet = treeDets.singleOrNull { it.comm == "sh" && it.sid == it.pid && scriptDet != null && it.ppid == scriptDet.pid }
             assertTrue("gate2: session shell missing or not a session leader (scale=$scale)", shellDet != null)
             assertTrue("gate2: session shell is not script's child (scale=$scale)", shellDet != null && scriptDet != null && shellDet.ppid == scriptDet.pid)
             for (c in listOf("jwm", "xterm")) {
@@ -312,7 +318,7 @@ class MobileShellSpikeTest {
             val tree = treeOf(rootPid!!, scanProc())
             val idents = tree.mapNotNull { identityOf(it) }
             val scriptId = tree.singleOrNull { procDetail(it)?.comm == "script" }?.let { identityOf(it) }
-            val shellId = tree.singleOrNull { p -> val d = procDetail(p); d != null && d.comm == "sh" && d.sid == d.pid }?.let { identityOf(it) }
+            val shellId = tree.singleOrNull { p -> val d = procDetail(p); d != null && d.comm == "sh" && d.sid == d.pid && scriptId != null && d.ppid == scriptId.pid }?.let { identityOf(it) }
             assertTrue("gate2 " + cell + ": script identity missing", scriptId != null)
             assertTrue("gate2 " + cell + ": session-shell identity missing", shellId != null)
             val victim = if (cell == "forward") shellId!! else scriptId!!
