@@ -39,6 +39,15 @@ object XServer {
     @Volatile private var sessionRootIdent: PIdent? = null
     @Volatile private var sessionBusIdent: PIdent? = null
     @Volatile private var gnomeSession: Pair<String, Process>? = null
+
+    /** Bus address of the TRACKED session, captured from its own
+     *  "gnome-launch: session bus" log line when the gate first sees it.
+     *  A retry on the REUSED session gets no fresh bus line, so the gate
+     *  matches registration markers against this tracked address instead.
+     *  Cross-session acceptance is impossible: the address embeds the
+     *  bus guid, unique per dbus-launch. Cleared on fresh launch + stop.
+     *  (Ash 2026-10-30 10:35 approval: fix the retry loop.) */
+    @Volatile private var gnomeSessionBus: String? = null
     @Volatile var preparing = false
         private set
 
@@ -57,7 +66,7 @@ object XServer {
             return current.second
         }
         Log.i(TAG, "launching GNOME session")
-        return GuestUbuntu.launchGnomeSession(ctx, rootfs).also { gnomeSession = distro.id to it }
+        return GuestUbuntu.launchGnomeSession(ctx, rootfs).also { gnomeSession = distro.id to it; gnomeSessionBus = null }
     }
 
     fun tmpDir(ctx: Context): File = File(ctx.filesDir, "usr/tmp")
@@ -130,11 +139,17 @@ object XServer {
                 val fresh = log.readText().substring(logBase.toInt().coerceAtMost(log.length().toInt()))
                 val bus = fresh.lineSequence().firstOrNull { it.contains("gnome-launch: session bus ") }
                     ?.substringAfter("gnome-launch: session bus ")?.trim()
+                if (bus != null) gnomeSessionBus = bus
+                // Reused session: no fresh bus line - fall back to the
+                // tracked address of THIS process's own launch. A marker
+                // naming any other bus (stale or foreign session) still
+                // fails the equality check.
+                val expected = bus ?: gnomeSessionBus
                 val hit = fresh.lineSequence().firstOrNull { line ->
                     line.contains("gnome-launch: shell registered") &&
-                        (bus == null || line.substringAfter("bus=").trim() == bus)
+                        (expected == null || line.substringAfter("bus=").trim() == expected)
                 }
-                if (hit != null && bus != null) return hit.trim()
+                if (hit != null && expected != null) return hit.trim()
             }
             Thread.sleep(2_000)
         }
@@ -244,6 +259,15 @@ object XServer {
                                         else "(guest-gnome.log has no new output)"
                                     failure = "GNOME shell did not register on its session bus in 60s (process " +
                                         (if (p.isAlive) "still running" else "exited") + "). Log tail:\n" + tail
+                                    // Retain ownership of the still-running session so
+                                    // Stop session can tear it down by identity - without
+                                    // these handles the failed session is an orphan no
+                                    // teardown can reach. (Ash 2026-10-30 10:35 approval.)
+                                    if (p.isAlive) {
+                                        sessionProcess = p
+                                        sessionRootIdent = pidOf(p)?.let { identityOf(it) }
+                                        sessionBusIdent = sessionBusPid(ctx)?.let { bp -> identityOf(bp) }
+                                    }
                                 }
                             } else if (failure == null) {
                                 failure = "GNOME unavailable after package install; desktop would be empty"
@@ -306,6 +330,8 @@ object XServer {
         sessionProcess = null
         sessionRootIdent = null
         sessionBusIdent = null
+        gnomeSession = null
+        gnomeSessionBus = null
         val xs = process
         if (xs != null) { try { xs.destroy() } catch (t: Throwable) { }; process = null }
         ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)

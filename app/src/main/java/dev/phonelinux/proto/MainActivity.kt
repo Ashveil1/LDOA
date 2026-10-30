@@ -248,7 +248,25 @@ class MainActivity : ComponentActivity() {
                                 vm.desktopError = null
                                 requestDesktop(Distros.UBUNTU)
                             }) { Text("Try again") } },
-                            dismissButton = { TextButton(onClick = { vm.desktopError = null }) { Text("Close") } },
+                            dismissButton = { Row {
+                                // Ash 2026-10-30 10:35 approval: copy the FULL
+                                // guest log (the 1500-char tail above cannot
+                                // carry the launch evidence) + stop the failed
+                                // session (handle retained by XServer on failure).
+                                TextButton(onClick = {
+                                    val f = java.io.File(this@MainActivity.filesDir, "guest-gnome.log")
+                                    val body = if (f.isFile) f.readText() else "(guest-gnome.log missing)"
+                                    val cm = this@MainActivity.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                    cm.setPrimaryClip(android.content.ClipData.newPlainText("guest-gnome.log", body))
+                                    vm.log += "[tap] desktop error dialog: copied guest-gnome.log (" + body.length + " chars)\n"
+                                }) { Text("Copy full log") }
+                                TextButton(onClick = {
+                                    vm.log += "[tap] desktop error dialog: stop session\n"
+                                    vm.desktopError = null
+                                    XServer.stopDesktopMode(this@MainActivity)
+                                }) { Text("Stop session") }
+                                TextButton(onClick = { vm.desktopError = null }) { Text("Close") }
+                            } },
                             title = { Text("Ubuntu desktop did not start") },
                             text = { Text(err, fontSize = 13.sp,
                                 modifier = Modifier.verticalScroll(rememberScrollState())) })
