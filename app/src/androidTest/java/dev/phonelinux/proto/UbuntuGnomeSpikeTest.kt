@@ -668,8 +668,8 @@ for i in range(d.childCount):
         // PROBE_TAG match the record captured AT THIS TEST'S LAUNCH,
         // re-verified immediately before EVERY signal (wrapper included).
         // Unreadable/mismatched identity => no signal, capture invalid.
-        data class ProbeHandle(val tag: String, val wrapPid: Int, val xPid: Int,
-                               val startTime: Long, val uid: Int)
+        data class ProbePid(val pid: Int, val start: Long, val uid: Int)
+        data class ProbeHandle(val tag: String, val wrap: ProbePid, val x: ProbePid)
         var probeHandle: ProbeHandle? = null
         val probeSession = "s" + java.util.UUID.randomUUID().toString().substring(0, 8)
         // Candidate identification ONLY: a scan shows processes that COULD
@@ -683,12 +683,23 @@ for i in range(d.childCount):
                 "tg=${'$'}(tr '\\0' '\\n' < /proc/${'$'}pid/environ 2>/dev/null | grep '^PROBE_TAG=' | head -1); " +
                 "echo cand pid=${'$'}pid start=${'$'}st uid=${'$'}u ${'$'}tg;; esac; done; true")
                 .replace("\n", " | ").ifBlank { "<none>" }
-        fun probeVerify(pid: Int, expectTag: String, expectUid: Int): Boolean {
+        /** Read a probe process's live identity. Triple of (starttime,
+         *  uid, tagOk); null element = that fact UNREADABLE (distinct
+         *  causes logged by the caller; run 40996456682 proved "identity
+         *  unreadable" can mask a uid MISMATCH: /proc/pid/status reports
+         *  the real host uid (e.g. 10192), not proot's fake root 0). */
+        fun probeIdent(pid: Int, expectTag: String): Triple<Long?, Int?, Boolean> {
             val st = xwin("awk '{print ${'$'}22}' /proc/" + pid + "/stat 2>/dev/null || true").trim().toLongOrNull()
             val uid = xwin("awk '/^Uid:/{print ${'$'}2}' /proc/" + pid + "/status 2>/dev/null || true").trim().toIntOrNull()
             val tagOk = xwin("tr '\\0' '\\n' < /proc/" + pid + "/environ 2>/dev/null | grep -c '^PROBE_TAG=" +
                 expectTag + "${'$'}' || true").trim() == "1"
-            return st != null && uid != null && uid == expectUid && tagOk
+            return Triple(st, uid, tagOk)
+        }
+        /** Full re-verification against the LAUNCH-CAPTURED identity:
+         *  same pid, same starttime, same uid, this session's tag. */
+        fun probeVerify(c: ProbePid, expectTag: String): Boolean {
+            val (st, uid, tagOk) = probeIdent(c.pid, expectTag)
+            return st != null && st == c.start && uid != null && uid == c.uid && tagOk
         }
         // A dead capture (xinput exited at startup) makes every count from
         // it UNKNOWN: gates must say capture-invalid, never pass by
@@ -731,17 +742,31 @@ for i in range(d.childCount):
             val parts = rec.split(Regex("\\s+"))
             val wp = parts.getOrNull(0)?.toIntOrNull()
             val xp = parts.getOrNull(1)?.toIntOrNull()
+            var captured = false
             if (wp != null && xp != null) {
-                val st = xwin("awk '{print ${'$'}22}' /proc/" + xp + "/stat 2>/dev/null || true").trim().toLongOrNull()
-                if (st != null && probeVerify(xp, ptag, 0)) {
-                    probeHandle = ProbeHandle(tag, wp, xp, st, 0)
-                    Log.i(TAG, "probe[" + tag + "]: launch identity verified wrap=" + wp + " xpid=" + xp + " start=" + st)
+                val (xst, xuid, xtag) = probeIdent(xp, ptag)
+                val (wst, wuid, wtag) = probeIdent(wp, ptag)
+                if (xst != null && xuid != null && xtag && wst != null && wuid != null && wtag) {
+                    probeHandle = ProbeHandle(tag, ProbePid(wp, wst, wuid), ProbePid(xp, xst, xuid))
+                    captured = true
+                    Log.i(TAG, "probe[" + tag + "]: launch identity captured wrap=" + wp + "(start=" + wst + ",uid=" + wuid +
+                        ") xpid=" + xp + "(start=" + xst + ",uid=" + xuid + ")")
                 } else {
-                    Log.i(TAG, "probe[" + tag + "]: launch identity UNREADABLE (xp=" + xp + ") - capture invalid, nothing will be signaled")
+                    Log.i(TAG, "probe[" + tag + "]: launch identity capture FAILED - " +
+                        "xpid=" + xp + " start=" + (xst?.toString() ?: "UNREADABLE") +
+                        " uid=" + (xuid?.toString() ?: "UNREADABLE") + " tag=" + xtag +
+                        " | wrap=" + wp + " start=" + (wst?.toString() ?: "UNREADABLE") +
+                        " uid=" + (wuid?.toString() ?: "UNREADABLE") + " tag=" + wtag)
                 }
             } else {
-                Log.i(TAG, "probe[" + tag + "]: no xinput child recorded (rec=" + rec + ") - capture invalid")
+                Log.i(TAG, "probe[" + tag + "]: no xinput child recorded (rec=" + rec + ")")
             }
+            // An unknown-identity probe must never contaminate later gates:
+            // fail the probe/session here. The 130s `timeout` on the wrapper
+            // bounds the leak; there is no ownership-proven way to signal a
+            // process whose launch identity we do not hold (main 11:13).
+            assertTrue("probe[" + tag + "]: launch identity capture failed - capture architecture invalid, " +
+                "aborting rather than letting an unknown-identity probe leak into later gates", captured)
             Thread.sleep(1_500) // grace for xinput to attach to :0 after the marker
         }
         fun probeStop(tag: String): String {
@@ -749,14 +774,14 @@ for i in range(d.childCount):
             Thread.sleep(500)
             val h = probeHandle
             if (h == null || h.tag != tag) {
-                Log.i(TAG, "probe[" + tag + "]: NO verified launch identity - signaling nothing; capture invalid")
+                Log.i(TAG, "probe[" + tag + "]: NO launch-captured identity - signaling nothing; capture invalid")
             } else {
-                for (pid in listOf(h.xPid, h.wrapPid)) {
-                    if (probeVerify(pid, probeSession + "-" + tag, h.uid)) {
-                        xwin("kill " + pid + " 2>/dev/null || true")
-                        Log.i(TAG, "probe[" + tag + "]: signaled pid=" + pid + " after identity re-verify")
+                for (c in listOf(h.x, h.wrap)) {
+                    if (probeVerify(c, probeSession + "-" + tag)) {
+                        xwin("kill " + c.pid + " 2>/dev/null || true")
+                        Log.i(TAG, "probe[" + tag + "]: signaled pid=" + c.pid + " after full identity re-verify")
                     } else {
-                        Log.i(TAG, "probe[" + tag + "]: identity mismatch/unreadable for pid=" + pid +
+                        Log.i(TAG, "probe[" + tag + "]: identity mismatch/unreadable for pid=" + c.pid +
                             " - NOT signaled (no kill on unverified identity)")
                     }
                 }
