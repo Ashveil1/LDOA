@@ -77,13 +77,16 @@ object GuestUbuntu {
         return r
     }
 
-    /** Launch the GNOME session: workarounds first, then gnome-shell --x11
-     *  as the session leader (exec keeps it proot-root's direct child). */
-    fun launchGnomeSession(ctx: Context, rootfs: File): Process {
-        File(rootfs, "root/gnome-session.sh").writeText(
+    /** The generated /root/gnome-session.sh content, extracted so the session
+     *  env can be regression-tested without launching proot. */
+    internal fun gnomeSessionScript(): String =
             """
             #!/bin/sh
-            export DISPLAY=:0 HOME=/root XDG_RUNTIME_DIR=/tmp/xdg XDG_CURRENT_DESKTOP=ubuntu:GNOME
+            # Backend selection: logind is renamed away below, so mutter cannot
+            # learn the session type from it; its tty-gated DISPLAY legacy
+            # fallback is also unavailable. Export the type explicitly or
+            # gnome-shell exits 1 with "Unsupported session type".
+            export DISPLAY=:0 HOME=/root XDG_RUNTIME_DIR=/tmp/xdg XDG_CURRENT_DESKTOP=ubuntu:GNOME XDG_SESSION_TYPE=x11
             export PLINUX_SESSION=desktop
             LAUNCH_ID=$(date +%s)
             echo "gnome-launch: launch id=${'$'}LAUNCH_ID"
@@ -190,7 +193,12 @@ object GuestUbuntu {
               echo "gnome-launch: fallback-state xdg=$(ls /tmp/xdg 2>&1 | tr '\n' '|') ice=$(ls /tmp/.ICE-unix 2>&1 | tr '\n' '|') x11=$(ls /tmp/.X11-unix 2>&1 | tr '\n' '|')"
               exec gnome-shell --x11
             fi
-            """.trimIndent() + "\n")
+            """.trimIndent() + "\n"
+
+    /** Launch the GNOME session: workarounds first, then gnome-shell --x11
+     *  as the session leader (exec keeps it proot-root's direct child). */
+    fun launchGnomeSession(ctx: Context, rootfs: File): Process {
+        File(rootfs, "root/gnome-session.sh").writeText(gnomeSessionScript())
         val nd = ctx.applicationInfo.nativeLibraryDir
         val log = File(ctx.filesDir, "guest-gnome.log")
         val pb = ProcessBuilder(
