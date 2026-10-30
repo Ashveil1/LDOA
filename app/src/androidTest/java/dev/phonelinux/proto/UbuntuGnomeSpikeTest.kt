@@ -1410,8 +1410,42 @@ for i in range(d.childCount):
         // cannot pass this. Window height is diagnostic only - a valid
         // menu never fails on size alone.
         Log.i(TAG, "2ftap-row: menu window height (diagnostic, not a gate)=" + rmh)
+        // Nautilus 46: the row menu's first item "Open" is a submenu PARENT.
+        // Tapping it replaces the popup content IN PLACE with a submenu page
+        // (back arrow + "Open" header on the first row, the actual "Open"
+        // leaf one row below; same window, same top-left - run 41007543219
+        // frames 23d2/23d5), NOT a right-adjacent submenu window. Navigation
+        // needs the leaf row. Finger route preserved: coordinate taps only,
+        // no keyboard shortcut (a shortcut would bypass the menu interaction).
+        fun titleHasFixture(): Boolean {
+            val nv = nauVisible() ?: return false
+            return xwin("xprop -id " + nv.id + " _NET_WM_NAME 2>/dev/null || true")
+                .trim().contains("LDOA-row-fixture")
+        }
+        val preOpenShot = fullShot()
         val openItem = mapToDevice(rmx + rmw / 2, rmy + 30)
         if (openItem != null) device.click(openItem.first, openItem.second)
+        Thread.sleep(1_500)
+        Shot.save("23d5a-ubuntu-row-menu-submenu")
+        if (!titleHasFixture()) {
+            // Fail with the frames preserved rather than tap blind when the
+            // expected in-place page did not appear (representation differs;
+            // review 23d5a and re-derive the leaf geometry before retrying).
+            if (menuDevRect != null) {
+                val pageFrac = regionDiff(preOpenShot, fullShot(), menuDevRect)
+                Log.i(TAG, "2ftap-row: submenu page replacement frac=" + pageFrac)
+                assertTrue("submenu page did not replace the popup in place (frac=" + pageFrac +
+                    ") - representation differs from the Nautilus 46 in-place page; " +
+                    "frames 23d2/23d5a preserved, no blind leaf tap attempted", pageFrac > 0.05)
+            }
+            // Measured from run 41007543219's pixels (mapping probes showed
+            // device==guest with y offset +128): the header row occupies the
+            // parent item's row and the "Open" leaf sits 21px below it
+            // (dev-y 366.5 vs 345.5), same row width and x center.
+            val leafTap = mapToDevice(rmx + rmw / 2, rmy + 51)
+            Log.i(TAG, "2ftap-row: submenu leaf tap=" + leafTap)
+            if (leafTap != null) device.click(leafTap.first, leafTap.second)
+        }
         Thread.sleep(2_000)
         Shot.save("23d5-ubuntu-row-menu-open-clicked")
         var intoFixture = false
@@ -1682,12 +1716,15 @@ for i in range(d.childCount):
                 fNau.y + feF[2] + (fNau.h - feF[2] - feF[3]) - 80)
         } else bgTarget
         assertTrue("no mapping for toggles-off tap", fTarget != null)
+        // Fresh before-set: diffing against the background-menu section's
+        // stale menuBeforeIds would report every window created since.
+        val offBeforeIds = rootChildIds()
         probeStart("offtap")
         twoFingerTap(fTarget!!.first - 40, fTarget!!.second, fTarget!!.first + 40, fTarget!!.second)
         Thread.sleep(2_000)
         val offTapProbe = probeStop("offtap")
         val offTapInjected = buttonPresses(offTapProbe, 3)
-        val offMenuIds = (rootChildIds() - menuBeforeIds).sorted()
+        val offMenuIds = (rootChildIds() - offBeforeIds).sorted()
         Log.i(TAG, "toggles-off 2ftap: injectedRightClicks=" + offTapInjected +
             " newWindows=" + offMenuIds +
             " (NONZERO here proves the toggle is INERT in SIMULATED_TOUCH - both readers are direct-mode-gated)")
