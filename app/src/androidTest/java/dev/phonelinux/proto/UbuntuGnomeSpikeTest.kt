@@ -745,6 +745,18 @@ for i in range(d.childCount):
             }
             return if (total == 0) 0.0 else diff.toDouble() / total
         }
+        fun distinctColors(bmp: android.graphics.Bitmap, r: android.graphics.Rect): Int {
+            val seen = HashSet<Int>()
+            val x0 = r.left.coerceIn(0, bmp.width - 1); val x1 = r.right.coerceIn(0, bmp.width - 1)
+            val y0 = r.top.coerceIn(0, bmp.height - 1); val y1 = r.bottom.coerceIn(0, bmp.height - 1)
+            var y = y0
+            while (y <= y1) {
+                var x = x0
+                while (x <= x1) { seen.add(bmp.getPixel(x, y)); x += 4 }
+                y += 4
+            }
+            return seen.size
+        }
         fun devRectOf(x: Int, y: Int, w: Int, h: Int): android.graphics.Rect {
             val tl = mapToDevice(x, y)!!; val br = mapToDevice(x + w, y + h)!!
             val dw = br.first - tl.first; val dh = br.second - tl.second
@@ -1039,14 +1051,17 @@ for i in range(d.childCount):
         val deskTarget = mapToDevice(scrW - 80, scrH - 60)
         assertTrue("no mapping for desktop point", deskTarget != null)
         val deskP = deskTarget!!
+        // No-menu negatives are WINDOW-DIFF based: the atspi dump is
+        // blind in this stack, so an atspi-empty check would be vacuous.
+        val deskIds0 = rootChildIds()
         device.swipe(deskP.first - 60, deskP.second - 30, deskP.first, deskP.second, 20)
         Thread.sleep(1_200)
         assertTrue("one-finger drag spuriously opened a context menu",
-            (menuHits(parseAts(atspi()), bgProbes) - baselineBgNames).isEmpty())
+            (rootChildIds() - deskIds0).filter { plausibleMenuGeom(it) }.isEmpty())
         device.click(deskP.first, deskP.second)
         Thread.sleep(1_200)
         assertTrue("plain tap spuriously opened a context menu",
-            (menuHits(parseAts(atspi()), bgProbes) - baselineBgNames).isEmpty())
+            (rootChildIds() - deskIds0).filter { plausibleMenuGeom(it) }.isEmpty())
         // A short 400ms hold (below the Android long-press timeout) is a
         // plain left click in SIMULATED_TOUCH and must not right-click.
         // A 1-finger hold past the timeout is a BUTTON_LEFT press-hold
@@ -1060,57 +1075,163 @@ for i in range(d.childCount):
         assertTrue("sub-threshold hold injected button-3 (probeTail=" +
             shProbe.takeLast(200).replace("\n", " | ") + ")", buttonPresses(shProbe, 3) == 0)
         assertTrue("sub-threshold hold opened a menu",
-            (menuHits(parseAts(atspi()), bgProbes) - baselineBgNames).isEmpty())
+            (rootChildIds() - deskIds0).filter { plausibleMenuGeom(it) }.isEmpty())
         probeStart("twofingbg")
         twoFingerSwipe(deskP.first - 40, deskP.second - 80, deskP.first + 40, deskP.second - 80, 0, 120)
         Thread.sleep(600)
         val tfProbe = probeStop("twofingbg")
         assertTrue("two-finger gesture injected button-3", buttonPresses(tfProbe, 3) == 0)
         assertTrue("two-finger gesture opened a menu",
-            (menuHits(parseAts(atspi()), bgProbes) - baselineBgNames).isEmpty())
+            (rootChildIds() - deskIds0).filter { plausibleMenuGeom(it) }.isEmpty())
         Log.i(TAG, "UBUNTU-HOLD-THRESHOLD-OK 400ms hold and two-finger drag caused no right-click")
         Log.i(TAG, "UBUNTU-NO-SPURIOUS-RIGHTCLICK-OK drag and tap stayed drag/click")
 
-        // (c) TWO-FINGER TAP = RIGHT-CLICK, surface 2: a file row (the
-        // folder created and renamed by the fileops steps). Fallback if the
-        // row is not in the a11y tree: the window headerbar's own menu
-        // (window count). SIMULATED_TOUCH: a 1-finger hold here would be a
-        // left press-hold, so the right-click trigger is the 2-finger tap.
-        val rowNode = parseAts(atspi()).firstOrNull { it.name == "LDOA-proof-renamed" && it.w > 0 }
+        // (c1) TWO-FINGER TAP = RIGHT-CLICK, surface 2: a file row. The
+        // row is targeted by atspi when the a11y tree is alive; in this
+        // stack atspi is blind (bounded observation), so the fallback is
+        // GEOMETRY with construction-verified identity: the test creates
+        // /root/ldoa-rowtest containing exactly one folder
+        // (LDOA-row-fixture), navigates Files into it via guest-side
+        // xdotool (windowactivate by id + ctrl+l; no focus assumption),
+        // confirms the window title, and pixel-verifies a rendered icon
+        // at the measured cell before tapping. A single-item directory
+        // means the rendered icon IS the fixture by construction; atspi
+        // cannot read the label and there is no OCR - that residual
+        // identity gap is stated in the report, not silently closed.
+        Log.i(TAG, "2ftap-row: creating single-item fixture dir")
+        xwin("rm -rf /root/ldoa-rowtest && mkdir -p /root/ldoa-rowtest/LDOA-row-fixture && ls /root/ldoa-rowtest")
+        assertTrue("fixture construction wrong",
+            File(rootfs, "root/ldoa-rowtest/LDOA-row-fixture").isDirectory &&
+            (File(rootfs, "root/ldoa-rowtest").list()?.filter { !it.startsWith(".") } ==
+                listOf("LDOA-row-fixture")))
+        val rowProbes = listOf("open", "cut", "copy", "rename", "move to trash",
+            "star", "properties", "compress", "run")
+        val rowNode = parseAts(atspi()).firstOrNull { it.name.contains("LDOA-row-fixture") && it.w > 0 }
+        var rowGuestPt: Pair<Int, Int>? = null
         if (rowNode != null) {
-            val rgX = rowNode.x + rowNode.w / 2; val rgY = rowNode.y + rowNode.h / 2
-            val rowTarget = mapToDevice(rgX, rgY)
-            assertTrue("no device mapping for file-row hold", rowTarget != null)
-            val rowProbes = listOf("open", "cut", "copy", "rename", "move to trash",
-                "star", "properties", "compress", "run")
-            val baselineRow = menuHits(parseAts(atspi()), rowProbes)
-            twoFingerTap(rowTarget!!.first - 40, rowTarget!!.second, rowTarget!!.first + 40, rowTarget!!.second)
-            val rowMenu = awaitMenu(rowProbes, baselineRow, 35_000)
-            Shot.save("23d2-ubuntu-2ftap-row-menu")
-            assertTrue("two-finger tap on a file row produced no context menu", rowMenu != null)
-            val rowNew = menuHits(rowMenu!!, rowProbes) - baselineRow
-            Log.i(TAG, "2ftap-row: new items=" + rowNew)
-            assertTrue("row context menu items not identifiable (found=" + rowNew + ")", rowNew.size >= 2)
-            val posR = rowMenu.firstOrNull { it.name in rowNew && it.w > 0 }
-            assertTrue("row menu opened far from the two-finger tap point", posR != null &&
-                Math.abs(posR.x + posR.w / 2 - rgX) <= 400 && Math.abs(posR.y + posR.h / 2 - rgY) <= 400)
-            device.pressKeyCode(android.view.KeyEvent.KEYCODE_ESCAPE)
-            assertTrue("row menu did not close on Escape", awaitNoMenu(rowProbes, baselineRow, 4_000))
-            Log.i(TAG, "UBUNTU-2FTAP-RIGHTCLICK-SURFACE2-OK file row menu: " + rowNew)
+            rowGuestPt = Pair(rowNode.x + rowNode.w / 2, rowNode.y + rowNode.h / 2)
         } else {
-            Log.i(TAG, "2ftap-row: folder node not in a11y tree; headerbar fallback")
-            val before = xwin("xwininfo -root -children | grep -c '0x' || true").trim().toIntOrNull() ?: 0
-            val hb = mapToDevice(nwgP.x + fe0[0] + (nwgP.w - fe0[0] - fe0[1]) - 200, nwgP.y + fe0[2] + 20)
-            assertTrue("headerbar fallback mapping missing", hb != null)
-            twoFingerTap(hb!!.first - 40, hb!!.second, hb!!.first + 40, hb!!.second)
-            Thread.sleep(2_500)
-            val after = xwin("xwininfo -root -children | grep -c '0x' || true").trim().toIntOrNull() ?: 0
-            Shot.save("23d2-ubuntu-2ftap-headerbar-menu")
-            assertTrue("two-finger tap on the headerbar opened no window menu (" + before + " -> " + after + ")", after > before)
-            device.pressKeyCode(android.view.KeyEvent.KEYCODE_ESCAPE)
-            Thread.sleep(1_000)
-            Log.i(TAG, "UBUNTU-2FTAP-RIGHTCLICK-SURFACE2-OK headerbar menu (windows " + before + " -> " + after + ")")
+            Log.i(TAG, "2ftap-row: a11y blind; geometry fallback with construction-verified fixture")
+            val nauC = nauVisible()
+            assertTrue("Files window not visible for row step", nauC != null)
+            xwin("xdotool windowactivate " + nauC!!.id + " && sleep 1 && xdotool key ctrl+l && sleep 1 && " +
+                "xdotool type --delay 25 '/root/ldoa-rowtest' && sleep 1 && xdotool key Return")
+            var inFixture = false
+            var lastTitle = ""
+            val navDl = System.currentTimeMillis() + 15_000
+            while (System.currentTimeMillis() < navDl) {
+                val nv = nauVisible()
+                lastTitle = if (nv != null)
+                    xwin("xprop -id " + nv.id + " _NET_WM_NAME 2>/dev/null || true").trim() else "<none>"
+                if (lastTitle.contains("ldoa-rowtest")) { inFixture = true; break }
+                Thread.sleep(1_000)
+            }
+            assertTrue("navigation to fixture dir not confirmed (title=" + lastTitle + ")", inFixture)
+            Thread.sleep(2_000)
+            val nav2 = nauVisible()
+            assertTrue("Files window lost after fixture navigation", nav2 != null)
+            val feC = frameExtents(nav2!!.id)
+            val preRow = fullShot()
+            Shot.save("23c2-ubuntu-row-fixture-view")
+            // Self-calibrating scan over plausible first-cell centers in
+            // grid view (left sidebar present, default zoom): the first
+            // candidate whose cell area is pixel-non-uniform carries the
+            // rendered icon+label. A miss is a clean red with 23c2
+            // preserved, never a silent pass.
+            val candidates = listOf(240 to 106, 100 to 106, 380 to 106, 240 to 150, 240 to 70)
+            for (cand in candidates) {
+                val gx = nav2.x + feC[0] + cand.first
+                val gy = nav2.y + feC[2] + cand.second
+                val colors = distinctColors(preRow, devRectOf(gx - 30, gy - 25, 60, 70))
+                Log.i(TAG, "2ftap-row: candidate (" + gx + "," + gy + ") distinctColors=" + colors)
+                if (colors > 8) { rowGuestPt = Pair(gx, gy); break }
+            }
+            assertTrue("no rendered icon found at any candidate first-cell offset " +
+                "(fixture construction verified; layout differs - review 23c2)", rowGuestPt != null)
         }
+        val rowTap = mapToDevice(rowGuestPt!!.first, rowGuestPt!!.second)
+        assertTrue("no device mapping for file-row target", rowTap != null)
+        val baselineRow = menuHits(parseAts(atspi()), rowProbes)
+        val preRowShot = fullShot()
+        val rowBeforeIds = rootChildIds()
+        probeStart("rowmenu")
+        twoFingerTap(rowTap!!.first - 40, rowTap!!.second, rowTap!!.first + 40, rowTap!!.second)
+        val rowMenuWin = awaitMenuWindow(rowBeforeIds, 20_000)
+        val rowProbe = probeStop("rowmenu")
+        Shot.save("23d2-ubuntu-2ftap-row-menu")
+        assertTrue("two-finger tap on the fixture file row produced no viewable menu window",
+            rowMenuWin != null)
+        val rGeom = rowMenuWin!!.second
+        val rmx = Regex("Absolute upper-left X:\\s+(-?\\d+)").find(rGeom)?.groupValues?.get(1)?.toIntOrNull() ?: -10000
+        val rmy = Regex("Absolute upper-left Y:\\s+(-?\\d+)").find(rGeom)?.groupValues?.get(1)?.toIntOrNull() ?: -10000
+        val rmw = Regex("Width:\\s+(\\d+)").find(rGeom)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        val rmh = Regex("Height:\\s+(\\d+)").find(rGeom)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        var rowMenuPixelFrac = 0.0
+        if (rmw >= 20 && rmh >= 20)
+            rowMenuPixelFrac = regionDiff(preRowShot, fullShot(), devRectOf(rmx, rmy, rmw, rmh))
+        val rowInjected3 = buttonPresses(rowProbe, 3)
+        Log.i(TAG, "2ftap-row: menuWin=" + (rowMenuWin != null) + " menuPixelFrac=" + rowMenuPixelFrac +
+            " rightClickInjections=" + rowInjected3 +
+            " parsed=" + btnEvents(rowProbe).map {
+                (if (it.raw) "Raw" else "") + (if (it.press) "Press" else "Release") +
+                    "(detail=" + it.detail + ",dev=" + it.device + ")" } +
+            " probeTail=" + rowProbe.takeLast(300).replace("\n", " | "))
+        assertTrue("fixture row menu not pixel-rendered (frac=" + rowMenuPixelFrac + ")",
+            rowMenuPixelFrac > 0.02)
+        assertTrue("fixture row menu opened far from the tap (menu at " + rmx + "," + rmy +
+            " vs tap " + rowGuestPt + ")",
+            Math.abs(rmx - rowGuestPt!!.first) <= 400 && Math.abs(rmy - rowGuestPt!!.second) <= 400)
+        assertTrue("expected exactly one injected button-3 press on the row, got " + rowInjected3,
+            rowInjected3 == 1)
+        device.pressKeyCode(android.view.KeyEvent.KEYCODE_ESCAPE)
+        Thread.sleep(1_000)
+        val rowMenuGone = rowMenuWin.first.none { isViewable(it) }
+        assertTrue("fixture row menu window still viewable after Escape", rowMenuGone)
+        Log.i(TAG, "UBUNTU-2FTAP-RIGHTCLICK-SURFACE2-OK fixture row menu: viewable MENU window, " +
+            "pixel-rendered (" + rowMenuPixelFrac + ", frame 23d2 for item review), one injected " +
+            "button-3, position ok, Escape closes" +
+            (if (rowNode == null) " [geometry-targeted, construction-verified fixture]" else " [atspi-targeted]"))
+
+        // (c2) TWO-FINGER TAP on the headerbar = the window's own menu.
+        // SEPARATE coverage from the file row - never a substitute. Run
+        // 40984121290 proved this menu renders pixel-visibly (23d2 frame:
+        // Take Screenshot / Hide / Maximize / Move / Resize / Close)
+        // while NOT appearing as a new root child (18 -> 18) in this
+        // fallback gnome-shell --x11 session, so a window-count gate is
+        // blind to it. Evidence: pixel-open + preserved frames for visual
+        // review + Escape close (open/close functional state). Tree diff
+        // kept as diagnostic only.
+        val hbNauC2 = nauVisible()
+        assertTrue("Files window not visible for headerbar step", hbNauC2 != null)
+        val feH2 = frameExtents(hbNauC2!!.id)
+        val hbGX = hbNauC2.x + feH2[0] + (hbNauC2.w - feH2[0] - feH2[1]) - 200
+        val hbGY = hbNauC2.y + feH2[2] + 20
+        val hb2 = mapToDevice(hbGX, hbGY)
+        assertTrue("headerbar mapping missing", hb2 != null)
+        val hbMenuRect = devRectOf(hbGX - 300, hbGY + 20, 320, 430)
+        val hbBeforeIds = rootChildIds()
+        val bmpHbPre = fullShot()
+        twoFingerTap(hb2!!.first - 40, hb2!!.second, hb2!!.first + 40, hb2!!.second)
+        Thread.sleep(2_500)
+        val bmpHbOpen = fullShot()
+        Shot.save("23d3-ubuntu-headerbar-menu-open")
+        Log.i(TAG, "2ftap-headerbar: tree diff (diagnostic; menu not enumerable in this stack): " +
+            (rootChildIds() - hbBeforeIds).sorted())
+        val hbOpenFrac = regionDiff(bmpHbPre, bmpHbOpen, hbMenuRect)
+        Log.i(TAG, "2ftap-headerbar: openFrac=" + hbOpenFrac + " (frame 23d3 carries the item proof)")
+        assertTrue("two-finger tap on the headerbar opened no visible menu (openFrac=" + hbOpenFrac + ")",
+            hbOpenFrac > 0.02)
+        device.pressKeyCode(android.view.KeyEvent.KEYCODE_ESCAPE)
+        Thread.sleep(1_000)
+        val bmpHbClosed = fullShot()
+        Shot.save("23d4-ubuntu-headerbar-menu-closed")
+        val hbCloseFrac = regionDiff(bmpHbOpen, bmpHbClosed, hbMenuRect)
+        Log.i(TAG, "2ftap-headerbar: closeFrac=" + hbCloseFrac +
+            " revertFrac=" + regionDiff(bmpHbPre, bmpHbClosed, hbMenuRect))
+        assertTrue("headerbar menu did not visibly close on Escape (closeFrac=" + hbCloseFrac + ")",
+            hbCloseFrac > 0.02)
+        Log.i(TAG, "UBUNTU-2FTAP-RIGHTCLICK-SURFACE3-OK headerbar window menu: pixel-open (" +
+            hbOpenFrac + "), frame 23d3 for review, Escape closes (" + hbCloseFrac + ")")
 
         // (d) TWO-FINGER DRAG = WHEEL SCROLL on modern content: Files at
         // /usr/bin. SIMULATED_TOUCH delivers this as discrete wheel BUTTON
@@ -1118,13 +1239,30 @@ for i in range(d.childCount):
         // sendMouseWheelEvent); the smooth-valuator stream is the direct-
         // mode path and is not expected here. Proof is the actual wheel
         // delivery AND visible content movement in the window interior.
-        chord(false, android.view.KeyEvent.KEYCODE_L)
-        Thread.sleep(1_500)
-        device.executeShellCommand("input text /usr/bin")
-        device.pressEnter()
-        Thread.sleep(6_000)
+        // Navigation is SETUP, not the gesture under test: use guest-side
+        // xdotool (windowactivate by id, then ctrl+l) so no Android focus
+        // assumption is carried, then confirm the window title actually
+        // reached /usr/bin before scrolling.
+        val nauD0 = nauVisible()
+        assertTrue("Files window not visible for scroll navigation", nauD0 != null)
+        xwin("xdotool windowactivate " + nauD0!!.id + " && sleep 1 && xdotool key ctrl+l && sleep 1 && " +
+            "xdotool type --delay 25 '/usr/bin' && sleep 1 && xdotool key Return")
+        var navBin = false
+        var binTitle = ""
+        val binDl = System.currentTimeMillis() + 20_000
+        while (System.currentTimeMillis() < binDl) {
+            val nv = nauVisible()
+            binTitle = if (nv != null)
+                xwin("xprop -id " + nv.id + " _NET_WM_NAME 2>/dev/null || true").trim() else "<none>"
+            if (binTitle.contains("bin")) { navBin = true; break }
+            Thread.sleep(1_000)
+        }
+        assertTrue("navigation to /usr/bin not confirmed (title=" + binTitle + ")", navBin)
+        Thread.sleep(4_000) // large dir population
         anrGuard("scroll")
-        val nws = nauVisible()!!
+        val nws0 = nauVisible()
+        assertTrue("Files window lost before scroll", nws0 != null)
+        val nws = nws0!!
         val scrollRect = devRectOf(nws.x, nws.y, nws.w, nws.h)
         val sc = mapToDevice(nws.x + nws.w / 2, nws.y + nws.h / 2)
         assertTrue("no device mapping for scroll center", sc != null)
@@ -1199,6 +1337,7 @@ for i in range(d.childCount):
             val hbD = mapToDevice(hbGX, hbGY)
             assertTrue("no mapping for hold-drag titlebar point", hbD != null)
             val posBefore = xwin("xwininfo -id " + hbNau.id + " | grep Absolute")
+            val hdBeforeIds = rootChildIds()
             probeStart("holddrag")
             holdDrag(hbD!!, 150, 80, 700)
             Thread.sleep(1_000)
@@ -1212,8 +1351,8 @@ for i in range(d.childCount):
             Log.i(TAG, "hold-drag: before=(" + bx + ", " + by + ") after=(" + ax + ", " + ay +
                 ") button3=" + buttonPresses(hdProbe, 3))
             assertTrue("hold-then-drag injected a right-click", buttonPresses(hdProbe, 3) == 0)
-            assertTrue("hold-then-drag opened a menu",
-                (menuHits(parseAts(atspi()), bgProbes) - baselineBgNames).isEmpty())
+            assertTrue("hold-then-drag opened a menu window",
+                (rootChildIds() - hdBeforeIds).filter { plausibleMenuGeom(it) }.isEmpty())
             assertTrue("window did not follow hold-then-drag (before=(" + bx + "," + by +
                 ") after=(" + ax + "," + ay + "))",
                 Math.abs(ax - bx - 150) <= 60 && Math.abs(ay - by - 80) <= 60)
@@ -1237,8 +1376,17 @@ for i in range(d.childCount):
         prefs.edit().putBoolean("ldoa_twofinger_tap_rightclick", false)
             .putBoolean("ldoa_twofinger_scroll", false).apply()
         Thread.sleep(500)
+        // (a3) dragged the Files window; recompute the tap target fresh
+        // instead of reusing bgTarget's stale coordinates.
+        val fNau = nauVisible()
+        val fTarget = if (fNau != null) {
+            val feF = frameExtents(fNau.id)
+            mapToDevice(fNau.x + feF[0] + (fNau.w - feF[0] - feF[1]) / 2,
+                fNau.y + feF[2] + (fNau.h - feF[2] - feF[3]) - 80)
+        } else bgTarget
+        assertTrue("no mapping for toggles-off tap", fTarget != null)
         probeStart("offtap")
-        twoFingerTap(bgTarget!!.first - 40, bgTarget!!.second, bgTarget!!.first + 40, bgTarget!!.second)
+        twoFingerTap(fTarget!!.first - 40, fTarget!!.second, fTarget!!.first + 40, fTarget!!.second)
         Thread.sleep(2_000)
         val offTapProbe = probeStop("offtap")
         val offTapInjected = buttonPresses(offTapProbe, 3)
