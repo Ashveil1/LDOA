@@ -272,11 +272,21 @@ class MobileShellSpikeTest {
 
             // Client-window evidence via the guest's own xwininfo on :0.
             // EVERY round: a failed render must never count as a visual pass.
+            // -tree, NOT -children: jwm is a REPARENTING WM, so a managed
+            // client nests under jwm's (unnamed) frame and a one-level
+            // root-children query misses it (run 41006697379: query saw
+            // only the unreparented pcmanfm desktop while the settled
+            // screenshot, captured ~100ms earlier, showed xterm decorated
+            // and mapped). Same recursive pattern as UbuntuGnomeSpikeTest's
+            // windowIds.
             val wins = GuestDesktop.guestShell(ctx, rootfs,
-                "DISPLAY=:0 xwininfo -root -children 2>/dev/null | grep -i -e xterm -e pcmanfm || true",
+                "DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep -i -e xterm -e pcmanfm || true",
                 extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"))
             Log.i(TAG, "mobile windows (scale=$scale): $wins")
-            assertTrue("no xterm window mapped on :0 (scale=$scale)", wins.contains("xterm"))
+            // Case-consistent with the grep -i above: the grep is
+            // case-insensitive but Kotlin contains() is not - a line
+            // carrying only "XTerm" would pass grep yet fail the assert.
+            assertTrue("no xterm window mapped on :0 (scale=$scale)", wins.lowercase().contains("xterm"))
 
             // TEARDOWN PROOF (every round): host-parentage kill walk from
             // the tracked proot root PLUS the session bus (dbus-daemon
