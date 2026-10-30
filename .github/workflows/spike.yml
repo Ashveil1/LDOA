@@ -187,6 +187,10 @@ jobs:
             grep -q "OK (" /tmp/instr1.log || touch /tmp/PHONELINUX_TESTS_FAILED
             adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.UbuntuGnomeSpikeTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr2.log | tail -15
             grep -q "OK (" /tmp/instr2.log || touch /tmp/PHONELINUX_TESTS_FAILED
+            # Stage-1 isolated comparison (lorie vs Xvnc, identical session script
+            # both arms): EVIDENCE-ONLY, never gates the lane - result read from
+            # instr3.log; self-skips without -e xvncCompare 1 in other contexts.
+            adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.XvncCompareTest -e xvncCompare 1 dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr3.log | tail -15
             # TRUE cold-start proof: full process kill (force-stop kills the
             # app uid incl. proot/GNOME children), fresh MainActivity launch,
             # pref-driven auto-enter must bring back a usable desktop with
@@ -218,6 +222,7 @@ jobs:
             python3 .github/scripts/extract_shots.py /tmp/shotlog.txt screenshots || true
             python3 .github/scripts/extract_shots.py /tmp/instr1.log screenshots || true
             python3 .github/scripts/extract_shots.py /tmp/instr2.log screenshots || true
+            python3 .github/scripts/extract_shots.py /tmp/instr3.log screenshots || true
             find screenshots -type f | sort || true
             if [ -f /tmp/PHONELINUX_TESTS_FAILED ]; then exit 1; fi
       - uses: actions/upload-artifact@v4
