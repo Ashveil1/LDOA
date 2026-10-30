@@ -29,19 +29,135 @@ import java.io.File
  * FAILS with SESSION MISMATCH instead of contrasting a full session against a
  * bare fallback (known x86 ICE ENOSYS gap).
  *
+ * PROCESS OWNERSHIP (no name-only signaling): every process this test
+ * signals is either (a) a Process object it started itself, or (b) found by
+ * walking /proc children from a captured launch root identity, with pid +
+ * start-time + uid re-read and matched immediately before the signal
+ * (pid-reuse guard). FOREIGN pre-existing processes (present in the
+ * test-start snapshot) are NEVER signaled: identity revalidation proves
+ * identity, not ownership. Instead the test REQUIRES a clean start - if any
+ * session-like process already exists (lane-sequencing leftover), it is a
+ * harness/environment precondition failure: the test aborts comparison-
+ * invalid and leaves every foreign process untouched. Post-teardown, any
+ * remaining matching process is logged with its full identity and left
+ * alone.
+ *
+ * glxinfo -B is logged per arm as the X SERVER's own GLX view only
+ * (lorie's GLX is a swrast stub by its own source comment; Xvnc's is
+ * likewise server-internal): it is NOT the compositor's EGL context and no
+ * mutter/gnome-shell renderer inference is drawn from it (probe-client !=
+ * actual context).
+ *
  * LIMITS (stated wherever numbers are logged): CI x86_64 GL is not the
- * POCO's kgsl path, so arm numbers are mechanism evidence ONLY and are not
+ * POCO's GPU path, so arm numbers are mechanism evidence ONLY and are not
  * predictive of device fps. CLUTTER_SHOW_FPS measures the compositor's own
  * frame stats; it is NOT end-to-end display FPS and says nothing about
- * input latency. The VNC viewer's decode/input cost is absent here by
- * design (no viewer attached; Xvnc serves nothing in this test).
+ * input latency. No viewer is attached: VNC decode/input cost is absent by
+ * design.
  */
 @RunWith(AndroidJUnit4::class)
 class XvncCompareTest {
     private val TAG = "PHONELINUX_XVNC_CMP"
 
-    private data class ArmResult(
-        val name: String, val mode: String, val readyShellWins: Int,
+    private class PIdent(val pid: Int, val start: String, val uid: Int, val cmd: String) {
+        override fun toString() = "pid=$pid start=$start uid=$uid cmd=${cmd.take(60)}"
+    }
+
+    private fun identityOf(pid: Int): PIdent? = try {
+        val stat = File("/proc/$pid/stat").readText()
+        val start = stat.substringAfterLast(") ").split(" ")[19] // field 22 overall
+        val uid = File("/proc/$pid/status").readText().lineSequence()
+            .first { it.startsWith("Uid:") }.split(Regex("\\s+"))[1].toInt()
+        val cmd = File("/proc/$pid/cmdline").readText().replace(Regex("\\x00"), " ").trim()
+        PIdent(pid, start, uid, cmd)
+    } catch (t: Throwable) { null }
+
+    private fun childrenOf(pid: Int): List<Int> = try {
+        File("/proc/$pid/task").listFiles()?.flatMap { t ->
+            File(t, "children").readText().trim().split(Regex("\\s+"))
+                .filter { it.isNotEmpty() }.map { it.toInt() }
+        } ?: emptyList()
+    } catch (t: Throwable) { emptyList() }
+
+    private fun treeOf(root: Int): Set<Int> {
+        val out = linkedSetOf<Int>(); val stack = mutableListOf(root)
+        while (stack.isNotEmpty()) {
+            val p = stack.removeAt(stack.size - 1)
+            if (out.add(p)) stack.addAll(childrenOf(p))
+        }
+        return out
+    }
+
+    private fun pidOfProcess(p: Process): Int? = try {
+        val f = p.javaClass.getDeclaredField("pid"); f.isAccessible = true; f.getInt(p)
+    } catch (t: Throwable) { null }
+
+    /** Verified kill: signal only if the live identity still matches the
+     *  identity captured at discovery (pid + start + uid). Returns pids
+     *  that did NOT match (pid reuse) or would not die. */
+    private fun killVerified(idents: Collection<PIdent>, why: String): List<Int> {
+        val left = mutableListOf<Int>()
+        for (want in idents) {
+            val cur = identityOf(want.pid)
+            if (cur == null) continue // already gone
+            if (cur.start != want.start || cur.uid != want.uid) {
+                Log.w(TAG, "cmp: SKIP signal - pid reused: want[$want] now[$cur] ($why)")
+                left += want.pid; continue
+            }
+            Log.i(TAG, "cmp: kill $why [$cur]")
+            try { android.os.Process.killProcess(want.pid) } catch (t: Throwable) { left += want.pid }
+        }
+        return left
+    }
+
+    private fun guest(ctx: android.content.Context, rootfs: File, display: String?, cmd: String,
+                      bindX: Boolean = false, fakeRoot: Boolean = false): String {
+        val binds = if (bindX) listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix") else emptyList()
+        return Proot.runGuest(ctx, rootfs,
+            listOf("/bin/sh", "-c", (if (display != null) "export DISPLAY=$display; " else "") + cmd),
+            extraBinds = binds, fakeRoot = fakeRoot).stdout
+    }
+
+    /** All current pids whose cmdline matches the comparison's session
+     *  patterns, with full identity (for foreign-snapshot + verification). */
+    private fun sessionLikeProcs(): List<PIdent> =
+        (File("/proc").listFiles { f -> f.name.matches(Regex("[0-9]+")) } ?: emptyArray())
+            .mapNotNull { identityOf(it.name.toInt()) }
+            .filter { it.cmd.contains("gnome-session") || it.cmd.contains("gnome-shell") ||
+                it.cmd.contains("Xvnc") || it.cmd.contains("cmp-session") || it.cmd.contains("nautilus") }
+
+    private var lastLorieGeometry: String? = null
+    private val trackedProcs = mutableListOf<Pair<String, Process>>()
+
+    private fun launchGuestProcess(ctx: android.content.Context, rootfs: File, name: String,
+                                   display: String, bindX: Boolean, log: File,
+                                   env: Map<String, String>, guestCmd: List<String>): Process {
+        val nd = ctx.applicationInfo.nativeLibraryDir
+        val args = mutableListOf(File(nd, "libproot.so").absolutePath, "--link2symlink", "-0",
+            "-r", rootfs.absolutePath, "-b", "/dev", "-b", "/proc", "-b", "/sys")
+        if (bindX) { args += "-b"; args += XServer.socketDir(ctx).absolutePath + ":/tmp/.X11-unix" }
+        args += "-w"; args += "/root"; args.addAll(guestCmd)
+        val pb = ProcessBuilder(args)
+        pb.environment().putAll(mapOf(
+            "PROOT_LOADER" to File(nd, "libproot_loader.so").absolutePath,
+            "PROOT_LOADER_32" to File(nd, "libproot_loader32.so").absolutePath,
+            "LD_LIBRARY_PATH" to nd, "HOME" to "/root", "DISPLAY" to display,
+            "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "PROOT_TMP_DIR" to Proot.prootTmpDir(ctx).absolutePath, "TMPDIR" to "/tmp"))
+        pb.environment().putAll(env)
+        pb.redirectErrorStream(true)
+        pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))
+        return pb.start().also { trackedProcs += name to it }
+    }
+
+    private fun cmpScript(display: String): String {
+        val s = GuestUbuntu.gnomeSessionScript()
+        val needle = "export DISPLAY=:0 "
+        assertTrue("gnomeSessionScript shape changed; update the comparison transform", s.contains(needle))
+        return s.replace(needle, "export DISPLAY=$display CLUTTER_SHOW_FPS=1 ")
+    }
+
+    private data class ArmResult(val name: String, val mode: String, val readyShellWins: Int,
         val stepWallMs: Map<String, Long>, val glxinfo: String, val fpsLines: String)
 
     @Test
@@ -57,12 +173,16 @@ class XvncCompareTest {
         assertTrue("gnome must already be provisioned by the lane's earlier steps",
             GuestUbuntu.hasGnome(rootfs))
 
-        // Runtime fixture installs (disposable, labeled; same pattern as the
-        // existing xdotool/xterm fixtures - the product manifest is untouched).
+        // Foreign snapshot: everything session-like that exists BEFORE this
+        // test launches anything (lane leftovers from earlier instr steps).
+        val foreign = sessionLikeProcs()
+        Log.i(TAG, "cmp: foreign snapshot: " + foreign.joinToString(" || "))
+
         fun fixtureInstall(pkg: String, bin: String) {
             if (guest(ctx, rootfs, null, "command -v $bin || true").trim().isNotEmpty()) return
             val r = guest(ctx, rootfs, null,
-                "export DEBIAN_FRONTEND=noninteractive; timeout 180 apt-get install -y $pkg 2>&1 | tail -3 || true")
+                "export DEBIAN_FRONTEND=noninteractive; timeout 180 apt-get install -y $pkg 2>&1 | tail -3 || true",
+                fakeRoot = true) // apt/dpkg refuse to install as non-root euid (Proot.kt)
             Log.i(TAG, "cmp: fixture install $pkg tail=" + r.replace("\n", " | "))
         }
         fixtureInstall("tigervnc-standalone-server", "Xvnc")
@@ -70,109 +190,85 @@ class XvncCompareTest {
         assertTrue("Xvnc fixture unavailable - environment/fixture gap, no comparison evidence",
             guest(ctx, rootfs, null, "command -v Xvnc || true").trim().isNotEmpty())
 
+        // Clean-start precondition (main 5:13:11): foreign pre-test processes
+        // are NEVER signaled by this test - identity revalidation proves
+        // identity, not ownership. If a lane-sequencing leftover session is
+        // present, the comparison cannot establish a clean start: abort
+        // comparison-invalid (environment/fixture gap) and leave them alone.
+        assertTrue("cmp: clean start not established - pre-existing session-like " +
+            "processes present, environment/fixture gap (left untouched, " +
+            "comparison-invalid, not product evidence): " +
+            foreign.joinToString(" || "), foreign.isEmpty())
+
         val results = mutableListOf<ArmResult>()
 
-        // ---- ARM A: lorie :0 (product display server, started the product way)
-        resetGuests(ctx, rootfs)
+        // ARM A: lorie :0 via the product server start (its own lifecycle).
         XServer.start(ctx)
-        results += runArm(ctx, rootfs, "lorie", ":0", bindX = true, geometry = null,
-            script = cmpScript(":0"))
+        results += runArm(ctx, rootfs, "lorie", ":0", bindX = true, geometry = null)
 
-        // ---- ARM B: Xvnc :1, SAME resolution/depth as lorie reported
-        resetGuests(ctx, rootfs)
+        // ARM B: Xvnc :1 as a TRACKED FOREGROUND process (no guest-background
+        // orphan), same resolution/depth as lorie reported.
         val geometry = lastLorieGeometry
         assertTrue("lorie geometry unknown - cannot match Xvnc resolution, comparison void",
             geometry != null)
-        val xvncStart = guest(ctx, rootfs, null,
-            "( Xvnc :1 -geometry $geometry -depth 24 -SecurityTypes None -ac >/root/xvnc.log 2>&1 & " +
-                "echo ${'$'}! > /root/xvnc.pid ); sleep 2; XP=${'$'}(cat /root/xvnc.pid 2>/dev/null); " +
-                "echo pid=${'$'}XP; if kill -0 ${'$'}XP 2>/dev/null; then echo alive-after-2s; else echo exited-early; fi")
-        Log.i(TAG, "cmp: Xvnc start " + xvncStart.replace("\n", " | "))
-        assertTrue("Xvnc fixture failed to stay up - environment/fixture gap: " + xvncStart.trim(),
-            xvncStart.contains("alive-after-2s"))
-        results += runArm(ctx, rootfs, "xvnc", ":1", bindX = false, geometry = geometry,
-            script = cmpScript(":1"))
+        val xvncLog = File(ctx.filesDir, "cmp-xvnc-server.log")
+        if (xvncLog.isFile) xvncLog.delete()
+        val xvncProc = launchGuestProcess(ctx, rootfs, "xvnc-server", ":1", bindX = false,
+            log = xvncLog, env = emptyMap(),
+            guestCmd = listOf("/usr/bin/Xvnc", ":1", "-geometry", geometry!!, "-depth", "24",
+                "-SecurityTypes", "None", "-ac"))
+        Thread.sleep(3_000)
+        assertTrue("Xvnc fixture exited at start - environment/fixture gap, log tail: " +
+            (if (xvncLog.isFile) xvncLog.readText().takeLast(300) else "<none>"), xvncProc.isAlive)
+        try {
+            results += runArm(ctx, rootfs, "xvnc", ":1", bindX = false, geometry = geometry)
+        } finally {
+            xvncProc.destroy()
+        }
 
-        // ---- Session-mode identity gate: never contrast mismatched shapes.
         assertTrue("SESSION MISMATCH - arms landed in different session shapes " +
-            "(lorie=" + results[0].mode + " xvnc=" + results[1].mode + "); " +
-            "comparison void, this is a comparison-harness defect not data",
+            "(lorie=" + results[0].mode + " xvnc=" + results[1].mode + "); comparison void, " +
+            "this is a comparison-harness defect not data",
             results[0].mode == results[1].mode)
 
-        // ---- Evidence summary (logged, never asserted).
         for (r in results) {
             Log.i(TAG, "cmp: arm=" + r.name + " mode=" + r.mode + " readyShellWins=" + r.readyShellWins +
-                " steps=" + r.stepWallMs.filterKeys { it != "geometry" })
-            Log.i(TAG, "cmp: arm=" + r.name + " glxinfo-B (SERVER-side GLX view; lorie's GLX is a " +
-                "swrast stub by its own source comment; NOT the compositor's EGL context): " +
-                r.glxinfo.replace("\n", " | "))
+                " steps=" + r.stepWallMs)
+            Log.i(TAG, "cmp: arm=" + r.name + " glxinfo-B (SERVER-side GLX view only; NOT the " +
+                "compositor's EGL context, no mutter inference): " + r.glxinfo.replace("\n", " | "))
             Log.i(TAG, "cmp: arm=" + r.name + " clutter-fps-lines=[" + r.fpsLines + "]")
         }
-        Log.i(TAG, "cmp: LIMITS - CI x86 GL is not the POCO kgsl path (mechanism evidence only, " +
-            "not device-predictive); compositor FPS is not end-to-end display FPS or input latency; " +
-            "no viewer attached, so VNC decode/input cost is absent by design")
-    }
+        Log.i(TAG, "cmp: LIMITS - CI x86 GL is not the POCO GPU path (mechanism evidence only, " +
+            "not device-predictive); compositor FPS is not end-to-end display FPS or input " +
+            "latency; no viewer attached, so VNC decode/input cost is absent by design")
 
-    private var lastLorieGeometry: String? = null
-
-    private fun cmpScript(display: String): String {
-        val s = GuestUbuntu.gnomeSessionScript()
-        val needle = "export DISPLAY=:0 "
-        assertTrue("gnomeSessionScript shape changed; update the comparison transform", s.contains(needle))
-        return s.replace(needle, "export DISPLAY=$display CLUTTER_SHOW_FPS=1 ")
-    }
-
-    private fun guest(ctx: android.content.Context, rootfs: File, display: String?, cmd: String,
-                      bindX: Boolean = false): String {
-        val binds = if (bindX) listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix") else emptyList()
-        val r = Proot.runGuest(ctx, rootfs,
-            listOf("/bin/sh", "-c", (if (display != null) "export DISPLAY=$display; " else "") + cmd),
-            extraBinds = binds)
-        return r.stdout
-    }
-
-    /** Identity-scoped reset for THIS test's CI-single-session context:
-     *  kills only gnome-session/gnome-shell/Xvnc cmdline matches (the
-     *  established lane pattern), then verifies they are gone. */
-    private fun resetGuests(ctx: android.content.Context, rootfs: File) {
-        val kill = guest(ctx, rootfs, null,
-            "for f in /proc/[0-9]*/cmdline; do c=${'$'}(tr '\\0' ' ' < ${'$'}f 2>/dev/null); " +
-                "case ${'$'}c in *gnome-session*|*gnome-shell*|*Xvnc*) echo ${'$'}f | cut -d/ -f3;; esac; " +
-                "done | xargs -r kill 2>/dev/null; sleep 3; " +
-                "for f in /proc/[0-9]*/cmdline; do c=${'$'}(tr '\\0' ' ' < ${'$'}f 2>/dev/null); " +
-                "case ${'$'}c in *gnome-session*|*gnome-shell*|*Xvnc*) echo leftover=${'$'}f;; esac; done; echo reset-done")
-        Log.i(TAG, "cmp: reset " + kill.replace("\n", " | "))
+        // Final verification: nothing session-like remains except documented
+        // foreign pids (left running, never signaled by this test).
+        val remaining = sessionLikeProcs()
+        val foreignIds = foreign.map { it.pid to it.start }.toSet()
+        val unowned = remaining.filter { (it.pid to it.start) !in foreignIds }
+        if (remaining.isNotEmpty())
+            Log.i(TAG, "cmp: post-test session-like procs: " + remaining.joinToString(" || "))
+        assertTrue("cmp: teardown left UNOWNED session processes (not in foreign snapshot): " +
+            unowned.joinToString(" || "), unowned.isEmpty())
     }
 
     private fun runArm(ctx: android.content.Context, rootfs: File, name: String, display: String,
-                       bindX: Boolean, geometry: String?, script: String): ArmResult {
-        File(rootfs, "root/cmp-session-$name.sh").writeText(script)
-        val nd = ctx.applicationInfo.nativeLibraryDir
+                       bindX: Boolean, geometry: String?): ArmResult {
+        File(rootfs, "root/cmp-session-$name.sh").writeText(cmpScript(display))
         val log = File(ctx.filesDir, "cmp-$name.log")
         if (log.isFile) log.delete()
-        val pb = ProcessBuilder(
-            File(nd, "libproot.so").absolutePath, "--link2symlink", "-0",
-            "-r", rootfs.absolutePath, "-b", "/dev", "-b", "/proc", "-b", "/sys",
-            * (if (bindX) arrayOf("-b", XServer.socketDir(ctx).absolutePath + ":/tmp/.X11-unix") else emptyArray()),
-            "-w", "/root", "/bin/sh", "/root/cmp-session-$name.sh")
-        pb.environment().putAll(mapOf(
-            "PROOT_LOADER" to File(nd, "libproot_loader.so").absolutePath,
-            "PROOT_LOADER_32" to File(nd, "libproot_loader32.so").absolutePath,
-            "LD_LIBRARY_PATH" to nd, "HOME" to "/root", "DISPLAY" to display,
-            "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            "PROOT_TMP_DIR" to Proot.prootTmpDir(ctx).absolutePath, "TMPDIR" to "/tmp"))
-        pb.redirectErrorStream(true)
-        pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))
-        val proc = pb.start()
+        val proc = launchGuestProcess(ctx, rootfs, "session-$name", display, bindX, log,
+            env = emptyMap(), guestCmd = listOf("/bin/sh", "/root/cmp-session-$name.sh"))
+        val rootIdent = pidOfProcess(proc)?.let { identityOf(it) }
+        Log.i(TAG, "cmp: arm=$name session root identity: $rootIdent")
 
-        // Readiness (same shell-window proxy as the other lanes; readiness
-        // PROXY, not a proved-usable desktop).
         var wins = 0
         val readyDeadline = System.currentTimeMillis() + 240_000
         while (System.currentTimeMillis() < readyDeadline) {
             wins = guest(ctx, rootfs, display,
                 "xwininfo -root -tree 2>/dev/null | grep -ciE 'gnome.shell|gnome-shell' || true",
-                bindX = bindX).trim().toIntOrNull() ?: 0
+                bindX).trim().toIntOrNull() ?: 0
             if (wins >= 3 || !proc.isAlive) break
             Thread.sleep(10_000)
         }
@@ -183,33 +279,38 @@ class XvncCompareTest {
             else -> "unknown"
         }
         Log.i(TAG, "cmp: arm=$name readiness shell-windows=$wins mode=$mode alive=${proc.isAlive}")
-        assertTrue("cmp: arm=$name session process died before readiness - environment/fixture gap, " +
-            "not comparison data", proc.isAlive)
+        assertTrue("cmp: arm=$name session process died before readiness - environment/fixture " +
+            "gap, not comparison data", proc.isAlive)
         assertTrue("cmp: arm=$name never reached the shell-window readiness proxy - " +
             "environment/fixture gap, not comparison data", wins >= 3)
 
-        // Geometry of the lorie server, captured for the Xvnc arm to match.
         if (geometry == null) {
-            val dim = guest(ctx, rootfs, display, "xdpyinfo | grep dimensions:", bindX = true)
+            lastLorieGeometry = guest(ctx, rootfs, display, "xdpyinfo | grep dimensions:", true)
                 .replace(Regex(".*dimensions:\\s*"), "").replace(Regex("\\s+pixels.*"), "").trim()
-            lastLorieGeometry = dim
-            Log.i(TAG, "cmp: lorie geometry=$dim")
+            Log.i(TAG, "cmp: lorie geometry=$lastLorieGeometry")
         }
 
-        // Identical workload, fixed steps, wall-timed.
         val steps = linkedMapOf<String, Long>()
         fun step(label: String, body: () -> Unit) {
             val t0 = System.currentTimeMillis(); body(); steps[label] = System.currentTimeMillis() - t0
         }
         step("open-files") {
-            guest(ctx, rootfs, display, "( nautilus >/root/cmp-nautilus-$name.log 2>&1 & )", bindX)
+            // nautilus as a TRACKED foreground process (owned, destroyable).
+            val bus = logText().lineSequence()
+                .filter { it.contains("gnome-launch: session bus ") }.lastOrNull()
+                ?.substringAfter("gnome-launch: session bus ")?.trim()
+            val nautLog = File(ctx.filesDir, "cmp-nautilus-$name.log")
+            val naut = launchGuestProcess(ctx, rootfs, "nautilus-$name", display, bindX, nautLog,
+                env = if (bus != null) mapOf("DBUS_SESSION_BUS_ADDRESS" to bus) else emptyMap(),
+                guestCmd = listOf("/usr/bin/nautilus"))
             val dl = System.currentTimeMillis() + 120_000
             while (System.currentTimeMillis() < dl) {
                 val n = guest(ctx, rootfs, display,
                     "xwininfo -root -tree | grep -ci nautilus || true", bindX).trim().toIntOrNull() ?: 0
-                if (n >= 1) break
+                if (n >= 1 || !naut.isAlive) break
                 Thread.sleep(3_000)
             }
+            Log.i(TAG, "cmp: arm=$name nautilus alive=${naut.isAlive}")
         }
         step("scroll-x5") { repeat(5) {
             guest(ctx, rootfs, display, "xdotool key Down", bindX); Thread.sleep(1_000) } }
@@ -219,18 +320,24 @@ class XvncCompareTest {
         }
 
         val glx = guest(ctx, rootfs, display, "glxinfo -B 2>&1 | head -25", bindX)
-        val fps = logText().lines().filter { it.contains("fps", ignoreCase = true) ||
-            it.contains("Frame", ignoreCase = false) }.takeLast(10).joinToString(" | ")
+        val fps = logText().lines().filter { it.contains("fps", true) || it.contains("Frame") }
+            .takeLast(10).joinToString(" | ")
 
-        // Teardown: our tracked session process first, then the identity-
-        // scoped sweep (reset), then verify; fixture files we created in the
-        // guest are removed; evidence logs in filesDir are kept.
-        proc.destroy()
+        // Verified teardown: destroy tracked procs for THIS arm, then walk
+        // the captured root tree with per-pid identity revalidation.
+        trackedProcs.filter { it.first.endsWith("-$name") }.forEach { (n, p) ->
+            try { p.destroy() } catch (t: Throwable) { }
+            Log.i(TAG, "cmp: arm=$name destroyed tracked $n (alive=${p.isAlive})")
+        }
+        trackedProcs.removeIf { it.first.endsWith("-$name") }
         Thread.sleep(2_000)
-        resetGuests(ctx, rootfs)
-        guest(ctx, rootfs, null, "rm -f /root/cmp-session-$name.sh /root/cmp-nautilus-$name.log")
-        Log.i(TAG, "cmp: arm=$name teardown done, proot alive=${proc.isAlive}")
-
+        if (rootIdent != null) {
+            val idents = treeOf(rootIdent.pid).mapNotNull { identityOf(it) }
+            val left = killVerified(idents, "arm-$name-teardown")
+            if (left.isNotEmpty()) Log.w(TAG, "cmp: arm=$name teardown skipped/reused pids: $left")
+        }
+        guest(ctx, rootfs, null, "rm -f /root/cmp-session-$name.sh")
+        Log.i(TAG, "cmp: arm=$name teardown done")
         return ArmResult(name, mode, wins, steps, glx, fps)
     }
 }

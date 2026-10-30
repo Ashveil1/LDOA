@@ -1676,11 +1676,32 @@ for i in range(d.childCount):
         val scP = sc!!
         val bmpBefore = fullShot()
         Shot.save("23e-ubuntu-scroll-target")
+        // scroll-diag: the wheel path in SIMULATED_TOUCH (mode 2, the product
+        // mode) sends wheel events at the CURRENT X cursor position with NO
+        // warp to the gesture focus (InputStrategyInterface.onScroll), so the
+        // cursor's position at swipe time is load-bearing evidence.
+        Log.i(TAG, "scroll-diag: files-X-rect x=" + nws.x + " y=" + nws.y + " w=" + nws.w + " h=" + nws.h)
+        Log.i(TAG, "scroll-diag: window-tree(at swipe)=" +
+            xwin("xwininfo -root -tree 2>/dev/null | head -30").replace("\n", " | "))
+        Log.i(TAG, "scroll-diag: cursor(before-swipe1)=" + xwin("xdotool getmouselocation 2>/dev/null || true").trim())
         probeStart("scroll")
         twoFingerSwipe(scP.first - 60, scP.second, scP.first + 60, scP.second, 0, -200)
+        Log.i(TAG, "scroll-diag: cursor(after-swipe1)=" + xwin("xdotool getmouselocation 2>/dev/null || true").trim())
         Thread.sleep(900)
+        Shot.save("23e5-ubuntu-scroll-mid")
         twoFingerSwipe(scP.first - 60, scP.second, scP.first + 60, scP.second, 0, -200)
+        Log.i(TAG, "scroll-diag: cursor(after-swipe2)=" + xwin("xdotool getmouselocation 2>/dev/null || true").trim())
         val scrollProbe = probeStop("scroll")
+        // Full physical wheel events WITH coordinates (not a 300-char tail);
+        // the whole probe is retained for artifact-side re-inspection.
+        for (ln in scrollProbe.lines()) {
+            if (ln.contains("EVENT type") || ln.contains("detail:") || ln.contains("root:") ||
+                ln.contains("flags:") || ln.contains("valuators:"))
+                Log.i(TAG, "scroll-diag: probe| " + ln.trim())
+        }
+        Log.i(TAG, "scroll-diag: probe-full-begin")
+        scrollProbe.chunked(3500).forEachIndexed { i, c -> Log.i(TAG, "scroll-diag: probe-chunk-" + i + "|" + c) }
+        Log.i(TAG, "scroll-diag: probe-full-end")
         val bmpAfter = fullShot()
         Shot.save("23f-ubuntu-twofinger-scrolled")
         val wheelUp = buttonPresses(scrollProbe, 4)
