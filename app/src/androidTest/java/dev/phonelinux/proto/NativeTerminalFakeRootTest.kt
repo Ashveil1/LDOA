@@ -108,17 +108,18 @@ class NativeTerminalFakeRootTest {
             // via a host-built test-owned fixture .deb (no in-guest archive build,
             // so the creat divergence cannot contaminate the measurement).
             val fixtureSha = "3b09408e18dfd531913287e9de863f00d17bee5158642e2d0390f03aa892e599"
-            val fixtureBytes = ctx.assets.open("ldoa_probe_fixture.deb").readBytes()
+            // test APK assets live on the INSTRUMENTATION context, not targetContext
+            val fixtureBytes = InstrumentationRegistry.getInstrumentation().context.assets.open("ldoa_probe_fixture.deb").readBytes()
             val gotSha = MessageDigest.getInstance("SHA-256").digest(fixtureBytes)
                 .joinToString("") { "%02x".format(it) }
             assertTrue("fixture .deb SHA256 mismatch (tampered or rebuilt): got $gotSha",
                 gotSha == fixtureSha)
             val fixtureDir = File(rootfs, "tmp/ldoa-probe-fixture").apply { mkdirs() }
             File(fixtureDir, "fixture.deb").writeBytes(fixtureBytes)
-            term.send("dpkg -i /tmp/ldoa-probe-fixture/fixture.deb >install.out 2>&1; echo INSTALL-RC=\$?; " +
+            term.send("dpkg -i /tmp/ldoa-probe-fixture/fixture.deb >/tmp/ldoa-probe-fixture/install.out 2>&1; echo INSTALL-RC=\$?; " +
                 "dpkg -s ldoa-probe-fixture 2>&1 | grep -E '^(Package|Status|Version):'; " +
                 "echo PAYLOAD-BEGIN; cat /opt/ldoa-probe-fixture/hello.txt 2>&1; echo PAYLOAD-END; " +
-                "echo INSTALL-DUMP-BEGIN; cat install.out; echo INSTALL-DUMP-END; " +
+                "echo INSTALL-DUMP-BEGIN; cat /tmp/ldoa-probe-fixture/install.out; echo INSTALL-DUMP-END; " +
                 "dpkg -r ldoa-probe-fixture >/dev/null 2>&1; echo REMOVE-RC=\$?; rm -rf /tmp/ldoa-probe-fixture")
             val instOut = await("REMOVE-RC=", 120_000)
             assertTrue("fixture install stage never completed:\n$instOut", instOut.contains("REMOVE-RC="))
@@ -132,9 +133,12 @@ class NativeTerminalFakeRootTest {
                 instOut.contains("ldoa-probe-fixture payload v1"))
             assertTrue("owned package cleanup must succeed:\n$instOut",
                 instOut.contains("REMOVE-RC=0"))
-            fixtureDir.deleteRecursively()
         } finally {
             term.close()
+            // Android-side copy of the fixture: test-owned dir, safe to drop
+            // even when an assertion above failed (leaves guest-side cleanup
+            // to the emulator's ephemeral fs).
+            try { File(rootfs, "tmp/ldoa-probe-fixture").deleteRecursively() } catch (_: Throwable) {}
         }
     }
 }
