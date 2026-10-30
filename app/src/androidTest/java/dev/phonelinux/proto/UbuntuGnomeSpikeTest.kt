@@ -202,7 +202,6 @@ class UbuntuGnomeSpikeTest {
         }
 
 
-
         // 3. INTERACTION proof (not just render): finger-tap the Files dock
         // icon -> a real nautilus window must map; finger-drag its headerbar
         // -> the geometry must move. Verified through the guest's own
@@ -1465,22 +1464,42 @@ for i in range(d.childCount):
             return xwin("xprop -id " + nv.id + " _NET_WM_NAME 2>/dev/null || true")
                 .trim().contains("LDOA-row-fixture")
         }
-        val preOpenShot = fullShot()
         val openItem = mapToDevice(rmx + rmw / 2, rmy + 30)
         if (openItem != null) device.click(openItem.first, openItem.second)
         Thread.sleep(1_500)
         Shot.save("23d5a-ubuntu-row-menu-submenu")
         if (!titleHasFixture()) {
-            // Fail with the frames preserved rather than tap blind when the
-            // expected in-place page did not appear (representation differs;
-            // review 23d5a and re-derive the leaf geometry before retrying).
-            if (menuDevRect != null) {
-                val pageFrac = regionDiff(preOpenShot, fullShot(), menuDevRect)
-                Log.i(TAG, "2ftap-row: submenu page replacement frac=" + pageFrac)
-                assertTrue("submenu page did not replace the popup in place (frac=" + pageFrac +
-                    ") - representation differs from the Nautilus 46 in-place page; " +
-                    "frames 23d2/23d5a preserved, no blind leaf tap attempted", pageFrac > 0.05)
+            // Semantic expansion check (structural, not a pixel diff): the
+            // in-place submenu page has fewer rows than the classic 9-item
+            // menu, so the SAME popup window keeps its top-left and shrinks
+            // (run 41014398628: classic 348px, expanded page ~190px; run
+            // 41007543219 frames). A first tap can land as hover only, so
+            // re-tap the parent row once, then fail with frames preserved
+            // rather than tap blind.
+            fun menuGeomNow(): Triple<Int, Int, Int>? {
+                val id = rowMenuWin.first.firstOrNull() ?: return null
+                val g = xwin("xwininfo -id " + id + " 2>/dev/null || true")
+                val gx = Regex("Absolute upper-left X:\\s+(-?\\d+)").find(g)?.groupValues?.get(1)?.toIntOrNull()
+                val gy = Regex("Absolute upper-left Y:\\s+(-?\\d+)").find(g)?.groupValues?.get(1)?.toIntOrNull()
+                val gh = Regex("Height:\\s+(\\d+)").find(g)?.groupValues?.get(1)?.toIntOrNull()
+                return if (gx != null && gy != null && gh != null) Triple(gx, gy, gh) else null
             }
+            fun pageExpanded(): Boolean {
+                val g = menuGeomNow() ?: return false
+                return kotlin.math.abs(g.first - rmx) <= 2 && kotlin.math.abs(g.second - rmy) <= 2 &&
+                    g.third in 1 until rmh * 4 / 5
+            }
+            if (!pageExpanded()) {
+                Log.i(TAG, "2ftap-row: submenu page not expanded after first parent tap " +
+                    "(geom=" + menuGeomNow() + " vs classic " + rmh + "px) - one bounded parent re-tap")
+                if (openItem != null) device.click(openItem.first, openItem.second)
+                Thread.sleep(1_500)
+                Shot.save("23d5a-ubuntu-row-menu-submenu")
+            }
+            assertTrue("submenu page did not replace the popup in place after parent tap + one " +
+                "re-tap (geom=" + menuGeomNow() + ", classic=" + rmh + "px) - representation differs " +
+                "from the Nautilus 46 in-place page; frames 23d2/23d5a preserved, no blind leaf tap " +
+                "attempted", pageExpanded())
             // Measured from run 41007543219's pixels (mapping probes showed
             // device==guest with y offset +128): the header row occupies the
             // parent item's row and the "Open" leaf sits 21px below it
