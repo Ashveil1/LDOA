@@ -2,6 +2,8 @@ package dev.phonelinux.proto
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import android.util.Log
+import java.io.File
+import java.security.MessageDigest
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertTrue
@@ -91,12 +93,46 @@ class NativeTerminalFakeRootTest {
             term.send("mkdir -p probe/DEBIAN && chmod 755 probe probe/DEBIAN && printf 'Package: probe\\nVersion: 1\\nArchitecture: all\\nMaintainer: t\\nDescription: probe\\n' > probe/DEBIAN/control && if [ ! -f probe.done ] && command -v strace >/dev/null 2>&1 && ! grep -q 'Operation not permitted\\|ENOSYS\\|error' strace-cap.out 2>/dev/null; then strace -f -o probe.strace dpkg-deb --build probe probe.deb >probe-build.out 2>&1; else dpkg-deb --build probe probe.deb >probe-build.out 2>&1; fi; echo BUILD-RC=\$?; dpkg --no-act -i probe.deb >probe.out 2>&1; echo PROBE-RC=\$?; echo PROBE-DUMP-BEGIN; cat probe-build.out; cat probe.out; echo STRACE-DUMP-BEGIN; grep -E 'ENOSYS|probe.deb' probe.strace 2>/dev/null | tail -8 || echo no-strace; echo STRACE-DUMP-END; echo PROBE-DUMP-END; cd /; rm -rf \"\$PD\"")
             val probeOut = await("PROBE-DUMP-END", 60_000)
             assertTrue("dpkg probe never completed:\n$probeOut", probeOut.contains("PROBE-RC="))
-            assertTrue("probe .deb failed to build (test fixture defect, not a product result):\n$probeOut",
-                probeOut.contains("BUILD-RC=0"))
-            assertTrue("dpkg install-path privilege check must accept proot fake root (rc 0); scrollback:\n$probeOut",
-                probeOut.contains("PROBE-RC=0"))
-            assertTrue("superuser denial must be gone:\n$probeOut",
-                !probeOut.contains("requires superuser privilege"))
+            // KNOWN x86 CI-ENVIRONMENT DIVERGENCE (measured, run 41074902090):
+            // raw creat(2) returns ENOSYS in the guest while openat(2) succeeds;
+            // dpkg-deb --build (ar.c:79 creat path) therefore fails on x86 Android.
+            // Leading hypothesis: Android app seccomp allowlist (bionic SYSCALLS.TXT
+            // has openat, no creat); proot source passes creat through after path
+            // translation. arm64 has no raw creat syscall at ABI level; the device
+            // path is untested. BUILD-RC/PROBE-RC are captured for drift detection
+            // and deliberately NOT gated here - install acceptance is measured by
+            // the host-built fixture stage below.
+            Log.i("NativeFakeRoot", "creat-divergence capture: BUILD-RC/PROBE-RC in scrollback, non-gating")
+
+            // TRACK 1 - original A intent: dpkg INSTALL acceptance under fake root,
+            // via a host-built test-owned fixture .deb (no in-guest archive build,
+            // so the creat divergence cannot contaminate the measurement).
+            val fixtureSha = "3b09408e18dfd531913287e9de863f00d17bee5158642e2d0390f03aa892e599"
+            val fixtureBytes = ctx.assets.open("ldoa_probe_fixture.deb").readBytes()
+            val gotSha = MessageDigest.getInstance("SHA-256").digest(fixtureBytes)
+                .joinToString("") { "%02x".format(it) }
+            assertTrue("fixture .deb SHA256 mismatch (tampered or rebuilt): got $gotSha",
+                gotSha == fixtureSha)
+            val fixtureDir = File(rootfs, "tmp/ldoa-probe-fixture").apply { mkdirs() }
+            File(fixtureDir, "fixture.deb").writeBytes(fixtureBytes)
+            term.send("dpkg -i /tmp/ldoa-probe-fixture/fixture.deb >install.out 2>&1; echo INSTALL-RC=\$?; " +
+                "dpkg -s ldoa-probe-fixture 2>&1 | grep -E '^(Package|Status|Version):'; " +
+                "echo PAYLOAD-BEGIN; cat /opt/ldoa-probe-fixture/hello.txt 2>&1; echo PAYLOAD-END; " +
+                "echo INSTALL-DUMP-BEGIN; cat install.out; echo INSTALL-DUMP-END; " +
+                "dpkg -r ldoa-probe-fixture >/dev/null 2>&1; echo REMOVE-RC=\$?; rm -rf /tmp/ldoa-probe-fixture")
+            val instOut = await("REMOVE-RC=", 120_000)
+            assertTrue("fixture install stage never completed:\n$instOut", instOut.contains("REMOVE-RC="))
+            assertTrue("dpkg -i fixture must succeed under proot fake root (original A intent):\n$instOut",
+                instOut.contains("INSTALL-RC=0"))
+            assertTrue("superuser denial must be gone:\n$instOut",
+                !instOut.contains("requires superuser privilege"))
+            assertTrue("package status must be installed:\n$instOut",
+                instOut.contains("Status: install ok installed"))
+            assertTrue("payload file must be readable:\n$instOut",
+                instOut.contains("ldoa-probe-fixture payload v1"))
+            assertTrue("owned package cleanup must succeed:\n$instOut",
+                instOut.contains("REMOVE-RC=0"))
+            fixtureDir.deleteRecursively()
         } finally {
             term.close()
         }
