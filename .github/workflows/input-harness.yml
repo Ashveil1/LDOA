@@ -100,3 +100,6 @@ jobs:
             guest-gnome.log
             harness-owned-ledger.txt
             /tmp/shotlog.txt
+            /tmp/instr0.log
+            /tmp/instr-native.log
+            /tmp/instr.log
