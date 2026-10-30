@@ -204,6 +204,7 @@ class MobileShellSpikeTest {
         // X server logs stream to logcat (captured by the workflow) BEFORE
         // the test task uninstalls the app - run 40892838123 lost both
         // logs to that uninstall and the failure was undiagnosable.
+        val priorRoots = mutableListOf<Pair<Int, String>>()
         try {
         for (round in listOf(
             Triple(defaultPrefs.scale, "40-mobile-desktop-early", "41-mobile-desktop-settled"),
@@ -215,6 +216,23 @@ class MobileShellSpikeTest {
             val proc = GuestMobileShell.launchMobileSession(ctx, rootfs)
             logOffset = awaitJwmAlive(proc, logFile, logOffset)
             assertTrue("mobile session process died before the evidence window closed (scale=$scale)", proc.isAlive)
+            // GATE-2 reentry identity: each round's proot root
+            // (pid, starttime) must be NEW and every prior round's root
+            // DEAD - freshness by identity, never by pts number.
+            val roundRoot = hostPidOf(proc)
+            assertTrue("proot root PID unreadable (scale=$scale)", roundRoot != null)
+            val rr = roundRoot!!
+            val rootStart = scanProc()[rr]?.start
+            assertTrue("proot root starttime unreadable (scale=$scale)", rootStart != null)
+            for (prev in priorRoots) {
+                val cur = identityOf(prev.first)
+                assertTrue("gate2 reentry: prior round root pid=" + prev.first + " still alive with same start (scale=$scale)", cur == null || cur.start != prev.second)
+            }
+            assertTrue("gate2 reentry: proot root identity reused across rounds (scale=$scale)", priorRoots.none { it.first == rr && it.second == rootStart })
+            priorRoots.add(Pair(rr, rootStart!!))
+            if (priorRoots.size == 1) {
+                Log.i(TAG, "gate2 line-discipline: CR chars in session log so far: " + logFile.readText().count { it == '\r' })
+            }
 
             ctx.startActivity(
                 Intent(ctx, com.termux.x11.MainActivity::class.java)
@@ -226,6 +244,25 @@ class MobileShellSpikeTest {
             Shot.dismissSystemDialogs(device)
             Shot.save(shotSettled)
             assertTrue("mobile session died during the render window (scale=$scale)", proc.isAlive)
+
+            // GATE-2 lifecycle/ctty evidence (asserted every round):
+            // guard exec's, so the proot root's child IS script; the
+            // session shell leads its session (sid==pid, setsid proof);
+            // jwm/xterm inherit the pty ctty (tty_nr != 0). Guest-side
+            // mirrors are the session-shell/jwm/xterm ctty lines echoed
+            // by mobile-session.sh.
+            val treeDets = treeOf(rr, scanProc()).mapNotNull { procDetail(it) }
+            Log.i(TAG, "gate2 tree (scale=$scale): " + treeDets.joinToString { d -> d.comm + "[" + d.pid + "] ppid=" + d.ppid + " sid=" + d.sid + " tty=" + d.ttyNr })
+            val scriptDet = treeDets.singleOrNull { it.comm == "script" }
+            assertTrue("gate2: expected exactly one script layer as proot root's child (scale=$scale): " + treeDets.filter { it.comm == "script" }, scriptDet != null && scriptDet.ppid == rr)
+            val shellDet = treeDets.singleOrNull { it.comm == "sh" && it.sid == it.pid }
+            assertTrue("gate2: session shell missing or not a session leader (scale=$scale)", shellDet != null)
+            assertTrue("gate2: session shell is not script's child (scale=$scale)", shellDet != null && scriptDet != null && shellDet.ppid == scriptDet.pid)
+            for (c in listOf("jwm", "xterm")) {
+                val d = treeDets.singleOrNull { it.comm == c }
+                assertTrue("gate2: " + c + " missing from owned tree (scale=$scale)", d != null)
+                assertTrue("gate2: " + c + " has no controlling tty (scale=$scale)", d != null && d.ttyNr != 0)
+            }
 
             // Client-window evidence via the guest's own xwininfo on :0.
             // EVERY round: a failed render must never count as a visual pass.
@@ -254,13 +291,53 @@ class MobileShellSpikeTest {
             assertTrue("session tree not empty after teardown (scale=$scale): $left", left.isEmpty())
             Log.i(TAG, "mobile round scale=$scale torn down clean")
         }
+
+        // GATE-2 abnormal-death verification (dedicated sessions,
+        // destroyed by design). forward = session shell killed abruptly
+        // (script must exit on child death); inverse = script killed
+        // abruptly (master close SIGHUPs the session). ORPHAN RULE: any
+        // captured owned identity (tree + session bus) surviving its
+        // cell = orphan risk MATERIALIZED - evidence logged, survivors
+        // cleaned via captured identities, and the test FAILS (fail
+        // closed; never pass by omission).
+        for (cell in listOf("forward", "inverse")) {
+            val proc = GuestMobileShell.launchMobileSession(ctx, rootfs)
+            logOffset = awaitJwmAlive(proc, logFile, logOffset)
+            Thread.sleep(20_000) // pcmanfm/xterm launch before capture
+            val rootPid = hostPidOf(proc)
+            assertTrue("gate2 " + cell + ": proot root unreadable", rootPid != null)
+            val busIdentity = File(rootfs, "root/.mobile-bus.pid")
+                .takeIf { it.isFile }?.readText()?.trim()?.toIntOrNull()
+                ?.let { identityOf(it) }
+            val tree = treeOf(rootPid!!, scanProc())
+            val idents = tree.mapNotNull { identityOf(it) }
+            val scriptId = tree.singleOrNull { procDetail(it)?.comm == "script" }?.let { identityOf(it) }
+            val shellId = tree.singleOrNull { p -> val d = procDetail(p); d != null && d.comm == "sh" && d.sid == d.pid }?.let { identityOf(it) }
+            assertTrue("gate2 " + cell + ": script identity missing", scriptId != null)
+            assertTrue("gate2 " + cell + ": session-shell identity missing", shellId != null)
+            val victim = if (cell == "forward") shellId!! else scriptId!!
+            assertTrue("gate2 " + cell + ": victim identity stale before signal", signalVerified(victim, android.system.OsConstants.SIGKILL))
+            val died = awaitProcessDeath(proc, 30_000)
+            assertTrue("gate2 " + cell + ": tracked proot root alive 30s after " + (if (cell == "forward") "session-shell" else "script") + " death", died)
+            Thread.sleep(5_000) // SIGHUP cascade grace
+            val orphans = (idents + listOfNotNull(busIdentity)).filter { id ->
+                val cur = identityOf(id.pid); cur != null && cur.start == id.start
+            }
+            if (orphans.isNotEmpty()) {
+                Log.e(TAG, "gate2 " + cell + ": ORPHANS survived: " + orphans.joinToString { o -> o.pid.toString() + "(" + (procDetail(o.pid)?.comm ?: "?") + ")" })
+                for (o in orphans) { signalVerified(o, android.system.OsConstants.SIGTERM) }
+                Thread.sleep(2_000)
+                for (o in orphans) { signalVerified(o, android.system.OsConstants.SIGKILL) }
+            }
+            assertTrue("gate2 " + cell + ": owned identities survived abnormal death - ORPHAN RISK MATERIALIZED: " + orphans.map { it.pid }, orphans.isEmpty())
+        }
         } finally {
             dumpLogTail("mobile-desktop.log", logFile)
             dumpLogTail("xserver.log", File(ctx.filesDir, "xserver.log"))
             dumpLogTail("devtty-trace.log", devttyTrace, 262144)
         }
         MobileModeSettings.write(ctx, defaultPrefs)
-        Log.i(TAG, "MOBILE-SHELL-OK sessions alive, rendered at 3 scales, windows mapped, trees torn down")
+        Log.i(TAG, "MOBILE-SHELL-OK sessions alive under ctty wrap, rendered at 3 scales, windows mapped, trees torn down clean, gate2 lifecycle/reentry/abnormal-death verified")
     }
 
     /** Stream a bounded tail of a device-side log into logcat with explicit
@@ -302,6 +379,7 @@ class MobileShellSpikeTest {
                 return offset
             }
             if (text.contains("mobile-launch: jwm died") ||
+                text.contains("mobile-launch: script helper missing") ||
                 text.contains("mobile-launch: X :0 rejected") ||
                 text.contains("Cannot open display") ||
                 text.contains("jwm: not found")) {
@@ -412,6 +490,40 @@ class MobileShellSpikeTest {
         signal(android.system.OsConstants.SIGKILL)
         Thread.sleep(2_000)
         return survivors(idents)
+    }
+
+    /** Host-side detail for one pid: comm, session id, ctty device.
+     *  stat fields after ')': 0=state(3) 1=ppid(4) 2=pgrp(5) 3=session(6)
+     *  4=tty_nr(7) ... 19=starttime(22). ttyNr 0 = no controlling tty. */
+    private class PDet(val pid: Int, val ppid: Int, val comm: String, val sid: Int, val ttyNr: Int, val start: String)
+
+    private fun procDetail(pid: Int): PDet? = try {
+        val stat = File("/proc/" + pid + "/stat").readText()
+        val close = stat.lastIndexOf(')')
+        if (close < 0) null else {
+            val comm = stat.substring(stat.indexOf('(') + 1, close)
+            val rest = stat.substring(close + 1).trim().split(Regex("\\s+"))
+            if (rest.size < 20) null
+            else PDet(pid, rest[1].toInt(), comm, rest[3].toInt(), rest[4].toInt(), rest[19])
+        }
+    } catch (t: Throwable) { null }
+
+    /** Signal one captured identity ONLY after re-verifying its
+     *  (pid, starttime, uid) - a reused PID is never signaled. Returns
+     *  false when the identity is stale or the signal failed. */
+    private fun signalVerified(id: PIdent, sig: Int): Boolean {
+        val cur = identityOf(id.pid)
+        if (cur == null || cur.start != id.start || cur.uid != id.uid) return false
+        return try { android.os.Process.sendSignal(id.pid, sig); true } catch (t: Throwable) { false }
+    }
+
+    private fun awaitProcessDeath(proc: Process, ms: Long): Boolean {
+        val deadline = System.currentTimeMillis() + ms
+        while (System.currentTimeMillis() < deadline) {
+            if (!proc.isAlive) return true
+            Thread.sleep(1_000)
+        }
+        return !proc.isAlive
     }
 
     private fun survivors(idents: Map<Int, PIdent>): List<Int> {

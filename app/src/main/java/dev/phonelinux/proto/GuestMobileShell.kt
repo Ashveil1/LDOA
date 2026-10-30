@@ -37,6 +37,7 @@ object GuestMobileShell {
      *  not require a prior GNOME provision. */
     private val MOBILE_PACKAGES = listOf(
         "dbus-x11",
+        "bsdutils",        // /usr/bin/script: Gate-2 ctty wrap (session runs under a pty)
         "jwm",
         "xterm",
         "x11-utils",         // xprop, xwininfo, xdpyinfo, xsetroot
@@ -47,7 +48,10 @@ object GuestMobileShell {
         "hicolor-icon-theme"
     )
 
-    fun hasMobileShell(rootfs: File): Boolean = File(rootfs, "usr/bin/jwm").isFile
+    /** jwm + the Gate-2 ctty helper: a rootfs without /usr/bin/script
+     *  cannot launch the approved session shape (fail closed there). */
+    fun hasMobileShell(rootfs: File): Boolean =
+        File(rootfs, "usr/bin/jwm").isFile && File(rootfs, "usr/bin/script").isFile
 
     private fun apt(ctx: Context, rootfs: File, vararg args: String): Proot.Result =
         Proot.runGuest(ctx, rootfs, listOf("apt-get") + args.toList(),
@@ -114,7 +118,17 @@ object GuestMobileShell {
 
     /** Launch the mobile session against the embedded X server. The proot
      *  invocation is cloned from GuestUbuntu.launchGnomeSession (fake root,
-     *  loaders, binds, TMPDIR) - keep the two in sync when that changes. */
+     *  loaders, binds, TMPDIR) - keep the two in sync when that changes.
+     *  GATE-2 (Ash 2026-10-30 10:31 approval, wamid...QzAyREFB): the
+     *  session runs under a util-linux `script` pty so every session
+     *  process inherits a controlling terminal - xterm's /dev/tty open
+     *  then succeeds and the alarm-clobbered errno path (Error 14 chain,
+     *  Gate-1 run 40925697145) is unreachable. HARD dependency, fail
+     *  closed: a missing helper aborts the launch with a distinct marker
+     *  rather than booting a degraded session with a guaranteed-dead
+     *  terminal. `exec` keeps the tree flat: the proot root's child IS
+     *  script; teardown keeps walking host parentage from the tracked
+     *  proot root (ownership verified by the Gate-2 test matrix). */
     fun launchMobileSession(ctx: Context, rootfs: File): Process {
         val ui = MobileModeSettings.read(ctx)
         val dpi = xftDpi(ctx, ui)
@@ -160,6 +174,7 @@ object GuestMobileShell {
               sleep 1
             done
             echo "mobile-launch: X ready after ${'$'}{XWAIT}s (guest xset q verified)"
+            echo "mobile-launch: session-shell pid=${'$'}${'$'} sid=${'$'}(awk '{print ${'$'}6}' /proc/${'$'}${'$'}/stat) ctty=${'$'}(tty)"
             # Fresh session bus per launch (load-bearing, run 40729917335):
             # a killed session's bus address lingers in the X root window
             # while the shared X server keeps running.
@@ -176,6 +191,7 @@ object GuestMobileShell {
             sleep 5
             if kill -0 ${'$'}WMPID 2>/dev/null; then
               echo "mobile-launch: jwm alive pid=${'$'}WMPID"
+              echo "mobile-launch: jwm ctty-fd0=${'$'}(readlink /proc/${'$'}WMPID/fd/0 2>/dev/null)"
             else
               wait ${'$'}WMPID 2>/dev/null
               echo "mobile-launch: jwm died exit=${'$'}? - NO FALLBACK (fail closed: exactly one WM may own :0)"
@@ -184,6 +200,8 @@ object GuestMobileShell {
             fc-cache -f >/dev/null 2>&1
             pcmanfm --desktop &
             xterm -fa "DejaVu Sans Mono" -fs ${'$'}{TERM_FONT:-13} -geometry 100x30+40+120 &
+            XTPID=${'$'}!
+            echo "mobile-launch: xterm pid=${'$'}XTPID ctty-fd0=${'$'}(readlink /proc/${'$'}XTPID/fd/0 2>/dev/null)"
             wait
             """.trimIndent() + "\n")
         val nd = ctx.applicationInfo.nativeLibraryDir
@@ -196,7 +214,8 @@ object GuestMobileShell {
             "-b", "/dev", "-b", "/proc", "-b", "/sys",
             "-b", XServer.socketDir(ctx).absolutePath + ":/tmp/.X11-unix",
             "-w", "/root",
-            "/bin/sh", "/root/mobile-session.sh"
+            "/bin/sh", "-c",
+            "command -v script >/dev/null 2>&1 || { echo 'mobile-launch: script helper missing - FAIL CLOSED'; exit 1; }; exec script -qec '/bin/sh /root/mobile-session.sh' /dev/null"
         )
         pb.environment().putAll(mapOf(
             "PROOT_LOADER" to File(nd, "libproot_loader.so").absolutePath,
