@@ -29,6 +29,13 @@ class TerminalSession(
         val argv = listOf(
             File(nd, "libproot.so").absolutePath,
             "--link2symlink",
+            // Fake root, aligned with provisioning and the desktop session
+            // (both already run -0 on this rootfs): apt/dpkg refuse a
+            // non-root euid, and this shell is the user's package-install
+            // surface. Field evidence 2026-10-30: without it, apt downloads
+            // then dpkg denies with "requested operation requires superuser
+            // privilege" (real uid = the app uid).
+            "-0",
             "-r", rootfs.absolutePath,
             "-b", "/dev", "-b", "/proc", "-b", "/sys",
             "-w", "/root",

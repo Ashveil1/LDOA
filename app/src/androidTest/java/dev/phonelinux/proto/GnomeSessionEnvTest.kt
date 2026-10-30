@@ -37,4 +37,19 @@ class GnomeSessionEnvTest {
             exportAt < launchAt
         )
     }
+
+    @Test
+    fun sessionScriptExportsUtf8LocaleBeforeLaunch() {
+        val script = GuestUbuntu.gnomeSessionScript()
+        val langAt = script.indexOf("LANG=C.UTF-8")
+        val lcallAt = script.indexOf("LC_ALL=C.UTF-8")
+        val launchAt = script.indexOf("gnome-session --session=ubuntu")
+        assertTrue("gnome-session.sh must export LANG=C.UTF-8 (gnome-terminal-server exits status 8 under a non-UTF-8 locale)", langAt >= 0)
+        assertTrue("gnome-session.sh must export LC_ALL=C.UTF-8", lcallAt >= 0)
+        assertTrue("gnome-session launch must exist in the script", launchAt >= 0)
+        assertTrue(
+            "locale exports must precede the gnome-session launch (env propagates to the session bus daemon and D-Bus-activated servers)",
+            langAt in 0 until launchAt && lcallAt in 0 until launchAt
+        )
+    }
 }

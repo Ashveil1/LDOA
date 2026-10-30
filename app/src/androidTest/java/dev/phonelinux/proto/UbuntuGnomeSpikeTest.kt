@@ -160,6 +160,49 @@ class UbuntuGnomeSpikeTest {
         assertTrue("gnome session died during the render window", proc.isAlive)
         Log.i(TAG, "UBUNTU-GNOME-SESSION-ALIVE (visual Ubuntu appearance is judged on artifact screenshots)")
 
+        // gnome-terminal via the REAL activation path (locale fix evidence):
+        // GIO D-Bus activation on THIS session's own bus (the app-grid path),
+        // then proof a typed command executes inside the window via XTEST.
+        run {
+            val bus = logFile.readText().lineSequence()
+                .filter { it.contains("gnome-launch: session bus ") }
+                .lastOrNull()?.substringAfter("gnome-launch: session bus ")?.trim()
+            assertTrue("no session bus line in launch log for terminal activation", bus != null)
+            // Fixture: xdotool for focus/typing (bounded install, same
+            // pattern as the existing xterm/x11 fixtures).
+            if (xwin("command -v xdotool || true").trim().isEmpty()) {
+                val inst = xwin("export DEBIAN_FRONTEND=noninteractive; timeout 180 apt-get install -y xdotool 2>&1 | tail -3 || true")
+                Log.i(TAG, "gnome-terminal-test: xdotool fixture install tail=" + inst.replace("\n", " | "))
+            }
+            xwin("rm -f /root/term-exec.txt")
+            xwin("export DBUS_SESSION_BUS_ADDRESS='$bus'; gio launch /usr/share/applications/org.gnome.Terminal.desktop >/dev/null 2>&1 || true")
+            var winId = ""
+            val termDeadline = System.currentTimeMillis() + 60_000
+            while (System.currentTimeMillis() < termDeadline) {
+                winId = xwin("xdotool search --class gnome-terminal 2>/dev/null | tail -1").trim()
+                if (winId.isNotEmpty()) break
+                Thread.sleep(3_000)
+            }
+            Shot.save("26-gnome-terminal-launched")
+            assertTrue("gnome-terminal window never mapped after gio launch (server startup failure - exit-8 locale class?)",
+                winId.isNotEmpty())
+            xwin("xdotool windowfocus --sync $winId 2>/dev/null; xdotool type --delay 15 'echo GNOME-TERM-EXEC-OK > /root/term-exec.txt'; xdotool key Return")
+            var execProof = ""
+            val execDeadline = System.currentTimeMillis() + 30_000
+            while (System.currentTimeMillis() < execDeadline) {
+                execProof = xwin("cat /root/term-exec.txt 2>/dev/null").trim()
+                if (execProof.contains("GNOME-TERM-EXEC-OK")) break
+                Thread.sleep(2_000)
+            }
+            Shot.save("27-gnome-terminal-exec")
+            assertTrue("typed command never executed inside gnome-terminal (last='$execProof')",
+                execProof.contains("GNOME-TERM-EXEC-OK"))
+            xwin("xdotool windowclose $winId 2>/dev/null; sleep 2; rm -f /root/term-exec.txt; echo term-cleanup-done")
+            Log.i(TAG, "UBUNTU-GNOME-TERMINAL-OK real D-Bus-activated gnome-terminal mapped and executed typed input")
+        }
+
+
+
         // 3. INTERACTION proof (not just render): finger-tap the Files dock
         // icon -> a real nautilus window must map; finger-drag its headerbar
         // -> the geometry must move. Verified through the guest's own

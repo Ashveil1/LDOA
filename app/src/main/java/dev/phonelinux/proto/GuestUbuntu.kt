@@ -86,7 +86,12 @@ object GuestUbuntu {
             # learn the session type from it; its tty-gated DISPLAY legacy
             # fallback is also unavailable. Export the type explicitly or
             # gnome-shell exits 1 with "Unsupported session type".
-            export DISPLAY=:0 HOME=/root XDG_RUNTIME_DIR=/tmp/xdg XDG_CURRENT_DESKTOP=ubuntu:GNOME XDG_SESSION_TYPE=x11
+            # Locale: nothing in this launch path sets LANG/LC_*, and
+            # gnome-terminal-server exits status 8 (_EXIT_FAILURE_NO_UTF8)
+            # under a non-UTF-8 locale (POCO log 2026-10-30: "Process
+            # org.gnome.Terminal exited with status 8"). C.UTF-8 is compiled
+            # into glibc (>= 2.35), so no locale-gen or extra package.
+            export DISPLAY=:0 HOME=/root XDG_RUNTIME_DIR=/tmp/xdg XDG_CURRENT_DESKTOP=ubuntu:GNOME XDG_SESSION_TYPE=x11 LANG=C.UTF-8 LC_ALL=C.UTF-8
             export PLINUX_SESSION=desktop
             LAUNCH_ID=$(date +%s)
             echo "gnome-launch: launch id=${'$'}LAUNCH_ID"
