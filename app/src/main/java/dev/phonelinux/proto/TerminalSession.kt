@@ -22,6 +22,73 @@ class TerminalSession(
     private val sessionLog by lazy { File(ctx.filesDir, "terminal-session.log") }
     private val running = AtomicBoolean(false)
     private val lock = Any()
+    // Bounded UI scrollback: unbounded growth made every snapshot() + Compose
+    // re-render quadratic in total output (measured host-side). The full
+    // stream still lands in sessionLog; the UI buffer keeps a tail only.
+    private val maxBufBytes = 512 * 1024
+    private val trimToBytes = 384 * 1024
+    // Callback throttle: coalesce per-chunk onUpdate storms (one per 4KB read)
+    // to at most one per 100ms, with a trailing fire so the last chunk of a
+    // burst is never lost.
+    private val notifyLock = Any()
+    private var notifyPending = false
+    private var lastNotify = 0L
+    // Buffered session log: appendText per 4KB chunk is an open/write/close
+    // syscall storm; batch to 16KB flushes, flushed again on reader end/close.
+    private val logBuf = StringBuilder()
+
+    // Extracted for testability: append + bounded-tail trim, one lock hold.
+    private fun appendToBuf(text: String) {
+        synchronized(lock) {
+            buf.append(text)
+            if (buf.length > maxBufBytes) {
+                var cut = buf.indexOf('\n', buf.length - trimToBytes)
+                cut = if (cut < 0) buf.length - trimToBytes else cut + 1
+                buf.delete(0, cut)
+                buf.insert(0, "[...older output truncated - full stream in terminal-session.log...]\n")
+            }
+        }
+    }
+
+    private fun notifyUpdate() {
+        val now = System.currentTimeMillis()
+        synchronized(notifyLock) {
+            if (now - lastNotify < 100) {
+                if (notifyPending) return
+                notifyPending = true
+                thread(isDaemon = true, name = "term-notify") {
+                    Thread.sleep(100)
+                    synchronized(notifyLock) {
+                        notifyPending = false
+                        lastNotify = System.currentTimeMillis()
+                    }
+                    try { onUpdate() } catch (_: Throwable) {}
+                }
+                return
+            }
+            lastNotify = now
+        }
+        try { onUpdate() } catch (_: Throwable) {}
+    }
+
+    private fun logAppend(text: String) {
+        synchronized(lock) {
+            logBuf.append(text)
+            if (logBuf.length >= 16 * 1024) {
+                try { sessionLog.appendText(logBuf.toString()) } catch (_: Throwable) {}
+                logBuf.setLength(0)
+            }
+        }
+    }
+
+    private fun logFlush() {
+        synchronized(lock) {
+            if (logBuf.isNotEmpty()) {
+                try { sessionLog.appendText(logBuf.toString()) } catch (_: Throwable) {}
+                logBuf.setLength(0)
+            }
+        }
+    }
 
     fun start(): Boolean {
         if (running.get()) return true
@@ -70,14 +137,15 @@ class TerminalSession(
                     while (running.get()) {
                         val n = input.read(chunk)
                         if (n < 0) break
-                        synchronized(lock) { buf.append(String(chunk, 0, n, Charsets.UTF_8)) }
-                        sessionLog.appendText("READ " + n + " buf=" + buf.length + "\n")
-                        onUpdate()
+                        appendToBuf(String(chunk, 0, n, Charsets.UTF_8))
+                        logAppend("READ " + n + " buf=" + buf.length + "\n")
+                        notifyUpdate()
                     }
                 } catch (t: Throwable) {
                     Log.w(TAG, "reader ended: ${t.message}")
             sessionLog.appendText("READER ENDED: ${t.message}\n")
                 } finally {
+                    logFlush()
                     running.set(false); onUpdate()
                 }
             }
@@ -96,7 +164,7 @@ class TerminalSession(
         try {
             p.outputStream.write((line + "\n").toByteArray(Charsets.UTF_8))
             p.outputStream.flush()
-            sessionLog.appendText("SENT: " + line + "\n")
+            logAppend("SENT: " + line + "\n")
         } catch (t: Throwable) {
             Log.w(TAG, "write failed: ${t.message}")
         }
@@ -110,5 +178,6 @@ class TerminalSession(
         running.set(false)
         try { proc?.destroy() } catch (_: Throwable) {}
         proc = null
+        logFlush()
     }
 }
