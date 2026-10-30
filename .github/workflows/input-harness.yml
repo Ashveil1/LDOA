@@ -12,11 +12,19 @@ on:
       - '.github/workflows/input-harness.yml'
     branches: [gnome/evidence]
   workflow_dispatch:
+    inputs:
+      lane:
+        description: 'full = autoenter setup + native + harness; native-only = skip GNOME setup, run NativeTerminalFakeRootTest alone'
+        default: 'full'
+        type: choice
+        options: [full, native-only]
 
 jobs:
   lorie-mouse-attribution:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      LANE: ${{ github.event.inputs.lane || 'full' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -56,9 +64,9 @@ jobs:
             # the harness relaunches onto retained session services - the
             # cold-first-launch path is a separate open qualification
             # blocker (run 40840614400: shell maps no UI cold).
-            date -u +"SETUP auto-enter start %H:%M:%S"
-            adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.UbuntuDesktopAutoEnterTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr0.log | tail -8
-            grep -q "OK (" /tmp/instr0.log || touch /tmp/PHONELINUX_SETUP_FAILED
+            date -u +"SETUP auto-enter start %H:%M:%S (lane=$LANE)"
+            if [ "$LANE" = full ]; then adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.UbuntuDesktopAutoEnterTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr0.log | tail -8; else echo "autoenter SKIPPED (lane=$LANE)" > /tmp/instr0.log; fi
+            if [ "$LANE" = full ]; then grep -q "OK (" /tmp/instr0.log || touch /tmp/PHONELINUX_SETUP_FAILED; fi
             date -u +"SETUP auto-enter end %H:%M:%S"
             if [ -f /tmp/PHONELINUX_SETUP_FAILED ]; then echo "AUTOENTER-SETUP-FAILED - arms not run"; exit 1; fi
             # EVIDENCE-ONLY harness: asserts bootstrap facts, logs/attaches
@@ -71,9 +79,9 @@ jobs:
             timeout -s KILL 1500 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.NativeTerminalFakeRootTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-native.log | tail -15 || echo "NATIVE-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"
             grep -q "OK (" /tmp/instr-native.log || touch /tmp/PHONELINUX_NATIVE_FAILED
             if [ -f /tmp/PHONELINUX_NATIVE_FAILED ]; then echo "NATIVE-DIAG survivors at bound:"; adb -s emulator-5554 shell "ps -A -o PID,PPID,ARGS" | grep -E "phonelinux|proot|bash|Xlorie" || true; adb -s emulator-5554 shell am force-stop dev.phonelinux.proto || true; fi
-            date -u +"HARNESS arms start %H:%M:%S"
-            timeout -s KILL 1500 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.LdoaInputHarnessTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr.log | tail -15 || echo "HARNESS-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"
-            grep -q "OK (" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
+            date -u +"HARNESS arms start %H:%M:%S (lane=$LANE)"
+            if [ "$LANE" = full ]; then timeout -s KILL 1500 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.LdoaInputHarnessTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr.log | tail -15 || echo "HARNESS-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"; else echo "harness SKIPPED (lane=$LANE)" > /tmp/instr.log; fi
+            if [ "$LANE" = full ]; then grep -q "OK (" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED; fi
             if [ -f /tmp/PHONELINUX_TESTS_FAILED ]; then echo "HARNESS-DIAG survivors at bound:"; adb -s emulator-5554 shell "ps -A -o PID,PPID,ARGS" | grep -E "phonelinux|proot|nautilus|Xlorie|soffice" || true; adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/harness-owned-ledger.txt > harness-owned-ledger.txt 2>/dev/null || echo "LEDGER-PULL-FAILED rc=$? (ledger needs the test-side spawn-ledger patch)"; adb -s emulator-5554 shell am force-stop dev.phonelinux.proto || true; fi
             adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/guest-gnome.log > guest-gnome.log || echo "GNOME-LOG-PULL-FAILED rc=$?"
             adb -s emulator-5554 logcat -d > /tmp/shotlog.txt || true
