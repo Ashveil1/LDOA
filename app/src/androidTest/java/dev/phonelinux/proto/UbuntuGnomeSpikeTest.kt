@@ -664,9 +664,9 @@ for i in range(d.childCount):
         // NEGATIVE, never a product finding.
         var probeJob: kotlinx.coroutines.Deferred<String>? = null
         fun probeStart(tag: String) {
-            val log = "/root/probe-" + tag + ".log"
-            val pidf = "/root/probe-" + tag + ".pid"
-            val ready = "/root/probe-" + tag + ".ready"
+            val log = "/tmp/probe-" + tag + ".log"
+            val pidf = "/tmp/probe-" + tag + ".pid"
+            val ready = "/tmp/probe-" + tag + ".ready"
             xwin("rm -f " + log + " " + pidf + " " + ready)
             probeJob = async(kotlinx.coroutines.Dispatchers.IO) {
                 xwin("echo up > " + ready + "; " +
@@ -687,8 +687,8 @@ for i in range(d.childCount):
             Thread.sleep(1_500) // grace for xinput to attach to :0 after the marker
         }
         fun probeStop(tag: String): String {
-            val log = "/root/probe-" + tag + ".log"
-            val pidf = "/root/probe-" + tag + ".pid"
+            val log = "/tmp/probe-" + tag + ".log"
+            val pidf = "/tmp/probe-" + tag + ".pid"
             Thread.sleep(500)
             // Owned-pid termination only: signal the recorded pid only if
             // /proc still shows our exact capture command, as root.
@@ -704,8 +704,28 @@ for i in range(d.childCount):
             }
             return xwin("cat " + log + " 2>/dev/null || true")
         }
-        fun buttonPresses(probe: String, detail: Int): Int =
-            Regex("ButtonPress\\)[\\s\\S]{0,200}?detail: " + detail).findAll(probe).count()
+        // Button events parsed BY STRUCTURE: raw and regular (delivered)
+        // events are separate classes; one physical press can appear once
+        // in each, so raw and regular counts are never summed. The
+        // physical press count for a detail is the raw count when raw
+        // events exist, else the delivered count - and the full capture
+        // is logged so the structure itself is the evidence, not the
+        // arithmetic. Event headers matched exactly.
+        data class BtnEvent(val raw: Boolean, val press: Boolean, val detail: Int, val device: Int)
+        fun btnEvents(probe: String): List<BtnEvent> =
+            Regex("EVENT type \\d+ \\((Raw)?Button(Press|Release)\\)([^E]*)").findAll(probe).mapNotNull { m ->
+                val body = m.groupValues[3]
+                val d = Regex("detail: (\\d+)").find(body)?.groupValues?.get(1)?.toIntOrNull()
+                    ?: return@mapNotNull null
+                val dev = Regex("device: (\\d+)").find(body)?.groupValues?.get(1)?.toIntOrNull() ?: -1
+                BtnEvent(m.groupValues[1] == "Raw", m.groupValues[2] == "Press", d, dev)
+            }.toList()
+        fun physicalPresses(probe: String, detail: Int): Int {
+            val ev = btnEvents(probe).filter { it.press && it.detail == detail }
+            val raw = ev.count { it.raw }
+            return if (raw > 0) raw else ev.count { !it.raw }
+        }
+        fun buttonPresses(probe: String, detail: Int): Int = physicalPresses(probe, detail)
         fun fullShot(): android.graphics.Bitmap = instr.uiAutomation.takeScreenshot()
             ?: throw AssertionError("takeScreenshot returned null")
         fun regionDiff(a: android.graphics.Bitmap, b: android.graphics.Bitmap, r: android.graphics.Rect): Double {
@@ -915,30 +935,49 @@ for i in range(d.childCount):
             " menuPixelFrac=" + menuPixelFrac +
             " probeTail=" + menuProbe.takeLast(300).replace("\n", " | ") +
             " atspiNull=" + (menuNodes == null))
+        // The full capture is preserved in the artifact log BEFORE any
+        // uninstall; the parsed structure (raw vs delivered, press vs
+        // release, device) is the count evidence, not regex arithmetic.
+        Log.i(TAG, "2ftap-bg: parsed button events=" + btnEvents(menuProbe).map {
+            (if (it.raw) "Raw" else "") + (if (it.press) "Press" else "Release") +
+                "(detail=" + it.detail + ",dev=" + it.device + ")" })
+        Log.i(TAG, "2ftap-bg: FULL menu capture begin")
+        Log.i(TAG, menuProbe.take(6000))
+        Log.i(TAG, "2ftap-bg: FULL menu capture end")
         var probeHealthy: Boolean? = null // null = control not needed; set once it ran
         if (injected3 != 1) {
-            // DIAGNOSTIC ONLY (the verdict asserts below still decide): the
-            // XTEST positive control decides what a zero count MEANS. The
-            // probe recording the XTEST button-3 -> probe healthy, an
-            // earlier zero is a real negative. The probe recording nothing
-            // even for XTEST -> probe dead, the zero is an INVALID
-            // NEGATIVE - a capture-architecture failure, not a product
-            // result. xdotool uses XTEST, an independent path from the
-            // lorie mouse injection.
+            // LORIE-path positive control (the verdict asserts below still
+            // decide): a 1-finger tap (button 1) through the SAME injection
+            // path as the product gesture. Run 40973848853 showed XTEST
+            // events never reach test-xi2 --root in this stack - the
+            // xdotool click closed the menu yet the probe saw nothing - so
+            // an xdotool control cannot judge probe liveness here. That is
+            // a control-path limitation in this environment, not a
+            // universal XTEST claim. The probe recording the control tap
+            // -> probe healthy, an earlier zero is a real negative;
+            // recording nothing even for the control -> probe dead, the
+            // zero is an INVALID NEGATIVE, not a product result.
+            device.pressKeyCode(android.view.KeyEvent.KEYCODE_ESCAPE)
+            Thread.sleep(1_000)
+            val wp = mapToDevice(bgGuestX, 1950) ?: mapToDevice(1000, 1900)
+            probeStart("hc")
+            if (wp != null) device.click(wp.first, wp.second)
+            Thread.sleep(2_000)
+            val hcProbe = probeStop("hc")
+            probeHealthy = if (wp == null) null else physicalPresses(hcProbe, 1) > 0
+            Log.i(TAG, "2ftap-bg DIAG: lorie-path control tap at " + wp +
+                " button1Presses=" + (if (wp == null) "unmapped" else physicalPresses(hcProbe, 1)) +
+                " hcBytes=" + hcProbe.length + " -> probeHealthy=" + probeHealthy +
+                (if (probeHealthy == false) " (zero counts are INVALID NEGATIVES, not product evidence)" else ""))
+            Log.i(TAG, "2ftap-bg DIAG: FULL hc capture: " + hcProbe.take(3000).replace("\n", " | "))
+            // XTEST diag (pure diagnostic, never a liveness control): can
+            // the X input stack open a menu at that point at all?
             val xlist = xwin("xinput list 2>/dev/null | head -24 || true").replace("\n", " | ")
             val mloc = xwin("xdotool getmouselocation 2>/dev/null || true").replace("\n", " | ")
             Log.i(TAG, "2ftap-bg DIAG: xinput list=" + xlist)
-            Log.i(TAG, "2ftap-bg DIAG: mouse=" + mloc + " probeBytes=" + menuProbe.length +
-                " probeHead=" + menuProbe.take(300).replace("\n", " | "))
-            probeStart("hc")
+            Log.i(TAG, "2ftap-bg DIAG: mouse=" + mloc)
             xwin("xdotool mousemove " + bgGuestX + " " + bgGuestY + " click 3 2>/dev/null || true")
-            Thread.sleep(3_000)
-            val hcProbe = probeStop("hc")
-            probeHealthy = buttonPresses(hcProbe, 3) > 0 || hcProbe.contains("Motion")
-            Log.i(TAG, "2ftap-bg DIAG: health-check probe button3=" + buttonPresses(hcProbe, 3) +
-                " motion=" + hcProbe.contains("Motion") + " hcBytes=" + hcProbe.length +
-                " -> probeHealthy=" + probeHealthy +
-                (if (probeHealthy == false) " (zero counts are INVALID NEGATIVES, not product evidence)" else ""))
+            Thread.sleep(2_000)
             val xdWin = (rootChildIds() - menuBeforeIds).sorted()
             Log.i(TAG, "2ftap-bg DIAG: xdotool right-click at the same point -> new windows=" + xdWin +
                 " plausible=" + xdWin.filter { plausibleMenuGeom(it) })
