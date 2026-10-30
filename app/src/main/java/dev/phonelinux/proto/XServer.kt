@@ -131,7 +131,7 @@ object XServer {
      *  on THIS launch's session bus (bus address must match the bus line
      *  written by the same launch), the process dies, or the budget runs
      *  out. Returns the matched line, or null. */
-    private fun awaitShellRegistered(p: Process, log: File, logBase: Long, budgetMs: Long): String? {
+    internal fun awaitShellRegistered(p: Process, log: File, logBase: Long, budgetMs: Long): String? {
         val deadline = System.currentTimeMillis() + budgetMs
         while (System.currentTimeMillis() < deadline) {
             if (!p.isAlive) return null
@@ -260,14 +260,8 @@ object XServer {
                                     failure = "GNOME shell did not register on its session bus in 60s (process " +
                                         (if (p.isAlive) "still running" else "exited") + "). Log tail:\n" + tail
                                     // Retain ownership of the still-running session so
-                                    // Stop session can tear it down by identity - without
-                                    // these handles the failed session is an orphan no
-                                    // teardown can reach. (Ash 2026-10-30 10:35 approval.)
-                                    if (p.isAlive) {
-                                        sessionProcess = p
-                                        sessionRootIdent = pidOf(p)?.let { identityOf(it) }
-                                        sessionBusIdent = sessionBusPid(ctx)?.let { bp -> identityOf(bp) }
-                                    }
+                                    // Stop session can tear it down by identity.
+                                    retainFailedSessionOwnership(ctx, p)
                                 }
                             } else if (failure == null) {
                                 failure = "GNOME unavailable after package install; desktop would be empty"
@@ -337,6 +331,19 @@ object XServer {
         ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
             .edit().putBoolean("ubuntu_desktop_active", false).apply()
         Log.i(TAG, "stopDesktopMode: desktop session ended by user")
+    }
+
+    /** Failure-path ownership retention (Ash 2026-10-30 10:35 approval):
+     *  a session whose readiness gate failed is still RUNNING; without
+     *  these handles it is an orphan no teardown can reach. Identities
+     *  are captured NOW (same rule as the launch-confirmed capture): an
+     *  identity read at stop time cannot guard a reused PID. */
+    internal fun retainFailedSessionOwnership(ctx: Context, p: Process) {
+        if (p.isAlive) {
+            sessionProcess = p
+            sessionRootIdent = pidOf(p)?.let { identityOf(it) }
+            sessionBusIdent = sessionBusPid(ctx)?.let { bp -> identityOf(bp) }
+        }
     }
 
     private fun sessionBusPid(ctx: Context): Int? = try {

@@ -47,6 +47,13 @@ class FailClosedDesktopTest {
         assertTrue("failvis: premise broken - GNOME already provisioned here",
             !GuestUbuntu.hasGnome(installer.rootfsDir(d)))
 
+        // Copy-full-log regression (Ash 2026-10-30 10:35): seed a log LARGER
+        // than the 1500-char dialog tail so the clipboard proof cannot be
+        // satisfied by tail-sized content. Unique marker anchors the check.
+        val logMarker = "LDOA-COPYLOG-MARKER-" + System.currentTimeMillis()
+        val seedLog = java.io.File(ctx.filesDir, "guest-gnome.log")
+        seedLog.writeText(logMarker + "\n" + ("seed line for copy-full-log regression coverage\n".repeat(60)))
+
         // A fresh MainActivity instance gets a fresh ViewModel, which reads
         // the install state and lands on the FIRST_RUN resume variant.
         device.executeShellCommand(
@@ -83,6 +90,20 @@ class FailClosedDesktopTest {
             Log.i(TAG, "failvis: dialog body = " + (body?.text ?: "").take(400))
             assertResumedIsPickerActivity(device)
 
+            // COPY FULL LOG: the seeded file exceeds the 1500-char tail; the
+            // clipboard must carry the WHOLE file incl. the seed marker.
+            val copyBtn = device.wait(Until.findObject(By.text("Copy full log")), 10_000)
+            assertTrue("Copy full log button missing from error dialog", copyBtn != null)
+            copyBtn.click()
+            Thread.sleep(1_000)
+            val cm = ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            val clip = cm.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
+            assertTrue("clipboard does not contain the seeded full log marker (len=" + clip.length + ")",
+                clip.contains(logMarker))
+            assertTrue("clipboard shorter than the 1500-char tail bound (len=" + clip.length + ") - tail copy suspected",
+                clip.length > 1500)
+            Log.i(TAG, "failvis: copy-full-log verified, " + clip.length + " chars incl marker")
+
             // Retry: Try again re-enters the flow; still no network, so it
             // must fail VISIBLY again rather than hanging or going black.
             val retry = device.wait(Until.findObject(By.text("Try again")), 10_000)
@@ -95,7 +116,16 @@ class FailClosedDesktopTest {
             assertTrue("fail-closed dialog did not reappear after retry", err2 != null)
             Shot.save("43-failclosed-retry-dialog")
             assertResumedIsPickerActivity(device)
-            device.wait(Until.findObject(By.text("Close")), 10_000)?.click()
+            // STOP SESSION button (Ash 2026-10-30 10:35): must dismiss the
+            // dialog and leave our activity resumed (no session retained on
+            // this apt-failure path - teardown is a no-op but must not break
+            // the flow).
+            val stopBtn = device.wait(Until.findObject(By.text("Stop session")), 10_000)
+            assertTrue("Stop session button missing from error dialog", stopBtn != null)
+            stopBtn.click()
+            val gone = device.wait(Until.gone(By.text("Ubuntu desktop did not start")), 10_000)
+            assertTrue("error dialog still visible after Stop session", gone == true)
+            assertResumedIsPickerActivity(device)
         } finally {
             device.executeShellCommand("svc wifi enable")
             device.executeShellCommand("svc data enable")
