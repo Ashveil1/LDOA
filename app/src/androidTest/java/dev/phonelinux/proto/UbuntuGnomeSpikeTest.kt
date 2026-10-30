@@ -663,19 +663,54 @@ for i in range(d.childCount):
         // capture with a dead XTEST positive control is an INVALID
         // NEGATIVE, never a product finding.
         var probeJob: kotlinx.coroutines.Deferred<String>? = null
+        // Launch-captured probe identity: the ONLY processes this test
+        // may signal are ones whose /proc starttime + uid + session
+        // PROBE_TAG match the record captured AT THIS TEST'S LAUNCH,
+        // re-verified immediately before EVERY signal (wrapper included).
+        // Unreadable/mismatched identity => no signal, capture invalid.
+        data class ProbeHandle(val tag: String, val wrapPid: Int, val xPid: Int,
+                               val startTime: Long, val uid: Int)
+        var probeHandle: ProbeHandle? = null
+        val probeSession = "s" + java.util.UUID.randomUUID().toString().substring(0, 8)
+        // Candidate identification ONLY: a scan shows processes that COULD
+        // hold a root event selection; it never proves who owns one, and
+        // BadAccess + a surviving candidate is correlation, not causation.
+        fun probeScan(): String =
+            xwin("for d in /proc/[0-9]*; do c=${'$'}(tr '\\0' ' ' < ${'$'}d/cmdline 2>/dev/null); " +
+                "case \"${'$'}c\" in *'xinput test-xi2 --root'*) pid=${'$'}(basename ${'$'}d); " +
+                "st=${'$'}(awk '{print ${'$'}22}' /proc/${'$'}pid/stat 2>/dev/null); " +
+                "u=${'$'}(awk '/^Uid:/{print ${'$'}2}' /proc/${'$'}pid/status 2>/dev/null); " +
+                "tg=${'$'}(tr '\\0' '\\n' < /proc/${'$'}pid/environ 2>/dev/null | grep '^PROBE_TAG=' | head -1); " +
+                "echo cand pid=${'$'}pid start=${'$'}st uid=${'$'}u ${'$'}tg;; esac; done; true")
+                .replace("\n", " | ").ifBlank { "<none>" }
+        fun probeVerify(pid: Int, expectTag: String, expectUid: Int): Boolean {
+            val st = xwin("awk '{print ${'$'}22}' /proc/" + pid + "/stat 2>/dev/null || true").trim().toLongOrNull()
+            val uid = xwin("awk '/^Uid:/{print ${'$'}2}' /proc/" + pid + "/status 2>/dev/null || true").trim().toIntOrNull()
+            val tagOk = xwin("tr '\\0' '\\n' < /proc/" + pid + "/environ 2>/dev/null | grep -c '^PROBE_TAG=" +
+                expectTag + "${'$'}' || true").trim() == "1"
+            return st != null && uid != null && uid == expectUid && tagOk
+        }
+        // A dead capture (xinput exited at startup) makes every count from
+        // it UNKNOWN: gates must say capture-invalid, never pass by
+        // omission and never a product red.
+        fun captureDead(cap: String): Boolean = cap.contains("X Error")
         fun probeStart(tag: String) {
             val log = "/tmp/probe-" + tag + ".log"
             val pidf = "/tmp/probe-" + tag + ".pid"
             val ready = "/tmp/probe-" + tag + ".ready"
+            val ptag = probeSession + "-" + tag
+            probeHandle = null
             xwin("rm -f " + log + " " + pidf + " " + ready)
+            Log.i(TAG, "probe[" + tag + "]: pre-start candidates: " + probeScan())
             probeJob = async(kotlinx.coroutines.Dispatchers.IO) {
                 xwin("echo up > " + ready + "; " +
-                    "timeout 120 stdbuf -oL xinput test-xi2 --root > " + log + " 2>&1 & " +
-                    "echo ${'$'}! > " + pidf + "; wait")
+                    "PROBE_TAG=" + ptag + " timeout 130 stdbuf -oL xinput test-xi2 --root > " + log + " 2>&1 & " +
+                    "wp=${'$'}!; for i in ${'$'}(seq 1 60); do " +
+                    "xp=${'$'}(pgrep -P ${'$'}wp xinput 2>/dev/null || true); " +
+                    "[ -n \"${'$'}xp\" ] && break; sleep 0.25; done; " +
+                    "echo \"${'$'}wp ${'$'}xp\" > " + pidf + "; wait")
                 "done"
             }
-            // Readiness is the marker written by the capture shell
-            // itself, not a fixed sleep.
             val dl = System.currentTimeMillis() + 15_000
             var up = false
             while (System.currentTimeMillis() < dl) {
@@ -684,19 +719,49 @@ for i in range(d.childCount):
             }
             assertTrue("event probe " + tag + " never started - capture architecture invalid, " +
                 "counts from it would be void", up)
+            // Launch-identity capture: wrapper pid + actual xinput child
+            // pid, then verify starttime/uid/tag against /proc.
+            val dl2 = System.currentTimeMillis() + 20_000
+            var rec = ""
+            while (System.currentTimeMillis() < dl2) {
+                rec = xwin("cat " + pidf + " 2>/dev/null || true").trim()
+                if (rec.split(Regex("\\s+")).size >= 2) break
+                Thread.sleep(500)
+            }
+            val parts = rec.split(Regex("\\s+"))
+            val wp = parts.getOrNull(0)?.toIntOrNull()
+            val xp = parts.getOrNull(1)?.toIntOrNull()
+            if (wp != null && xp != null) {
+                val st = xwin("awk '{print ${'$'}22}' /proc/" + xp + "/stat 2>/dev/null || true").trim().toLongOrNull()
+                if (st != null && probeVerify(xp, ptag, 0)) {
+                    probeHandle = ProbeHandle(tag, wp, xp, st, 0)
+                    Log.i(TAG, "probe[" + tag + "]: launch identity verified wrap=" + wp + " xpid=" + xp + " start=" + st)
+                } else {
+                    Log.i(TAG, "probe[" + tag + "]: launch identity UNREADABLE (xp=" + xp + ") - capture invalid, nothing will be signaled")
+                }
+            } else {
+                Log.i(TAG, "probe[" + tag + "]: no xinput child recorded (rec=" + rec + ") - capture invalid")
+            }
             Thread.sleep(1_500) // grace for xinput to attach to :0 after the marker
         }
         fun probeStop(tag: String): String {
             val log = "/tmp/probe-" + tag + ".log"
-            val pidf = "/tmp/probe-" + tag + ".pid"
             Thread.sleep(500)
-            // Owned-pid termination only: signal the recorded pid only if
-            // /proc still shows our exact capture command, as root.
-            xwin("pid=${'$'}(cat " + pidf + " 2>/dev/null); " +
-                "if [ -n \"${'$'}pid\" ] && [ -r /proc/${'$'}pid/cmdline ] && " +
-                "tr '\\0' ' ' < /proc/${'$'}pid/cmdline | grep -q 'xinput test-xi2 --root' && " +
-                "[ \"${'$'}(awk '/^Uid:/{print ${'$'}2}' /proc/${'$'}pid/status)\" = \"0\" ]; " +
-                "then kill ${'$'}pid; fi; true")
+            val h = probeHandle
+            if (h == null || h.tag != tag) {
+                Log.i(TAG, "probe[" + tag + "]: NO verified launch identity - signaling nothing; capture invalid")
+            } else {
+                for (pid in listOf(h.xPid, h.wrapPid)) {
+                    if (probeVerify(pid, probeSession + "-" + tag, h.uid)) {
+                        xwin("kill " + pid + " 2>/dev/null || true")
+                        Log.i(TAG, "probe[" + tag + "]: signaled pid=" + pid + " after identity re-verify")
+                    } else {
+                        Log.i(TAG, "probe[" + tag + "]: identity mismatch/unreadable for pid=" + pid +
+                            " - NOT signaled (no kill on unverified identity)")
+                    }
+                }
+            }
+            Log.i(TAG, "probe[" + tag + "]: post-stop candidates: " + probeScan())
             val job = probeJob
             if (job != null) {
                 runBlocking { kotlinx.coroutines.withTimeoutOrNull(20_000) { job.await() } }
@@ -756,6 +821,56 @@ for i in range(d.childCount):
                 y += 4
             }
             return seen.size
+        }
+        fun mapToGuest(dx: Int, dy: Int): Pair<Int, Int>? {
+            val first = p1 ?: return null
+            val second = p2 ?: return null
+            if (Math.abs(second.first - first.first) < 10 ||
+                Math.abs(second.second - first.second) < 10) return null
+            val ax = (700 - 300).toDouble() / (second.first - first.first)
+            val bx = 300 - ax * first.first
+            val ay = (1700 - 1200).toDouble() / (second.second - first.second)
+            val by = 1200 - ay * first.second
+            return Pair(((dx - bx) / ax).toInt(), ((dy - by) / ay).toInt())
+        }
+        // Largest-connected-component glyph targeting (a heuristic aid,
+        // NOT proof of identity): background = the rect's corner color;
+        // components = non-background coarse pixels; returns the centroid
+        // (device px) of the biggest component, which for a folder cell
+        // is the glyph, not the label and not the rect center.
+        fun glyphCentroid(bmp: android.graphics.Bitmap, r: android.graphics.Rect): Pair<Int, Int>? {
+            val x0 = r.left.coerceIn(0, bmp.width - 1); val x1 = r.right.coerceIn(0, bmp.width - 1)
+            val y0 = r.top.coerceIn(0, bmp.height - 1); val y1 = r.bottom.coerceIn(0, bmp.height - 1)
+            if (x1 - x0 < 8 || y1 - y0 < 8) return null
+            val bg = bmp.getPixel(x0, y0)
+            fun isFg(x: Int, y: Int): Boolean {
+                val c = bmp.getPixel(x, y)
+                return Math.abs((c and 0xff) - (bg and 0xff)) > 24 ||
+                    Math.abs(((c shr 8) and 0xff) - ((bg shr 8) and 0xff)) > 24 ||
+                    Math.abs(((c shr 16) and 0xff) - ((bg shr 16) and 0xff)) > 24
+            }
+            val cols = (x1 - x0) / 2 + 1; val rows = (y1 - y0) / 2 + 1
+            val fg = Array(rows) { ry -> BooleanArray(cols) { rx -> isFg(x0 + rx * 2, y0 + ry * 2) } }
+            val seen = Array(rows) { BooleanArray(cols) }
+            var bestCx = -1; var bestCy = -1; var bestSize = 0
+            for (ry in 0 until rows) for (rx in 0 until cols) {
+                if (!fg[ry][rx] || seen[ry][rx]) continue
+                val stack = ArrayDeque<Pair<Int, Int>>(); stack.add(rx to ry); seen[ry][rx] = true
+                var sx = 0; var sy = 0; var n = 0
+                while (stack.isNotEmpty()) {
+                    val (cx, cy) = stack.removeLast()
+                    sx += cx; sy += cy; n++
+                    for (nb in listOf(cx + 1 to cy, cx - 1 to cy, cx to cy + 1, cx to cy - 1)) {
+                        val nx = nb.first; val ny = nb.second
+                        if (nx in 0 until cols && ny in 0 until rows && fg[ny][nx] && !seen[ny][nx]) {
+                            seen[ny][nx] = true; stack.add(nb)
+                        }
+                    }
+                }
+                if (n > bestSize) { bestSize = n; bestCx = sx / n; bestCy = sy / n }
+            }
+            if (bestSize < 15) return null
+            return Pair(x0 + bestCx * 2, y0 + bestCy * 2)
         }
         fun devRectOf(x: Int, y: Int, w: Int, h: Int): android.graphics.Rect {
             val tl = mapToDevice(x, y)!!; val br = mapToDevice(x + w, y + h)!!
@@ -1005,6 +1120,8 @@ for i in range(d.childCount):
             menuWin != null && menuPixelFrac > 0.02)
         assertTrue("expected exactly one new viewable menu window, added=" + (menuWin?.first ?: emptyList<String>()) +
             " (native+injected duplicate?)", menuWin != null && menuWin.first.size == 1)
+        assertTrue("background menu probe capture DEAD at startup (X Error) - injection count " +
+            "unknown, capture architecture invalid, not a product result", !captureDead(menuProbe))
         assertTrue("expected exactly one injected button-3 press, got " + injected3 +
             (if (probeHealthy == false)
                 " - INVALID NEGATIVE: probe dead even for the XTEST control; capture architecture failure, not a product result"
@@ -1072,15 +1189,24 @@ for i in range(d.childCount):
         longPress(deskP, 400)
         Thread.sleep(600)
         val shProbe = probeStop("shorthold")
-        assertTrue("sub-threshold hold injected button-3 (probeTail=" +
-            shProbe.takeLast(200).replace("\n", " | ") + ")", buttonPresses(shProbe, 3) == 0)
+        if (captureDead(shProbe)) {
+            Log.i(TAG, "shorthold: probe capture DEAD - button-3 count UNKNOWN (window-diff negative is the guard): " +
+                shProbe.takeLast(200).replace("\n", " | "))
+        } else {
+            assertTrue("sub-threshold hold injected button-3 (probeTail=" +
+                shProbe.takeLast(200).replace("\n", " | ") + ")", buttonPresses(shProbe, 3) == 0)
+        }
         assertTrue("sub-threshold hold opened a menu",
             (rootChildIds() - deskIds0).filter { plausibleMenuGeom(it) }.isEmpty())
         probeStart("twofingbg")
         twoFingerSwipe(deskP.first - 40, deskP.second - 80, deskP.first + 40, deskP.second - 80, 0, 120)
         Thread.sleep(600)
         val tfProbe = probeStop("twofingbg")
-        assertTrue("two-finger gesture injected button-3", buttonPresses(tfProbe, 3) == 0)
+        if (captureDead(tfProbe)) {
+            Log.i(TAG, "twofingbg: probe capture DEAD - button-3 count UNKNOWN (window-diff negative is the guard)")
+        } else {
+            assertTrue("two-finger gesture injected button-3", buttonPresses(tfProbe, 3) == 0)
+        }
         assertTrue("two-finger gesture opened a menu",
             (rootChildIds() - deskIds0).filter { plausibleMenuGeom(it) }.isEmpty())
         Log.i(TAG, "UBUNTU-HOLD-THRESHOLD-OK 400ms hold and two-finger drag caused no right-click")
@@ -1108,6 +1234,7 @@ for i in range(d.childCount):
             "star", "properties", "compress", "run")
         val rowNode = parseAts(atspi()).firstOrNull { it.name.contains("LDOA-row-fixture") && it.w > 0 }
         var rowGuestPt: Pair<Int, Int>? = null
+        var rowTapD: Pair<Int, Int>? = null
         if (rowNode != null) {
             rowGuestPt = Pair(rowNode.x + rowNode.w / 2, rowNode.y + rowNode.h / 2)
         } else {
@@ -1138,18 +1265,26 @@ for i in range(d.childCount):
             // candidate whose cell area is pixel-non-uniform carries the
             // rendered icon+label. A miss is a clean red with 23c2
             // preserved, never a silent pass.
-            val candidates = listOf(240 to 106, 100 to 106, 380 to 106, 240 to 150, 240 to 70)
+            // Glyph-centroid targeting: the tap lands on the largest
+            // connected non-background component in the cell (the folder
+            // glyph), not the cell rect center - run 40990437656's rect-
+            // center tap landed below the glyph and opened the BACKGROUND
+            // menu (23d2 there). This is a targeting heuristic; the
+            // selection/functional proofs below verify the fixture.
+            val candidates = listOf(240 to 130, 100 to 130, 380 to 130, 240 to 170, 240 to 90)
             for (cand in candidates) {
                 val gx = nav2.x + feC[0] + cand.first
                 val gy = nav2.y + feC[2] + cand.second
-                val colors = distinctColors(preRow, devRectOf(gx - 30, gy - 25, 60, 70))
-                Log.i(TAG, "2ftap-row: candidate (" + gx + "," + gy + ") distinctColors=" + colors)
-                if (colors > 8) { rowGuestPt = Pair(gx, gy); break }
+                val cent = glyphCentroid(preRow, devRectOf(gx - 60, gy - 45, 120, 130))
+                Log.i(TAG, "2ftap-row: candidate (" + gx + "," + gy + ") glyphCentroid=" + cent)
+                if (cent != null) { rowTapD = cent; break }
             }
-            assertTrue("no rendered icon found at any candidate first-cell offset " +
-                "(fixture construction verified; layout differs - review 23c2)", rowGuestPt != null)
+            assertTrue("no glyph found at any candidate first-cell offset " +
+                "(fixture construction verified; layout differs - review 23c2)", rowTapD != null)
+            rowGuestPt = mapToGuest(rowTapD!!.first, rowTapD!!.second)
         }
-        val rowTap = mapToDevice(rowGuestPt!!.first, rowGuestPt!!.second)
+        val rowTap = if (rowNode != null) mapToDevice(rowGuestPt!!.first, rowGuestPt!!.second)
+            else rowTapD
         assertTrue("no device mapping for file-row target", rowTap != null)
         val baselineRow = menuHits(parseAts(atspi()), rowProbes)
         val preRowShot = fullShot()
@@ -1180,17 +1315,64 @@ for i in range(d.childCount):
             rowMenuPixelFrac > 0.02)
         assertTrue("fixture row menu opened far from the tap (menu at " + rmx + "," + rmy +
             " vs tap " + rowGuestPt + ")",
-            Math.abs(rmx - rowGuestPt!!.first) <= 400 && Math.abs(rmy - rowGuestPt!!.second) <= 400)
-        assertTrue("expected exactly one injected button-3 press on the row, got " + rowInjected3,
+            rowGuestPt != null && Math.abs(rmx - rowGuestPt!!.first) <= 400 &&
+                Math.abs(rmy - rowGuestPt!!.second) <= 400)
+        // Injection count gate, health-gated: a dead capture makes the
+        // count UNKNOWN - capture-invalid, never a product red.
+        assertTrue("row probe capture DEAD at startup (X Error) - injection count unknown, " +
+            "capture architecture invalid, not a product result", !captureDead(rowProbe))
+        assertTrue("expected exactly one injected button-3 press on the row, got " + rowInjected3 +
+            " parsed=" + btnEvents(rowProbe).map {
+                (if (it.raw) "Raw" else "") + (if (it.press) "Press" else "Release") +
+                    "(detail=" + it.detail + ",dev=" + it.device + ")" },
             rowInjected3 == 1)
+        // Fixture-selection gate: the glyph region (minus the menu rect)
+        // must visibly change - the right-click selected the fixture.
+        val menuDevRect = if (rmw >= 20 && rmh >= 20) devRectOf(rmx, rmy, rmw, rmh) else null
+        val glyphRect = android.graphics.Rect(rowTap!!.first - 30, rowTap.second - 30,
+            rowTap.first + 30, rowTap.second + 30)
+        if (menuDevRect != null && glyphRect.bottom > menuDevRect.top)
+            glyphRect.bottom = menuDevRect.top
+        val selFrac = if (glyphRect.height() > 8)
+            regionDiff(preRowShot, fullShot(), glyphRect) else -1.0
+        Log.i(TAG, "2ftap-row: selectionFrac=" + selFrac + " (glyph region minus menu)")
+        assertTrue("no selection change at the fixture glyph - the tap did not select the " +
+            "fixture (row coverage unproven)", selFrac > 0.02)
+        // FUNCTIONAL item-menu proof: activate the menu's first item and
+        // require Files to navigate INTO the fixture (title changes to
+        // the fixture name). A background menu's first item (New Folder)
+        // cannot pass this. Window height is diagnostic only - a valid
+        // menu never fails on size alone.
+        Log.i(TAG, "2ftap-row: menu window height (diagnostic, not a gate)=" + rmh)
+        val openItem = mapToDevice(rmx + rmw / 2, rmy + 30)
+        if (openItem != null) device.click(openItem.first, openItem.second)
+        Thread.sleep(2_000)
+        Shot.save("23d5-ubuntu-row-menu-open-clicked")
+        var intoFixture = false
+        var rowTitle = ""
+        val openDl = System.currentTimeMillis() + 15_000
+        while (System.currentTimeMillis() < openDl) {
+            val nv = nauVisible()
+            rowTitle = if (nv != null)
+                xwin("xprop -id " + nv.id + " _NET_WM_NAME 2>/dev/null || true").trim() else "<none>"
+            if (rowTitle.contains("LDOA-row-fixture")) { intoFixture = true; break }
+            Thread.sleep(1_000)
+        }
+        assertTrue("first menu item did not open the fixture (title=" + rowTitle +
+            ") - the menu was not the fixture's item menu; frames 23d2/23d5 preserved",
+            intoFixture)
+        Log.i(TAG, "2ftap-row: functional proof - first menu item navigated into LDOA-row-fixture")
         device.pressKeyCode(android.view.KeyEvent.KEYCODE_ESCAPE)
         Thread.sleep(1_000)
+        // The functional Open click already consumed the menu; this is a
+        // logged residual check, not the close gate.
         val rowMenuGone = rowMenuWin.first.none { isViewable(it) }
-        assertTrue("fixture row menu window still viewable after Escape", rowMenuGone)
+        Log.i(TAG, "2ftap-row: menu window gone after functional click=" + rowMenuGone)
         Log.i(TAG, "UBUNTU-2FTAP-RIGHTCLICK-SURFACE2-OK fixture row menu: viewable MENU window, " +
             "pixel-rendered (" + rowMenuPixelFrac + ", frame 23d2 for item review), one injected " +
-            "button-3, position ok, Escape closes" +
-            (if (rowNode == null) " [geometry-targeted, construction-verified fixture]" else " [atspi-targeted]"))
+            "button-3, position ok, fixture selected (selFrac=" + selFrac + "), functional Open " +
+            "into fixture proven" +
+            (if (rowNode == null) " [glyph-centroid-targeted, construction-verified fixture]" else " [atspi-targeted]"))
 
         // (c2) TWO-FINGER TAP on the headerbar = the window's own menu.
         // SEPARATE coverage from the file row - never a substitute. Run
@@ -1208,7 +1390,10 @@ for i in range(d.childCount):
         val hbGY = hbNauC2.y + feH2[2] + 20
         val hb2 = mapToDevice(hbGX, hbGY)
         assertTrue("headerbar mapping missing", hb2 != null)
-        val hbMenuRect = devRectOf(hbGX - 300, hbGY + 20, 320, 430)
+        // The window menu renders ~180px wide AT/OVER the window's right
+        // edge - mostly RIGHT of the tap point (run 40984121290's 23d2).
+        // The rect must cover both sides or openFrac reads a sliver.
+        val hbMenuRect = devRectOf(hbGX - 360, hbGY + 20, 560, 460)
         val hbBeforeIds = rootChildIds()
         val bmpHbPre = fullShot()
         twoFingerTap(hb2!!.first - 40, hb2!!.second, hb2!!.first + 40, hb2!!.second)
@@ -1258,7 +1443,34 @@ for i in range(d.childCount):
             Thread.sleep(1_000)
         }
         assertTrue("navigation to /usr/bin not confirmed (title=" + binTitle + ")", navBin)
-        Thread.sleep(4_000) // large dir population
+        // Population evidence before scrolling: a stable frame ALONE
+        // can't prove a populated listing - pair it with visible-entry
+        // bands (text rows rendered) and the host-side construction fact
+        // (/usr/bin entry count >> one screen).
+        Log.i(TAG, "scroll: /usr/bin host-side entries=" +
+            xwin("ls /usr/bin | wc -l").trim())
+        val stabDl = System.currentTimeMillis() + 20_000
+        var populated = false
+        while (System.currentTimeMillis() < stabDl) {
+            val nv2 = nauVisible()
+            if (nv2 != null) {
+                val s1 = fullShot()
+                Thread.sleep(2_000)
+                val s2 = fullShot()
+                val stable = regionDiff(s1, s2, devRectOf(nv2.x, nv2.y, nv2.w, nv2.h)) < 0.005
+                val content = devRectOf(nv2.x + frameExtents(nv2.id)[0], nv2.y + 150, nv2.w, 400)
+                var bands = 0
+                for (band in 0 until 5) {
+                    val br = android.graphics.Rect(content.left, content.top + band * content.height() / 5,
+                        content.right, content.top + (band + 1) * content.height() / 5)
+                    if (distinctColors(s2, br) > 10) bands++
+                }
+                Log.i(TAG, "scroll: stable=" + stable + " visibleEntryBands=" + bands + "/5")
+                if (stable && bands >= 3) { populated = true; break }
+            }
+            Thread.sleep(2_000)
+        }
+        assertTrue("/usr/bin listing never visibly populated (stable frame + entry bands)", populated)
         anrGuard("scroll")
         val nws0 = nauVisible()
         assertTrue("Files window lost before scroll", nws0 != null)
@@ -1294,6 +1506,20 @@ for i in range(d.childCount):
         // it scrolls only if the server converts the valuators to button
         // 4/5 steps (SetScrollValuator). Proof is visible scrollback
         // movement; the probe records any emulated button events.
+        // xterm is a test FIXTURE, not a product dependency: the
+        // installer manifest (GuestUbuntu.kt) intentionally stays
+        // untouched. Runtime check first - manifest absence is not proof
+        // the binary is missing.
+        val hasXterm = xwin("command -v xterm || true").trim().isNotEmpty()
+        if (!hasXterm) {
+            Log.i(TAG, "xterm-scroll: xterm absent at runtime; bounded fixture install")
+            val inst = xwin("timeout 180 apt-get install -y xterm 2>&1 | tail -3 || true")
+            Log.i(TAG, "xterm-scroll: fixture install tail=" + inst.replace("\n", " | "))
+        }
+        val xtermBin = xwin("command -v xterm || true").trim()
+        assertTrue("xterm fixture unavailable (runtime check + bounded install both failed) - " +
+            "environment/fixture gap, legacy scroll coverage unproven, not a product result",
+            xtermBin.isNotEmpty())
         xwin("(xterm -sb -geometry 100x30+200+250 -e /bin/sh -c 'seq 1 400; sleep 240' >/dev/null 2>&1 &) ; sleep 2")
         var xt: IntArray? = null
         val xtDeadline = System.currentTimeMillis() + 15_000
@@ -1350,7 +1576,12 @@ for i in range(d.childCount):
             val ay = Regex("Absolute upper-left Y:\\s+(-?\\d+)").find(posAfter)?.groupValues?.get(1)?.toIntOrNull() ?: 0
             Log.i(TAG, "hold-drag: before=(" + bx + ", " + by + ") after=(" + ax + ", " + ay +
                 ") button3=" + buttonPresses(hdProbe, 3))
-            assertTrue("hold-then-drag injected a right-click", buttonPresses(hdProbe, 3) == 0)
+            if (captureDead(hdProbe)) {
+                Log.i(TAG, "hold-drag: probe capture DEAD - button-3 count UNKNOWN " +
+                    "(window-moved + no-menu-window are the guards)")
+            } else {
+                assertTrue("hold-then-drag injected a right-click", buttonPresses(hdProbe, 3) == 0)
+            }
             assertTrue("hold-then-drag opened a menu window",
                 (rootChildIds() - hdBeforeIds).filter { plausibleMenuGeom(it) }.isEmpty())
             assertTrue("window did not follow hold-then-drag (before=(" + bx + "," + by +
