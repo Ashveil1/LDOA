@@ -183,49 +183,43 @@ jobs:
             # which makes a true cold-start persistence proof impossible.
             # Manual install retains install+data so the host can force-stop
             # and relaunch the real app afterward.
-            mkdir -p screenshots
+            mkdir -p screenshots instr-logs
             ./gradlew assembleDebug assembleDebugAndroidTest 2>&1 | tail -3
             adb -s emulator-5554 install -r -g app/build/outputs/apk/debug/app-debug.apk
             adb -s emulator-5554 install -r -g app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+            # E1 presentation-bridge probes (reviewer-originated, owner-integrated):
+            # EVIDENCE-ONLY, never gates the lane - outcomes read from instr4.log;
+            # self-skips without -e presentationBridge 1 in other contexts.
+            adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.E1PresentationBridgeTest -e presentationBridge 1 dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr4.log | tail -15
+            cp /tmp/instr4.log instr-logs/instr4.log || true
+            adb -s emulator-5554 logcat -d > instr-logs/logcat-instr4.txt || true
+            python3 .github/scripts/extract_shots.py instr-logs/logcat-instr4.txt screenshots || true
+            if grep -q "E1-BRIDGE-RESULT" /tmp/instr4.log; then echo "E1-LANE-RESULT: completed ($(grep -o 'E1-BRIDGE-RESULT.*' /tmp/instr4.log | head -1))"; elif grep -qE "INSTRUMENTATION_(FAILED|ABORTED)|FAILURES!!!" /tmp/instr4.log; then echo "E1-LANE-RESULT: invalid (instrumentation failure; see instr4.log)"; elif grep -qi "E1: skipped" /tmp/instr4.log; then echo "E1-LANE-RESULT: unknown (self-skip fired despite -e presentationBridge 1; treat as invalid until instr4.log inspected)"; else echo "E1-LANE-RESULT: unknown (no summary marker; treat as invalid until instr4.log inspected by hand)"; fi
             adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.UbuntuDesktopAutoEnterTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr1.log | tail -15
             grep -q "OK (" /tmp/instr1.log || touch /tmp/PHONELINUX_TESTS_FAILED
+            cp /tmp/instr1.log instr-logs/instr1.log || true
             adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.UbuntuGnomeSpikeTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr2.log | tail -15
+            cp /tmp/instr2.log instr-logs/instr2.log || true
+            adb -s emulator-5554 logcat -d > instr-logs/logcat-instr2.txt || true
+            python3 .github/scripts/extract_shots.py instr-logs/logcat-instr2.txt screenshots || true
             grep -q "OK (" /tmp/instr2.log || touch /tmp/PHONELINUX_TESTS_FAILED
             # Stage-1 isolated comparison (lorie vs Xvnc, identical session script
             # both arms): EVIDENCE-ONLY, never gates the lane - result read from
             # instr3.log; self-skips without -e xvncCompare 1 in other contexts.
             adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.XvncCompareTest -e xvncCompare 1 dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr3.log | tail -15
+            cp /tmp/instr3.log instr-logs/instr3.log || true
+            adb -s emulator-5554 logcat -d > instr-logs/logcat-instr3.txt || true
+            python3 .github/scripts/extract_shots.py instr-logs/logcat-instr3.txt screenshots || true
             # Explicit outcome marker (main 5:08:40): failure must be an
             # explicit comparison-invalid result, never a pass, never a
             # silently ignored skip. Evidence-only: this block NEVER touches
             # /tmp/PHONELINUX_TESTS_FAILED and never gates the lane.
-            if grep -q "SESSION MISMATCH\|clean start not established\|comparison void\|fixture unavailable\|teardown left UNOWNED\|never reached the shell-window readiness\|died before readiness\|environment/fixture gap" /tmp/instr3.log; then
-              echo "XVNC-COMPARE-RESULT: comparison-invalid (test-declared invalidity; see instr3.log for the exact assertion)"
-            elif grep -qE "INSTRUMENTATION_(FAILED|ABORTED)|FAILURES!!!" /tmp/instr3.log; then
-              echo "XVNC-COMPARE-RESULT: comparison-invalid (instrumentation failure; see instr3.log)"
-            elif grep -q "OK (" /tmp/instr3.log && ! grep -qi "assumption failed\|skipped" /tmp/instr3.log; then
-              echo "XVNC-COMPARE-RESULT: completed (mechanism evidence only; x86 CI GL is not the POCO GPU path, CLUTTER FPS is compositor-internal, no viewer attached)"
-            else
-              echo "XVNC-COMPARE-RESULT: unknown (no completion or invalidity signature; treat as comparison-invalid until instr3.log is inspected by hand)"
-            fi
-            # E1 presentation-bridge probes (reviewer-originated, owner-integrated):
-            # EVIDENCE-ONLY, never gates the lane - outcomes read from instr4.log;
-            # self-skips without -e presentationBridge 1 in other contexts.
-            adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.E1PresentationBridgeTest -e presentationBridge 1 dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr4.log | tail -15
+            if grep -q "SESSION MISMATCH\|clean start not established\|comparison void\|fixture unavailable\|teardown left UNOWNED\|never reached the shell-window readiness\|died before readiness\|environment/fixture gap" /tmp/instr3.log; then echo "XVNC-COMPARE-RESULT: comparison-invalid (test-declared invalidity; see instr3.log for the exact assertion)"; elif grep -qE "INSTRUMENTATION_(FAILED|ABORTED)|FAILURES!!!" /tmp/instr3.log; then echo "XVNC-COMPARE-RESULT: comparison-invalid (instrumentation failure; see instr3.log)"; elif grep -q "OK (" /tmp/instr3.log && ! grep -qi "assumption failed\|skipped" /tmp/instr3.log; then echo "XVNC-COMPARE-RESULT: completed (mechanism evidence only; x86 CI GL is not the POCO GPU path, CLUTTER FPS is compositor-internal, no viewer attached)"; else echo "XVNC-COMPARE-RESULT: unknown (no completion or invalidity signature; treat as comparison-invalid until instr3.log is inspected by hand)"; fi
             # Explicit outcome marker: failure is explicit, never a pass,
             # never a silently ignored skip. NEVER touches PHONELINUX_TESTS_FAILED.
             # NOTE: an arm word "animated" is a window-cksum signal ONLY; it
             # becomes a claim only after rendered pixel inspection of the
             # retained xwd frame pair at harvest.
-            if grep -q "E1-BRIDGE-RESULT" /tmp/instr4.log; then
-              echo "E1-LANE-RESULT: completed ($(grep -o 'E1-BRIDGE-RESULT.*' /tmp/instr4.log | head -1))"
-            elif grep -qE "INSTRUMENTATION_(FAILED|ABORTED)|FAILURES!!!" /tmp/instr4.log; then
-              echo "E1-LANE-RESULT: invalid (instrumentation failure; see instr4.log)"
-            elif grep -qi "E1: skipped" /tmp/instr4.log; then
-              echo "E1-LANE-RESULT: unknown (self-skip fired despite -e presentationBridge 1; treat as invalid until instr4.log inspected)"
-            else
-              echo "E1-LANE-RESULT: unknown (no summary marker; treat as invalid until instr4.log inspected by hand)"
-            fi
             # Retained evidence: window-scoped xwd frame pairs + test-owned server log.
             mkdir -p screenshots/e1
             for f in $(adb -s emulator-5554 shell run-as dev.phonelinux.proto ls files/e1 2>/dev/null | tr -d '\r'); do adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat "files/e1/$f" > "screenshots/e1/$f" 2>/dev/null || true; done
@@ -274,6 +268,7 @@ jobs:
             guest-gnome.log
             guest-gnome.launch-prev.log
             /tmp/shotlog.txt
+            instr-logs/
 
   # ARM64 qualification lane: "ARM package compatibility != ARM execution".
   # Public-repo macos-14 runners are Apple Silicon, and android-emulator-
