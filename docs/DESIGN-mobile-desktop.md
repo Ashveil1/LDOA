@@ -198,3 +198,20 @@ entry work unaffected):
 Explicitly NOT in this plan: per-app adaptation testing (Ash waived,
 he tests), any X server rewrite, any capability reduction, any claim
 of smooth performance before measurement.
+
+## Phone window behavior [APPROVED+CODED 2026-10-31]
+
+Under Ash's 2026-10-31 parallel-work direction ("split the work onto
+it") and the 2026-10-29 launcher/phone-direction approvals: app windows
+open maximized into the tray-respecting work area (one-app-at-a-time),
+task switching stays in the existing TaskList. jwm 2.4.3 (noble
+2.4.3-1build2) Group rule <Type>normal</Type> + <Option>maximized</Option>
+(group.c ApplyGroups and-s patterns; desktop-type surfaces unframed, so
+pcmanfm --desktop is untouched). Floating remains the product default until the settings card is wired
+and runtime-proven; the maximized layer is exercised through the bounded
+test configuration (per-round pref write), and flipping the product
+default is a separate later proposal, not this patch.
+Render-path neutral: window MANAGEMENT only - no compositor/GL/driver
+choice made here. Runtime validation rides the next gate run (existing
+xwininfo -tree evidence captures window geometry); not mobile/iOS-ready
+until pixel/input proof on device.

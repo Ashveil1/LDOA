@@ -21,14 +21,16 @@ import kotlin.math.roundToInt
 /** User-adjustable mobile-desktop settings (Phase A bounded set, from
  *  Ash's 2026-10-29 "customizable screen/sizes" criteria). Every control
  *  maps to a REAL mechanism in GuestMobileShell: Xft.dpi + jwm font and
- *  tray geometry + xsetroot. Nothing here promises per-app UI changes.
+ *  tray geometry + xsetroot + window rules (GuestMobileWindows). Nothing
+ *  here promises per-app UI changes.
  *  Read at session-launch time, so changes apply on the next mobile
  *  session start (no live retheme of a running session in Phase A). */
 data class MobileUiPrefs(
     val scale: Float = 1.0f,
     val panelSize: String = "normal",     // normal | large
     val panelPosition: String = "bottom", // bottom | top
-    val background: String = "#2E3440"
+    val background: String = "#2E3440",
+    val windowMode: String = "floating"   // floating | maximized
 )
 
 object MobileModeSettings {
@@ -36,6 +38,7 @@ object MobileModeSettings {
     const val KEY_PANEL_SIZE = "ldoa_mobile_panel_size"
     const val KEY_PANEL_POSITION = "ldoa_mobile_panel_position"
     const val KEY_BACKGROUND = "ldoa_mobile_background"
+    const val KEY_WINDOW_MODE = "ldoa_mobile_window_mode"
 
     val BACKGROUNDS = listOf("#2E3440", "#3B2437", "#16324F", "#1F3A2D")
     private val HEX = Regex("^#[0-9A-Fa-f]{6}$")
@@ -49,7 +52,8 @@ object MobileModeSettings {
             scale = p.getFloat(KEY_SCALE, 1.0f).coerceIn(0.75f, 2.0f),
             panelSize = if (p.getString(KEY_PANEL_SIZE, "normal") == "large") "large" else "normal",
             panelPosition = if (p.getString(KEY_PANEL_POSITION, "bottom") == "top") "top" else "bottom",
-            background = if (HEX.matches(bg)) bg else BACKGROUNDS[0])
+            background = if (HEX.matches(bg)) bg else BACKGROUNDS[0],
+            windowMode = if (p.getString(KEY_WINDOW_MODE, "floating") == "maximized") "maximized" else "floating")
     }
 
     fun write(ctx: Context, ui: MobileUiPrefs) {
@@ -58,6 +62,7 @@ object MobileModeSettings {
             .putString(KEY_PANEL_SIZE, ui.panelSize)
             .putString(KEY_PANEL_POSITION, ui.panelPosition)
             .putString(KEY_BACKGROUND, if (HEX.matches(ui.background)) ui.background else BACKGROUNDS[0])
+            .putString(KEY_WINDOW_MODE, ui.windowMode)
             .apply()
     }
 }
@@ -95,6 +100,12 @@ fun MobileModeSettingsCard(ctx: Context) {
             Switch(checked = ui.panelPosition == "top",
                 onCheckedChange = { save(ui.copy(panelPosition = if (it) "top" else "bottom")) },
                 modifier = Modifier.semantics { contentDescription = "mobile-panel-position" })
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Full-screen app windows", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Switch(checked = ui.windowMode == "maximized",
+                onCheckedChange = { save(ui.copy(windowMode = if (it) "maximized" else "floating")) },
+                modifier = Modifier.semantics { contentDescription = "mobile-window-mode" })
         }
         Text("Background", color = textDim, fontSize = 13.sp)
         Row {

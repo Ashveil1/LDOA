@@ -211,7 +211,10 @@ class MobileShellSpikeTest {
             Triple(0.75f, "", "42-mobile-scale-min"),
             Triple(2.0f, "", "43-mobile-scale-max"))) {
             val (scale, shotEarly, shotSettled) = round
-            MobileModeSettings.write(ctx, defaultPrefs.copy(scale = scale))
+            // Bounded feature exercise: the window-behavior layer
+            // (GuestMobileWindows) is opt-in here - the product default
+            // stays floating until settings access + runtime proof.
+            MobileModeSettings.write(ctx, defaultPrefs.copy(scale = scale, windowMode = "maximized"))
             Log.i(TAG, "mobile round scale=$scale")
             val proc = GuestMobileShell.launchMobileSession(ctx, rootfs)
             logOffset = awaitJwmAlive(proc, logFile, logOffset)

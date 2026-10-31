@@ -106,6 +106,7 @@ object GuestMobileShell {
               <TrayStyle><Font>DejaVu Sans-$menuFont</Font></TrayStyle>
               <TaskListStyle><Font>DejaVu Sans-$menuFont</Font></TaskListStyle>
               <PagerStyle><Font>DejaVu Sans-8</Font></PagerStyle>
+              __WINDOW_RULES__
               <Tray x="0" y="$trayY" height="$trayH">
                 <TrayButton label="LDOA">root:1</TrayButton>
                 <Pager/>
@@ -113,7 +114,7 @@ object GuestMobileShell {
                 <Clock format="%H:%M"/>
               </Tray>
             </JWM>
-            """.trimIndent() + "\n"
+            """.trimIndent().replace("__WINDOW_RULES__", GuestMobileWindows.jwmWindowRules(ui)) + "\n"
     }
 
     /** Launch the mobile session against the embedded X server. The proot
@@ -133,6 +134,7 @@ object GuestMobileShell {
         val ui = MobileModeSettings.read(ctx)
         val dpi = xftDpi(ctx, ui)
         val trayH = if (ui.panelSize == "large") 64 else 48
+        val xtermGeometry = GuestMobileWindows.xtermGeometryArg(ui)
         File(rootfs, "root/.jwmrc").writeText(jwmrc(ui))
         File(rootfs, "root/.Xresources").writeText(
             "Xft.dpi: $dpi\nXft.antialias: 1\nXft.hinting: 1\nXft.rgba: rgb\n")
@@ -199,7 +201,7 @@ object GuestMobileShell {
             fi
             fc-cache -f >/dev/null 2>&1
             pcmanfm --desktop &
-            xterm -fa "DejaVu Sans Mono" -fs ${'$'}{TERM_FONT:-13} -geometry 100x30+40+120 &
+            xterm -fa "DejaVu Sans Mono" -fs ${'$'}{TERM_FONT:-13}$xtermGeometry &
             XTPID=${'$'}!
             echo "mobile-launch: xterm pid=${'$'}XTPID ctty-fd0=${'$'}(readlink /proc/${'$'}XTPID/fd/0 2>/dev/null)"
             wait
