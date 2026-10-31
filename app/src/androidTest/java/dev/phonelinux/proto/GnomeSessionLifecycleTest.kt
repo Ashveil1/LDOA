@@ -4,6 +4,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.After
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -51,6 +52,67 @@ class GnomeSessionLifecycleTest {
         assertFalse("retained failed session must be torn down", alive(oldPid))
         assertNull(XServer.sessionProcess)
         assertFalse("second call must find nothing retained", XServer.teardownRetainedFailedSession(ctx))
+    }
+
+    /** Gate success: a registration marker naming THIS launch's own bus
+     *  satisfies the gate (bus-pinned so a stale/foreign owner can never
+     *  satisfy it). Uses a static log + live sleeper process fixture;
+     *  this validates gate LOGIC, not the real GNOME session lifecycle. */
+    @Test fun gateSucceedsOnRegisteredMarkerForThisBus() {
+        val log = File.createTempFile("gate", ".log", ctx.cacheDir)
+        log.writeText(
+            "gnome-launch: session bus unix:path=/tmp/dbus-TEST,guid=abc\n" +
+            "gnome-launch: shell registered launch=1 bus=unix:path=/tmp/dbus-TEST,guid=abc\n")
+        val p = sleeper()
+        val hit = XServer.awaitShellRegistered(p, log, 0L, 10_000)
+        assertNotNull(hit)
+        assertTrue(hit!!.contains("shell registered"))
+    }
+
+    /** The fallback-phase marker is DISTINCT and satisfies the gate as a
+     *  degraded success the caller identifies by marker text: a bare-shell
+     *  desktop is never indistinguishable from a full GNOME session. */
+    @Test fun gateSucceedsOnDistinctFallbackMarker() {
+        val log = File.createTempFile("gate", ".log", ctx.cacheDir)
+        log.writeText(
+            "gnome-launch: session bus unix:path=/tmp/dbus-TEST,guid=abc\n" +
+            "gnome-launch: fallback shell registered launch=1 bus=unix:path=/tmp/dbus-TEST,guid=abc\n")
+        val p = sleeper()
+        val hit = XServer.awaitShellRegistered(p, log, 0L, 10_000)
+        assertNotNull(hit)
+        assertTrue(hit!!.contains("fallback shell registered"))
+    }
+
+    /** Gate fail-fast: the fallback-phase verdict is definitive (POCO log
+     *  2026-10-30: collapse AFTER registration; first-phase verdict is not
+     *  final because the bare-shell fallback may still register). */
+    @Test fun gateFailsFastOnDefinitiveFallbackVerdict() {
+        val log = File.createTempFile("gate", ".log", ctx.cacheDir)
+        log.writeText(
+            "gnome-launch: session bus unix:path=/tmp/dbus-TEST,guid=abc\n" +
+            "gnome-launch: shell missing after 60s launch=1\n" +
+            "gnome-launch: fallback shell missing after 90s launch=1\n")
+        val p = sleeper()
+        val t0 = System.currentTimeMillis()
+        val hit = XServer.awaitShellRegistered(p, log, 0L, 60_000)
+        assertNull(hit)
+        assertTrue("fail-fast on definitive verdict, not the full budget",
+            System.currentTimeMillis() - t0 < 30_000)
+    }
+
+    /** Gate patience: the first-phase verdict alone must NOT end the gate;
+     *  the unified fallback may still be starting. Expiry must come from
+     *  the budget, not an early exit. */
+    @Test fun gateKeepsWaitingAfterFirstPhaseVerdict() {
+        val log = File.createTempFile("gate", ".log", ctx.cacheDir)
+        log.writeText(
+            "gnome-launch: session bus unix:path=/tmp/dbus-TEST,guid=abc\n" +
+            "gnome-launch: shell missing after 60s launch=1\n")
+        val p = sleeper()
+        val t0 = System.currentTimeMillis()
+        val hit = XServer.awaitShellRegistered(p, log, 0L, 8_000)
+        assertNull(hit)
+        assertTrue(System.currentTimeMillis() - t0 >= 8_000)
     }
 
     /** Clobber window: if ownership changes hands mid-teardown (concurrent

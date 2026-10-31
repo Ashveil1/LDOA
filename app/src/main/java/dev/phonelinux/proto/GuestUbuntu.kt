@@ -186,6 +186,7 @@ object GuestUbuntu {
                 echo "gnome-launch: shell-missing-state xdg=$(ls /tmp/xdg 2>&1 | tr '\n' '|') ice=$(ls /tmp/.ICE-unix 2>&1 | tr '\n' '|') x11=$(ls /tmp/.X11-unix 2>&1 | tr '\n' '|')"
                 ps 2>&1 | head -25
               fi ) &
+            POLL_A_PID=${'$'}!
             # FIRST-PAINT window evidence (diagnostic): the bus poll above
             # proves only session-bus registration, not windows on screen.
             # Splitting "guest never mapped a window" from "guest mapped,
@@ -217,18 +218,61 @@ object GuestUbuntu {
             echo "gnome-launch: trying gnome-session --session=ubuntu (top bar + ubuntu-dock + yaru)"
             gnome-session --session=ubuntu 2>&1 &
             GSPID=${'$'}!
+            # Watchdog: an unbounded wait would let a wedged gnome-session
+            # (shell never registers, session never exits) block the
+            # fallback forever while the app gate burns its budget. If no
+            # shell owns the bus by ~+112s, terminate gnome-session so the
+            # unified fallback runs; the fallback poll's marker or
+            # definitive verdict then lands within the app budget (210s).
+            ( for i in ${'$'}(seq 1 55); do
+                sleep 2
+                if gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
+                  exit 0
+                fi
+              done
+              if ! gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
+                echo "gnome-launch: no shell on bus by +112s - terminating gnome-session pid=${'$'}GSPID to reach the fallback"
+                kill ${'$'}GSPID 2>/dev/null
+              fi ) &
+            WATCHDOG_PID=${'$'}!
             sleep 20
             if kill -0 ${'$'}GSPID 2>/dev/null; then
               echo "gnome-launch: gnome-session alive pid=${'$'}GSPID"
               wait ${'$'}GSPID
-              echo "gnome-launch: gnome-session exited=${'$'}?"
+              echo "gnome-launch: gnome-session exited=${'$'}? after surviving the 20s check - falling back to bare gnome-shell --x11"
             else
               wait ${'$'}GSPID 2>/dev/null
               echo "gnome-launch: gnome-session died exit=${'$'}? - falling back to bare gnome-shell --x11"
-              # Repro-diagnosis state for the fallback path (no cleanup):
-              echo "gnome-launch: fallback-state xdg=$(ls /tmp/xdg 2>&1 | tr '\n' '|') ice=$(ls /tmp/.ICE-unix 2>&1 | tr '\n' '|') x11=$(ls /tmp/.X11-unix 2>&1 | tr '\n' '|')"
-              exec gnome-shell --x11
             fi
+            # A LATE gnome-session exit must not end the script. POCO log
+            # 2026-10-30 (launch 1793346581): the shell REGISTERED at ~+30s,
+            # then gsd-rfkill (signal 6: rfkill udev device has no device
+            # file under proot) and gsd-usb-protection (signal 11)
+            # crash-looped into gnome-session-failed and the shell vanished
+            # from the bus. The bare shell is a working degraded desktop
+            # (x86 evidence: wallpaper + top bar + dock pixel-verified).
+            echo "gnome-launch: fallback-state xdg=$(ls /tmp/xdg 2>&1 | tr '\n' '|') ice=$(ls /tmp/.ICE-unix 2>&1 | tr '\n' '|') x11=$(ls /tmp/.X11-unix 2>&1 | tr '\n' '|')"
+            # The phase-1 readiness poll and watchdog belong to the
+            # gnome-session phase: left running, the poll could report the
+            # FALLBACK shell's registration as a full success (the markers
+            # must stay distinguishable), and the watchdog's kill is moot.
+            kill ${'$'}POLL_A_PID ${'$'}WATCHDOG_PID 2>/dev/null
+            # Fallback-phase readiness poll: the first 60s poll can expire
+            # before the fallback shell registers. Emit the SAME success
+            # marker the app gate matches; this phase's verdict is the
+            # definitive failure (the first-phase "shell missing after 60s"
+            # is not - the fallback may still be coming).
+            ( for i in ${'$'}(seq 1 45); do
+                sleep 2
+                if gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
+                  echo "gnome-launch: fallback shell registered launch=${'$'}LAUNCH_ID bus=${'$'}DBUS_SESSION_BUS_ADDRESS"
+                  break
+                fi
+              done
+              if ! gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
+                echo "gnome-launch: fallback shell missing after 90s launch=${'$'}LAUNCH_ID"
+              fi ) &
+            exec gnome-shell --x11
             """.trimIndent() + "\n"
 
     /** Launch the GNOME session: workarounds first, then gnome-shell --x11

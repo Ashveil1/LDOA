@@ -179,10 +179,19 @@ object XServer {
                 // fails the equality check.
                 val expected = bus ?: gnomeSessionBus
                 val hit = fresh.lineSequence().firstOrNull { line ->
-                    line.contains("gnome-launch: shell registered") &&
+                    (line.contains("gnome-launch: shell registered") ||
+                        line.contains("gnome-launch: fallback shell registered")) &&
                         (expected == null || line.substringAfter("bus=").trim() == expected)
                 }
                 if (hit != null && expected != null) return hit.trim()
+                // The script's first-phase verdict ("shell missing after
+                // 60s") is NOT definitive: the unified bare-shell fallback
+                // may still register. The fallback-phase verdict IS - fail
+                // fast instead of burning the whole budget.
+                if (fresh.contains("gnome-launch: fallback shell missing after 90s")) {
+                    Log.w(TAG, "gate: script reported definitive fallback failure")
+                    return null
+                }
             }
             Thread.sleep(2_000)
         }
@@ -277,12 +286,19 @@ object XServer {
                                 // stalled, black screen). Bus address must
                                 // match this launch's own bus line so an owner
                                 // from a stale session can never satisfy it.
-                                val marker = awaitShellRegistered(p, gnomeLog, logBase, 60_000)
+                                val marker = awaitShellRegistered(p, gnomeLog, logBase, 210_000)
                                 if (marker != null) {
                                     Log.i(TAG, "GNOME session evidence: " + marker)
                                     ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
                                         .edit().putBoolean("ubuntu_desktop_active", true).apply()
                                     launched = true
+                                    // A fallback-shell marker is DEGRADED success, never full
+                                    // GNOME: recorded distinctly, never silently reported as a
+                                    // healthy session (product readiness keeps the two apart).
+                                    val degraded = marker.contains("fallback shell registered")
+                                    ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
+                                        .edit().putBoolean("ubuntu_desktop_degraded", degraded).apply()
+                                    if (degraded) Log.w(TAG, "DEGRADED desktop: bare-shell fallback registered - full GNOME session unavailable this launch")
                                     synchronized(ownershipLock) {
                                         retainedSessionFailed = false
                                         sessionProcess = p
@@ -298,7 +314,7 @@ object XServer {
                                     val tail = if (gnomeLog.isFile && gnomeLog.length() > logBase)
                                         gnomeLog.readText().substring(logBase.toInt().coerceAtMost((gnomeLog.length()).toInt())).takeLast(1500)
                                         else "(guest-gnome.log has no new output)"
-                                    failure = "GNOME shell did not register on its session bus in 60s (process " +
+                                    failure = "GNOME shell did not register on its session bus within 210s incl. fallback window (process " +
                                         (if (p.isAlive) "still running" else "exited") + "). Log tail:\n" + tail
                                     // Retain ownership of the still-running session so
                                     // Stop session can tear it down by identity.
@@ -396,7 +412,8 @@ object XServer {
             val xs = process
             if (xs != null) { try { xs.destroy() } catch (t: Throwable) { }; process = null }
             ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
-                .edit().putBoolean("ubuntu_desktop_active", false).apply()
+                .edit().putBoolean("ubuntu_desktop_active", false)
+                .putBoolean("ubuntu_desktop_degraded", false).apply()
         }
         Log.i(TAG, "stopDesktopMode: desktop session ended by user")
     }
