@@ -123,6 +123,30 @@ class SpikeViewModel : ViewModel() {
 }
 
 class MainActivity : ComponentActivity() {
+
+    /** Read the append-only guest-gnome.log for export: bounded tail read on a
+     *  background thread (the file grows across launches; clipboard and
+     *  ACTION_SEND payloads ride binder's ~1MB transaction cap), then invoke
+     *  [onReady] on the main thread. 256 KiB keeps the payload well under the
+     *  cap while covering many full sessions. */
+    private fun exportGnomeLog(onReady: MainActivity.(String) -> Unit) {
+        val f = java.io.File(filesDir, "guest-gnome.log")
+        thread(name = "log-export") {
+            val maxBytes = 256 * 1024
+            val body = if (!f.isFile) "(guest-gnome.log missing)" else {
+                val len = f.length()
+                val skip = if (len > maxBytes) len - maxBytes else 0L
+                val text = f.inputStream().use { ins ->
+                    var remaining = skip
+                    while (remaining > 0) remaining -= ins.skip(remaining)
+                    ins.readBytes().toString(Charsets.UTF_8)
+                }
+                if (skip > 0) "[truncated: last " + maxBytes + " bytes of " + len + "]\n" + text else text
+            }
+            runOnUiThread { onReady(body) }
+        }
+    }
+
     private val vm: SpikeViewModel by viewModels()
 
     override fun onResume() {
@@ -255,12 +279,13 @@ class MainActivity : ComponentActivity() {
                                 // carry the launch evidence) + stop the failed
                                 // session (handle retained by XServer on failure).
                                 TextButton(onClick = {
-                                    val f = java.io.File(this@MainActivity.filesDir, "guest-gnome.log")
-                                    val body = if (f.isFile) f.readText() else "(guest-gnome.log missing)"
-                                    val cm = this@MainActivity.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                                    cm.setPrimaryClip(android.content.ClipData.newPlainText("guest-gnome.log", body))
-                                    vm.log += "[tap] desktop error dialog: copied guest-gnome.log (" + body.length + " chars)\n"
-                                }) { Text("Copy full log") }
+                                    exportGnomeLog { body ->
+                                        val cm = this@MainActivity.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                        cm.setPrimaryClip(android.content.ClipData.newPlainText("guest-gnome.log", body))
+                                        vm.log += "[tap] desktop error dialog: copied guest-gnome.log (" + body.length + " chars)\n"
+                                    }
+                                }) { Text("Copy log") }
+
                                 TextButton(onClick = {
                                     vm.log += "[tap] desktop error dialog: stop session\n"
                                     vm.desktopError = null
