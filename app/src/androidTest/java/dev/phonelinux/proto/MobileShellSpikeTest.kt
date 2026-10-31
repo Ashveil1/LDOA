@@ -584,6 +584,7 @@ class MobileShellSpikeTest {
         val heldIdents = HashSet<PIdent?>()
         val xevLog = File(ctx.filesDir, "scroll-xev.log")
         val xtermLog = File(ctx.filesDir, "scroll-xterm.log")
+        val fpFile = File(rootfs, "root/scroll-fingerprint.sh")
         try {
             // device<->guest affine map from two pointer probes (pattern
             // proven in the GNOME harness). Probes run BEFORE the test
@@ -682,14 +683,52 @@ class MobileShellSpikeTest {
 
             // ---- SUB-CELL B: scroll OUTCOME on a test-owned legacy client
             xtermLog.delete()
+            // Launch-mode fix (gate 41238628079: "test xterm never
+            // mapped", scroll-xterm.log "xterm: Error 14, errno 38").
+            // PROVEN working-vs-failing delta (in-run ctty matrix, same
+            // proot context): a controlling terminal (util-linux script
+            // pty: dash_ctty_rc=0, xterm_ctty_rc=0, map=1) vs none
+            // (Error 14, exit status 14 in the verbose trace). Source
+            // path: xterm-390 error.h:62 ERROR_OPDEVTTY=14, main.c
+            // 4048-4053 alarm(2)/open("/dev/tty")/alarm(0), tolerated
+            // errno set 4077-4081, SysError at 4107. The
+            // alarm/errno-clobber detail (proot SIGSYS -> ENOSYS before
+            // the tolerated-errno read) is a strong interpretation of
+            // the trace, NOT a proven userspace errno assignment - no
+            // kernel/proot claim follows. Fix: launch B in the session's
+            // own launch mode (script pty - already the session's hard
+            // dependency, NO new dependency, fail-closed preflight).
+            // The fingerprint loop moves into a test-owned rootfs file
+            // (deleted in finally): identical arithmetic, zero nested
+            // quoting.
+            assertTrue("scroll: script pty helper missing - FAIL CLOSED " +
+                "(same hard dependency as the session launch)",
+                guest("command -v script >/dev/null 2>&1 && echo ok").contains("ok"))
             // dash-safe fingerprint loop: no ${'$'} inside $(( )); bar via
             // a builtin-only char loop (no fork per line under proot).
-            val printLoop = "i=0; while [ ${'$'}i -lt 240 ]; do k=${'$'}(( ( (i * 2654435761 + 12345) % 2147483648 ) % 41 )); " +
-                "printf 'M%03d ' ${'$'}i; j=0; while [ ${'$'}j -lt ${'$'}k ]; do printf '#'; j=${'$'}((j+1)); done; " +
-                "printf '\\n'; i=${'$'}((i+1)); done; exec /bin/sh"
-            xtermProc = heldGuest(listOf("/usr/bin/xterm", "-sl", "2000",
-                "-fa", "DejaVu Sans Mono", "-fs", "13",
-                "-T", "ldoa-scrolltest", "-e", "/bin/sh", "-c", printLoop), xtermLog)
+            // Byte-identical arithmetic to the pre-wrapper inline loop.
+            fpFile.writeText(
+                "#!/bin/sh\n" +
+                "# Test-owned scroll fingerprint (MobileShellSpikeTest sub-cell B).\n" +
+                "i=0\n" +
+                "while [ ${'$'}i -lt 240 ]; do\n" +
+                "  k=${'$'}(( ( (i * 2654435761 + 12345) % 2147483648 ) % 41 ))\n" +
+                "  printf 'M%03d ' ${'$'}i\n" +
+                "  j=0\n" +
+                "  while [ ${'$'}j -lt ${'$'}k ]; do printf '#'; j=${'$'}((j+1)); done\n" +
+                "  printf '\\n'\n" +
+                "  i=${'$'}((i+1))\n" +
+                "done\n" +
+                "exec /bin/sh\n")
+            // Direct argv, no sh -c wrapper: the proot root's child IS
+            // script - the flat-tree shape the verified teardown reaps.
+            // The held tree then spans [proot root, script, xterm, sh];
+            // the post-map capture already records it and the next gate
+            // must verify its reap (first exercise in this shape).
+            xtermProc = heldGuest(listOf("/usr/bin/script", "-qec",
+                "xterm -sl 2000 -fa \"DejaVu Sans Mono\" -fs 13" +
+                " -T ldoa-scrolltest -e /bin/sh /root/scroll-fingerprint.sh",
+                "/dev/null"), xtermLog)
             val xtermRootPid = hostPidOf(xtermProc!!)
             assertTrue("scroll: test xterm proot root unreadable", xtermRootPid != null)
             val xtermRootIdent = identityOf(xtermRootPid!!)
@@ -778,6 +817,7 @@ class MobileShellSpikeTest {
             }
             try { dumpLogTail("scroll-xev.log", xevLog, 16384) } catch (t: Throwable) { }
             try { dumpLogTail("scroll-xterm.log", xtermLog, 16384) } catch (t: Throwable) { }
+            try { fpFile.delete() } catch (t: Throwable) { }
             MobileModeSettings.write(ctx, defaultPrefs)
         }
     }
