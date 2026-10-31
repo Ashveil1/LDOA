@@ -146,7 +146,7 @@ class GnomeSessionScriptSafetyTest {
 
     @Test fun fallbackIsSuppressedWhenSessionComponentsSurviveExit() {
         val check = script.indexOf("pgrep -f 'gnome-session-binary|gnome-shell'")
-        val verdict = script.indexOf("fallback suppressed - session components survived")
+        val verdict = script.indexOf("fallback suppressed - possibly surviving session components after the session exit")
         val exec = script.indexOf("exec gnome-shell --x11")
         assertTrue("survivor name-READ (never a name-kill) must exist", check >= 0)
         assertTrue("survivor-suppression verdict must exist", verdict >= 0)
@@ -175,9 +175,9 @@ class GnomeSessionScriptSafetyTest {
 
     @Test fun observerVerifiesSessionDeathByComponentsNotWrapper() {
         assertTrue("wrapper death alone must not end observation (ptrace detach history)",
-            script.contains("wrapper pid=${'$'}GSPID gone but session components alive"))
+            script.contains("wrapper pid=${'$'}GSPID gone but OWNED session components alive"))
         assertTrue("conservative death-observation line must exist (name-match, ownership not asserted)",
-            script.contains("no gnome-session-binary/gnome-shell processes visible") && script.contains("ownership not proven"))
+            script.contains("no owned (snapshot) or name-matched session processes visible") && script.contains("observation ends, nothing killed"))
     }
 
     @Test fun mainFlowWaitsForWatchdogInsteadOfKillingIt() {
