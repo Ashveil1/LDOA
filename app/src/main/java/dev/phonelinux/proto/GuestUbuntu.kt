@@ -143,11 +143,14 @@ object GuestUbuntu {
             # that did/did not address it (directive: concrete failures/logs,
             # not cargo-culted changes).
             # - systemd-logind client libraries abort session startup under
-            #   proot; rename them away (idempotent: *.back already moved).
+            #   proot; rename them away. Idempotency fix: the find must
+            #   exclude *.back* or every script pass re-renames yesterday's
+            #   backups (POCO VD 2026-10-31: .back.back.back layers in the
+            #   failure tail), which is log spam, not a correctness issue.
             #   CAVEAT (consequential, keep): an apt upgrade of the owning
             #   packages restores the files and the session breaks again
             #   until this script re-runs.
-            for f in ${'$'}(find /usr -type f -iname "*login1*" 2>/dev/null); do mv -v "${'$'}f" "${'$'}f.back"; done
+            for f in ${'$'}(find /usr -type f -iname "*login1*" ! -iname "*.back*" 2>/dev/null); do mv -v "${'$'}f" "${'$'}f.back"; done
             echo "workaround-login1: ${'$'}(find /usr -type f -iname '*login1*' 2>/dev/null | wc -l) remaining"
             # - the dbus launch helper must be setuid to spawn the session bus.
             #   CAVEAT (consequential, keep): this relaxes a guest file's

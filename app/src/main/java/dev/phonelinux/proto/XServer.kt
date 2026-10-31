@@ -40,14 +40,40 @@ object XServer {
     @Volatile private var sessionBusIdent: PIdent? = null
     @Volatile private var gnomeSession: Pair<String, Process>? = null
 
+    /** True only while a session whose readiness gate FAILED is retained
+     *  for Stop session. openDesktop tears such a session down before
+     *  relaunching (retry implies stop): launchOrReuseGnomeSession would
+     *  otherwise "reuse" the still-running wedged process, so no new
+     *  session script ever runs and the gate times out with
+     *  "guest-gnome.log has no new output" (POCO VD 2026-10-31 14:18:
+     *  exactly that second failure shape). A HEALTHY retained session
+     *  (gate passed) never sets this and is still reused/brought forward. */
+    @Volatile private var retainedSessionFailed = false
+
     /** Bus address of the TRACKED session, captured from its own
      *  "gnome-launch: session bus" log line when the gate first sees it.
      *  A retry on the REUSED session gets no fresh bus line, so the gate
      *  matches registration markers against this tracked address instead.
      *  Cross-session acceptance is impossible: the address embeds the
-     *  bus guid, unique per dbus-launch. Cleared on fresh launch + stop.
-     *  (Ash 2026-10-30 10:35 approval: fix the retry loop.) */
+     *  bus guid, unique per dbus-launch. Cleared on fresh launch + stop. */
     @Volatile private var gnomeSessionBus: String? = null
+
+    /** ONE lock for every session/X-server ownership transition: snapshot,
+     *  establish (launch, gate-confirm, failure-retain) and clear. The
+     *  epoch is only read or written while holding it, which is what makes
+     *  stopDesktopMode's "epoch unchanged -> clear" atomic against
+     *  establishers: no launch/confirm/retain can interleave between the
+     *  check and the clears. Identity-verified kills run OUTSIDE the lock:
+     *  they re-verify (starttime, uid) at signal time, so a pid reused
+     *  mid-teardown is never signaled. */
+    private val ownershipLock = Any()
+    private var ownershipGeneration = 0L
+
+    /** Test-only seam: invoked inside stopDesktopMode after the ownership
+     *  snapshot and before any kill or clear, so a regression test can
+     *  interleave a simulated relaunch deterministically. App code never
+     *  sets this. */
+    @Volatile internal var teardownHookForTest: (() -> Unit)? = null
     @Volatile var preparing = false
         private set
 
@@ -58,23 +84,21 @@ object XServer {
         gnomeSession?.let { it.first == d.id && it.second.isAlive } == true
 
     /** Single tracked launch path shared by desktop entry and restart tests. */
-    @Synchronized
-    fun launchOrReuseGnomeSession(ctx: Context, distro: Distro, rootfs: File): Process {
+    fun launchOrReuseGnomeSession(ctx: Context, distro: Distro, rootfs: File): Process = synchronized(ownershipLock) {
         val current = gnomeSession
         if (current != null && current.first == distro.id && current.second.isAlive) {
             Log.i(TAG, "GNOME session already running - bringing desktop forward")
-            return current.second
+            return@synchronized current.second
         }
         Log.i(TAG, "launching GNOME session")
-        return GuestUbuntu.launchGnomeSession(ctx, rootfs).also { gnomeSession = distro.id to it; gnomeSessionBus = null }
+        return@synchronized GuestUbuntu.launchGnomeSession(ctx, rootfs).also { gnomeSession = distro.id to it; gnomeSessionBus = null; ownershipGeneration++ }
     }
 
     fun tmpDir(ctx: Context): File = File(ctx.filesDir, "usr/tmp")
     fun socketDir(ctx: Context): File = File(tmpDir(ctx), ".X11-unix")
 
-    @Synchronized
     fun start(ctx: Context) {
-        if (process?.isAlive == true) return
+        synchronized(ownershipLock) { if (process?.isAlive == true) return }
         XkbData.ensure(ctx)
         socketDir(ctx).mkdirs()
         val lib = File(ctx.applicationInfo.nativeLibraryDir, "libXlorie.so")
@@ -105,7 +129,16 @@ object XServer {
         }
         pb.redirectErrorStream(true)
         pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))
-        process = pb.start()
+        val spawned = pb.start()
+        synchronized(ownershipLock) {
+            if (process?.isAlive == true) {
+                // A concurrent start won: keep the tracked server, drop
+                // this duplicate instead of orphaning the field.
+                try { spawned.destroy() } catch (t: Throwable) { }
+                return
+            }
+            process = spawned
+        }
         Log.i(TAG, "X server spawned; log=$log")
     }
 
@@ -174,6 +207,7 @@ object XServer {
             var launched = false
             var failure: String? = null
             try {
+                teardownRetainedFailedSession(ctx)
                 onStage("Starting X server")
                 start(ctx)
                 val installer = DistroInstaller(ctx)
@@ -203,8 +237,11 @@ object XServer {
                                 while (grace < 8 && p.isAlive) { Thread.sleep(1_000); grace++ }
                                 launched = p.isAlive
                                 if (launched) {
-                                    sessionProcess = p
-                                    sessionRootIdent = pidOf(p)?.let { identityOf(it) }
+                                    synchronized(ownershipLock) {
+                                        sessionProcess = p
+                                        sessionRootIdent = pidOf(p)?.let { identityOf(it) }
+                                        ownershipGeneration++
+                                    }
                                 }
                                 if (!launched) failure = "Desktop session died within " + grace + "s of launch"
                             } else if (failure == null) {
@@ -246,11 +283,15 @@ object XServer {
                                     ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
                                         .edit().putBoolean("ubuntu_desktop_active", true).apply()
                                     launched = true
-                                    sessionProcess = p
-                                    sessionRootIdent = pidOf(p)?.let { identityOf(it) }
-                                    sessionBusIdent = sessionBusPid(ctx)?.let { bp ->
-                                        identityOf(bp).also { found ->
-                                            if (found == null) Log.w(TAG, "bus pid " + bp + " unreadable at launch-confirm; stop will skip the bus")
+                                    synchronized(ownershipLock) {
+                                        retainedSessionFailed = false
+                                        sessionProcess = p
+                                        ownershipGeneration++
+                                        sessionRootIdent = pidOf(p)?.let { identityOf(it) }
+                                        sessionBusIdent = sessionBusPid(ctx)?.let { bp ->
+                                            identityOf(bp).also { found ->
+                                                if (found == null) Log.w(TAG, "bus pid " + bp + " unreadable at launch-confirm; stop will skip the bus")
+                                            }
                                         }
                                     }
                                 } else {
@@ -301,9 +342,23 @@ object XServer {
      * the same rule. Leftovers are logged, never hidden.
      */
     fun stopDesktopMode(ctx: Context) {
-        val rootIdent = sessionRootIdent
-        val busIdent = sessionBusIdent
+        // Snapshot ownership ONCE at entry: kills AND clears below apply to
+        // this snapshot. The epoch guard then keeps a concurrent
+        // relaunch/retain that landed mid-teardown from losing its handles
+        // (previously the unconditional clears could erase a newly confirmed
+        // session's ownership: orphaned session, re-armed double-launch).
+        var genAtEntry = 0L
+        var rootIdent: PIdent? = null
+        var busIdent: PIdent? = null
+        var rootProc: Process? = null
+        synchronized(ownershipLock) {
+            genAtEntry = ownershipGeneration
+            rootIdent = sessionRootIdent
+            busIdent = sessionBusIdent
+            rootProc = sessionProcess
+        }
         val idents = LinkedHashMap<Int, PIdent>()
+        teardownHookForTest?.invoke()
         if (rootIdent != null) {
             val cur = identityOf(rootIdent.pid)
             if (cur != null && cur.start == rootIdent.start && cur.uid == rootIdent.uid) {
@@ -319,30 +374,64 @@ object XServer {
         if (busIdent != null) idents[busIdent.pid] = busIdent
         val left = killIdentsVerified(idents)
         if (left.isNotEmpty()) Log.w(TAG, "stopDesktopMode: leftover pids after verified teardown: " + left)
-        val root = sessionProcess
-        if (root != null) { try { root.destroy() } catch (t: Throwable) { } }
-        sessionProcess = null
-        sessionRootIdent = null
-        sessionBusIdent = null
-        gnomeSession = null
-        gnomeSessionBus = null
-        val xs = process
-        if (xs != null) { try { xs.destroy() } catch (t: Throwable) { }; process = null }
-        ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
-            .edit().putBoolean("ubuntu_desktop_active", false).apply()
+        // Destroy the SNAPSHOT process, never the field: the field may
+        // already belong to a newer session.
+        if (rootProc != null) { try { rootProc.destroy() } catch (t: Throwable) { } }
+        // Check-and-clear atomically under the same lock establishers use:
+        // no launch/confirm/retain can interleave between the epoch check
+        // and the clears. If the epoch moved, ownership belongs to a NEW
+        // session - leave its handles, the shared X server and the pref.
+        synchronized(ownershipLock) {
+            if (ownershipGeneration != genAtEntry) {
+                Log.w(TAG, "stopDesktopMode: ownership changed hands during teardown " +
+                    "(concurrent launch/retain) - new session handles, X server and active-pref left intact")
+                return
+            }
+            sessionProcess = null
+            sessionRootIdent = null
+            sessionBusIdent = null
+            gnomeSession = null
+            gnomeSessionBus = null
+            retainedSessionFailed = false
+            val xs = process
+            if (xs != null) { try { xs.destroy() } catch (t: Throwable) { }; process = null }
+            ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
+                .edit().putBoolean("ubuntu_desktop_active", false).apply()
+        }
         Log.i(TAG, "stopDesktopMode: desktop session ended by user")
     }
 
-    /** Failure-path ownership retention (Ash 2026-10-30 10:35 approval):
+    /** Failure-path ownership retention:
      *  a session whose readiness gate failed is still RUNNING; without
      *  these handles it is an orphan no teardown can reach. Identities
      *  are captured NOW (same rule as the launch-confirmed capture): an
      *  identity read at stop time cannot guard a reused PID. */
+    /** openDesktop pre-launch step (extracted for direct regression
+     *  testing): a retained FAILED session is torn down by identity before
+     *  any relaunch - retry implies stop. Without this,
+     *  launchOrReuseGnomeSession "reuses" the still-running wedged process
+     *  and no new session script ever runs (POCO VD 2026-10-31 14:18
+     *  second-attempt failure shape). A HEALTHY retained session (gate
+     *  passed) never sets the flag and is still reused/brought forward.
+     *  Returns true when a teardown ran. */
+    internal fun teardownRetainedFailedSession(ctx: Context): Boolean {
+        if (retainedSessionFailed && (sessionProcess != null || gnomeSession != null)) {
+            Log.i(TAG, "openDesktop: retained FAILED session present - verified teardown before relaunch (retry implies stop)")
+            stopDesktopMode(ctx)
+            return true
+        }
+        return false
+    }
+
     internal fun retainFailedSessionOwnership(ctx: Context, p: Process) {
         if (p.isAlive) {
-            sessionProcess = p
-            sessionRootIdent = pidOf(p)?.let { identityOf(it) }
-            sessionBusIdent = sessionBusPid(ctx)?.let { bp -> identityOf(bp) }
+            synchronized(ownershipLock) {
+                retainedSessionFailed = true
+                sessionProcess = p
+                ownershipGeneration++
+                sessionRootIdent = pidOf(p)?.let { identityOf(it) }
+                sessionBusIdent = sessionBusPid(ctx)?.let { bp -> identityOf(bp) }
+            }
         }
     }
 

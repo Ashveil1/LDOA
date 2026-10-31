@@ -79,6 +79,12 @@ jobs:
             timeout -s KILL 1500 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.NativeTerminalFakeRootTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-native.log | tail -15 || echo "NATIVE-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"
             grep -q "OK (" /tmp/instr-native.log || touch /tmp/PHONELINUX_NATIVE_FAILED
             if [ -f /tmp/PHONELINUX_NATIVE_FAILED ]; then echo "NATIVE-DIAG survivors at bound:"; adb -s emulator-5554 shell "ps -A -o PID,PPID,ARGS" | grep -E "phonelinux|proot|bash|Xlorie" || true; adb -s emulator-5554 shell am force-stop dev.phonelinux.proto || true; fi
+            # GNOME session lifecycle regression (retry-implies-stop, clobber
+            # window, concurrent stops): cheap (sleep-process fakes, no
+            # rootfs), always on, independently bounded.
+            date -u +"LIFECYCLE start %H:%M:%S"
+            timeout -s KILL 300 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.GnomeSessionLifecycleTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-lifecycle.log | tail -8 || echo "LIFECYCLE-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"
+            grep -q "OK (" /tmp/instr-lifecycle.log || touch /tmp/PHONELINUX_LIFECYCLE_FAILED
             date -u +"HARNESS arms start %H:%M:%S (lane=$LANE)"
             if [ "$LANE" = full ]; then timeout -s KILL 1500 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.LdoaInputHarnessTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr.log | tail -15 || echo "HARNESS-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"; else echo "harness SKIPPED (lane=$LANE)" > /tmp/instr.log; fi
             if [ "$LANE" = full ]; then grep -q "OK (" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED; fi
@@ -88,8 +94,10 @@ jobs:
             python3 .github/scripts/extract_shots.py /tmp/shotlog.txt screenshots || true
             python3 .github/scripts/extract_shots.py /tmp/instr.log screenshots || true
             find screenshots -type f | sort || true
+            if [ -f /tmp/PHONELINUX_LIFECYCLE_FAILED ]; then echo "LIFECYCLE-FAILED-OR-TIMEOUT"; fi
             if [ -f /tmp/PHONELINUX_NATIVE_FAILED ]; then echo "NATIVE-FAKEROOT-FAILED-OR-TIMEOUT"; fi
             if [ -f /tmp/PHONELINUX_TESTS_FAILED ]; then exit 1; fi
+            if [ -f /tmp/PHONELINUX_LIFECYCLE_FAILED ]; then exit 1; fi
             if [ -f /tmp/PHONELINUX_NATIVE_FAILED ]; then exit 1; fi
       - uses: actions/upload-artifact@v4
         if: always()
@@ -102,4 +110,5 @@ jobs:
             /tmp/shotlog.txt
             /tmp/instr0.log
             /tmp/instr-native.log
+            /tmp/instr-lifecycle.log
             /tmp/instr.log
