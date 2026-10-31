@@ -34,11 +34,19 @@ class ReuseGateHealthTest {
     private fun spawn(seconds: Int): Process =
         ProcessBuilder("/system/bin/sh", "-c", "sleep " + seconds).start().also { procs.add(it) }
 
-    /** A fake session whose tree contains a process named gnome-shell
-     *  (argv0 via exec -a), the way the real guest tree does. */
-    private fun spawnSessionWithShell(): Process =
-        ProcessBuilder("/system/bin/sh", "-c", "exec -a gnome-shell sleep 120 & exec sleep 120")
+    /** A fake session whose tree contains a process named gnome-shell.
+     *  exec -a is a bash/ksh93-ism: Android mksh (like dash) rejects it and
+     *  the child dies nameless - that fixture bug, not the gate, failed run
+     *  41200778975 (reproduced locally: zombie child, empty cmdline). A
+     *  script FILE named gnome-shell, invoked via sh and kept alive with
+     *  "& wait", survives portably with its name in cmdline. */
+    private fun spawnSessionWithShell(): Process {
+        val script = java.io.File(ctx.filesDir, "gnome-shell")
+        script.writeText("#!/system/bin/sh\nsleep 120 & wait\n")
+        return ProcessBuilder("/system/bin/sh", "-c",
+            "\"/system/bin/sh\" \"" + script.absolutePath + "\" & exec sleep 120")
             .start().also { procs.add(it) }
+    }
 
     private fun pidOf(p: Process): Int {
         val f = p.javaClass.getDeclaredField("pid"); f.isAccessible = true; return f.getInt(p)
