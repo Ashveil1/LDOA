@@ -713,7 +713,24 @@ class DesktopClientTest {
             }
         } finally {
             session.destroy()
-            try { GuestDesktop.killDesktopClients(appCtx, rootfs) } catch (t: Throwable) { }
+            // Teardown must actually reap the guest tree: proot destroy
+            // ORPHANS backgrounded tracees, and run 41186745767 showed
+            // desktop-era survivors (st/pcmanfm/sh/xclock) feeding the
+            // phantom cap until the 09:30:09 trim batch-killed the SHARED X
+            // server (app_process 6486) with them. Never swallow the reap:
+            // log killed + residual, retry once, leave survivors visible.
+            try {
+                val killed = GuestDesktop.killDesktopClients(appCtx, rootfs)
+                var residual = GuestDesktop.desktopClientCount(appCtx, rootfs)
+                if (residual > 0) {
+                    Thread.sleep(2_000)
+                    GuestDesktop.killDesktopClients(appCtx, rootfs)
+                    residual = GuestDesktop.desktopClientCount(appCtx, rootfs)
+                }
+                android.util.Log.i("PHONEDIAG", "desktop teardown: killed=" + killed + " residual=" + residual)
+            } catch (t: Throwable) {
+                android.util.Log.w("PHONEDIAG", "desktop teardown reap failed: " + t)
+            }
         }
     }
 }
