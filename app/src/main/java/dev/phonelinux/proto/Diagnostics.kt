@@ -92,6 +92,9 @@ object Diagnostics {
             val specs = ArrayList<Pair<String, File>>()
             for (n in LOG_NAMES) specs.add(n to File(ctx.filesDir, n))
             specs.add("ldoa-probes.log" to File(ctx.filesDir, "distros/ubuntu/tmp/ldoa-probes.log"))
+            // One rotated generation of the sampler file (the sampler rotates
+            // a full previous session aside so a new session is never starved).
+            specs.add("ldoa-probes.prev.log" to File(ctx.filesDir, "distros/ubuntu/tmp/ldoa-probes.prev.log"))
             for ((name, f) in specs) {
                 if (!f.isFile) continue
                 val len = f.length()
@@ -155,7 +158,13 @@ object Diagnostics {
         "- session-snapshot.txt: session/ownership state + the readiness-gate\n" +
         "  decision timeline (monotonic + wall clock, matched per launch).\n" +
         "- logs/ldoa-probes.log (GNOME sessions only): bounded session-state\n" +
-        "  samples every ~15s for ~12 min after launch - tool availability,\n" +
+        "  samples, one every 15s plus probe time (actual spacing ~15-25s,\n" +
+        "  span ~10-15 min; each sample stamps its own UTC time and seconds\n" +
+        "  since launch, so actual spacing is measured, not assumed). If a\n" +
+        "  previous session already filled the file it is rotated to\n" +
+        "  ldoa-probes.prev.log (one generation kept) so the newest session\n" +
+        "  always has room; a 'stopped: size cap' line is the explicit record\n" +
+        "  when a session's samples stopped early. Samples record:\n" +
         "  gnome-shell pid, org.gnome.Shell bus owner (2s-timeout queries),\n" +
         "  X server pid+starttime (the SAME starttime at two points means the\n" +
         "  same server instance; a changed one means a restart), managed-\n" +
@@ -180,11 +189,15 @@ object Diagnostics {
         "- frame-presentation and input-event cadence counters are still NOT\n" +
         "  instrumented: this bundle does not diagnose drag stutter\n" +
         "  numerically. Guest font state (fc-match/fc-list) is not probed.\n" +
-        "- verbose session logging (G_MESSAGES_DEBUG=all) is enabled; the\n" +
-        "  4 MiB per-generation rotation plus the 24 MiB export budget still\n" +
-        "  cap size, so the OLDEST verbose lines can rotate out of very\n" +
-        "  chatty sessions. Verbose logging costs some CPU in the measured\n" +
-        "  path - timings in this bundle are diagnostic-mode timings.\n" +
+        "- verbose logging is NARROW by design: gnome-session's own debug\n" +
+        "  plus mutter backend/dbus/stack/sm/startup topics (verified topic\n" +
+        "  names; no gvfs/gtk/gio document domains, no per-frame render\n" +
+        "  topics). Individual lines can still contain window titles or\n" +
+        "  guest paths - the scrubber removes secret-shaped values only.\n" +
+        "  The 4 MiB rotation + 24 MiB export budget still cap size, so the\n" +
+        "  OLDEST lines can rotate out of chatty sessions. Verbose logging\n" +
+        "  costs some CPU in the measured path - timings in this bundle are\n" +
+        "  diagnostic-mode timings.\n" +
         "- the export reads app-owned files only; a guest process that\n" +
         "  stopped writing leaves its log silent at that point (that silence\n" +
         "  is itself evidence, read with the gate timeline and the sampler's\n" +

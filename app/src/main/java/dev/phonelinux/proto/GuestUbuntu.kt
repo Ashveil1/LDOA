@@ -93,14 +93,30 @@ object GuestUbuntu {
             # into glibc (>= 2.35), so no locale-gen or extra package.
             export DISPLAY=:0 HOME=/root XDG_RUNTIME_DIR=/tmp/xdg XDG_CURRENT_DESKTOP=ubuntu:GNOME XDG_SESSION_TYPE=x11 LANG=C.UTF-8 LC_ALL=C.UTF-8
             export PLINUX_SESSION=desktop
-            # Verbose glib/mutter messaging for this diagnostic build (user
-            # 2026-10-31: capture MORE logs). Bounded by the existing 4 MiB
-            # log rotation + the export budget; the OLDEST lines can rotate
-            # out of very chatty sessions - the sampler's per-sample UTC
-            # stamps anchor what survives. Observer effect: extra logging
-            # costs CPU in the measured path, so timings under this flag are
-            # diagnostic-mode timings, not clean-session timings.
-            export G_MESSAGES_DEBUG=all
+            # Verbose scope for this diagnostic build - NARROW channels only
+            # (2026-10-31 privacy review): G_MESSAGES_DEBUG=all would also
+            # enable gvfs/gtk/gio debug domains, which can carry document
+            # names, URIs and other guest-private content unrelated to
+            # session startup, so it is deliberately NOT set. gnome-shell's
+            # glib-domain debug stays off for the same reason (its domain
+            # coverage is not verified). Enabled instead:
+            # - GNOME_SESSION_DEBUG=1 (set below): session phase/app
+            #   transitions - this is what produced the GsmManager DEBUG
+            #   lines in existing bundles.
+            # - MUTTER_DEBUG with topic names verified against the vendored
+            #   mutter 46.2 source (src/core/util.c meta_debug_keys):
+            #   backend (backend/renderer setup), dbus (bus registration -
+            #   the org.gnome.Shell registration path), stack (window
+            #   map/stack changes), sm (session management), startup
+            #   (startup notification). No per-frame topics (render/frames):
+            #   per-frame spam would cost CPU in the measured path.
+            # Remaining exposure: individual lines CAN still contain window
+            #   titles or guest paths (e.g. stack traces name windows); the
+            #   export scrubber removes secret-shaped values only. Log size
+            #   stays capped by the 4 MiB rotation + export budget; verbose
+            #   output costs some CPU in the measured path, so timings here
+            #   are diagnostic-mode timings, not clean-session timings.
+            export MUTTER_DEBUG=backend,dbus,stack,sm,startup
             LAUNCH_ID=$(date +%s)
             echo "gnome-launch: launch id=${'$'}LAUNCH_ID"
             mkdir -p /tmp/xdg
@@ -201,7 +217,19 @@ object GuestUbuntu {
             # single-snapshot reuse is never claimed).
             ( PF=/tmp/ldoa-probes.log
               MAXB=131072
+              # Per-session coverage: if a PREVIOUS session already filled
+              # the file, rotate it aside (ONE generation, mirroring the
+              # app's log rotation) so this session's evidence is never
+              # starved by stale bytes. Bounded: current + prev, never more.
+              # The rotation is recorded in the new file, and a session that
+              # stops early writes an explicit "stopped: size cap" line -
+              # missing samples always have a stated reason, never silence.
+              if [ -f "${'$'}PF" ] && [ "${'$'}(wc -c < "${'$'}PF" 2>/dev/null || echo 0)" -gt 65536 ]; then
+                mv -f "${'$'}PF" /tmp/ldoa-probes.prev.log
+                ROTATED=yes
+              fi
               {
+              if [ "${'$'}ROTATED" = yes ]; then echo "=== ldoa-probes rotated: previous session's samples are in ldoa-probes.prev.log ==="; fi
               echo "=== ldoa-probes begin utc=${'$'}(date -u +%FT%TZ) launch=${'$'}LAUNCH_ID ==="
               for t in gdbus xwininfo xdpyinfo xrandr glxinfo pgrep pidof xprop; do
                 if command -v "${'$'}t" >/dev/null 2>&1; then echo "tool ${'$'}t=available"; else echo "tool ${'$'}t=UNAVAILABLE"; fi
