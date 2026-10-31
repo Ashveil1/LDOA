@@ -336,7 +336,9 @@ class MobileShellSpikeTest {
                 .takeIf { it.isFile }?.readText()?.trim()?.toIntOrNull()
                 ?.let { identityOf(it) }
             Log.i(TAG, "mobile bus identity: $busIdentity")
-            val left = killTreeVerified(rootPid!!, setOfNotNull(busIdentity))
+            val rootIdent = identityOf(rootPid!!)
+            assertTrue("proot root identity unreadable (scale=$scale)", rootIdent != null)
+            val left = killTreeVerified(rootIdent, setOfNotNull(busIdentity))
             assertTrue("session tree not empty after teardown (scale=$scale): $left", left.isEmpty())
             Log.i(TAG, "mobile round scale=$scale torn down clean")
         }
@@ -355,9 +357,14 @@ class MobileShellSpikeTest {
             Thread.sleep(20_000) // pcmanfm/xterm launch before capture
             val rootPid = hostPidOf(proc)
             assertTrue("gate2 " + cell + ": proot root unreadable", rootPid != null)
+            // Capture the root identity ONCE, at launch-confirmed time;
+            // the finally below passes THIS - never a re-derived pid.
+            val rootIdent = identityOf(rootPid!!)
+            assertTrue("gate2 " + cell + ": proot root identity unreadable", rootIdent != null)
             val busIdentity = File(rootfs, "root/.mobile-bus.pid")
                 .takeIf { it.isFile }?.readText()?.trim()?.toIntOrNull()
                 ?.let { identityOf(it) }
+            try {
             val tree = treeOf(rootPid!!, scanProc())
             val idents = tree.mapNotNull { identityOf(it) }
             val scriptId = tree.singleOrNull { procDetail(it)?.comm == "script" }?.let { identityOf(it) }
@@ -367,7 +374,13 @@ class MobileShellSpikeTest {
             val victim = if (cell == "forward") shellId!! else scriptId!!
             assertTrue("gate2 " + cell + ": victim identity stale before signal", signalVerified(victim, android.system.OsConstants.SIGKILL))
             val died = awaitProcessDeath(proc, 30_000)
-            assertTrue("gate2 " + cell + ": tracked proot root alive 30s after " + (if (cell == "forward") "session-shell" else "script") + " death", died)
+            // Victim truth (run 41212895379): forward kills script's
+            // DIRECT child sh (the pty session leader, sid==pid); the
+            // launch log's "session-shell" is THAT shell's child and
+            // survives by design of this cell. Name the real victim.
+            assertTrue("gate2 " + cell + ": tracked proot root alive 30s after SIGKILL to " +
+                (if (cell == "forward") "script's child session shell" else "the script layer") +
+                " (victim pid=" + victim.pid + ")", died)
             Thread.sleep(5_000) // SIGHUP cascade grace
             val orphans = (idents + listOfNotNull(busIdentity)).filter { id ->
                 val cur = identityOf(id.pid); cur != null && cur.start == id.start
@@ -379,6 +392,63 @@ class MobileShellSpikeTest {
                 for (o in orphans) { signalVerified(o, android.system.OsConstants.SIGKILL) }
             }
             assertTrue("gate2 " + cell + ": owned identities survived abnormal death - ORPHAN RISK MATERIALIZED: " + orphans.map { it.pid }, orphans.isEmpty())
+            } finally {
+                // Fail-closed AND clean: a FAILED cell must not leak its
+                // session until suite end (run 41212895379: the forward
+                // session's 9 tracees lived 113s past the assert, reaped
+                // only by the suite-end uid kill). After a PASS this is
+                // a verified no-op: no captured identity resolves alive.
+                // A cleanup failure must never mask the primary result
+                // (owner review): catch, log, let the primary propagate.
+                try {
+                    val leaked = killTreeVerified(rootIdent, setOfNotNull(busIdentity))
+                    if (leaked.isNotEmpty()) Log.e(TAG, "gate2 " + cell + ": finally reaped leaked identities: " + leaked)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "gate2 " + cell + ": finally cleanup failed - primary result preserved", t)
+                }
+            }
+        }
+
+        // REENTRY PROOF (user compat goal: startup/exit/reentry). The
+        // rounds prove relaunch after a CLEAN teardown; this proves a
+        // fresh session comes up and maps its windows AFTER the
+        // abnormal-death cells above - abrupt exit must not poison
+        // reentry. Teardown is asserted like a round's.
+        run {
+            val proc = GuestMobileShell.launchMobileSession(ctx, rootfs)
+            logOffset = awaitJwmAlive(proc, logFile, logOffset)
+            Thread.sleep(20_000) // pcmanfm/xterm launch before capture
+            var left: List<Int> = listOf(-1)
+            try {
+                val wins = GuestDesktop.guestShell(ctx, rootfs,
+                    "DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep -i -e xterm -e pcmanfm || true",
+                    extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"))
+                Log.i(TAG, "mobile windows (reentry): $wins")
+                // Presence in the tree list is NOT a mapping proof (owner
+                // review of 7c96b4a): assert the xterm window's actual
+                // MapState is IsViewable.
+                val wid = Regex("""(0x[0-9a-f]+) "xterm"""", RegexOption.IGNORE_CASE)
+                    .find(wins)?.groupValues?.get(1)
+                assertTrue("no xterm window id on :0 after abnormal-death reentry", wid != null)
+                val mapState = GuestDesktop.guestShell(ctx, rootfs,
+                    "DISPLAY=:0 xwininfo -id $wid 2>/dev/null | grep 'Map State' || true",
+                    extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"))
+                Log.i(TAG, "reentry xterm map state: $mapState")
+                assertTrue("xterm not IsViewable after abnormal-death reentry: $mapState", mapState.contains("IsViewable"))
+            } finally {
+                try {
+                    val rIdent = hostPidOf(proc)?.let { identityOf(it) }
+                    if (rIdent != null) {
+                        val reBus = File(rootfs, "root/.mobile-bus.pid")
+                            .takeIf { it.isFile }?.readText()?.trim()?.toIntOrNull()
+                            ?.let { identityOf(it) }
+                        left = killTreeVerified(rIdent, setOfNotNull(reBus))
+                    }
+                } catch (t: Throwable) {
+                    Log.e(TAG, "reentry cleanup failed - primary result preserved", t)
+                }
+            }
+            assertTrue("reentry teardown unproven (root identity unreadable) or residuals left: $left", left.isEmpty())
         }
         } finally {
             dumpLogTail("mobile-desktop.log", logFile)
@@ -387,6 +457,46 @@ class MobileShellSpikeTest {
         }
         MobileModeSettings.write(ctx, defaultPrefs)
         Log.i(TAG, "MOBILE-SHELL-OK sessions alive under ctty wrap, rendered at 3 scales, windows mapped, trees torn down clean, gate2 lifecycle/reentry/abnormal-death verified")
+    }
+
+    /** Root-reuse fixture (owner review of 7c96b4a): the walk must skip -
+     *  NO signals - when the captured root identity is dead or its pid was
+     *  recycled. (b) runs first, on the live tree, with a fabricated
+     *  starttime mismatch; (a) then kills the root and reaps with the
+     *  stale identity. Both times every child must be UNTOUCHED. Cleanup
+     *  reaps by the children's own identities (extras path), which carries
+     *  its own per-signal rechecks. */
+    @Test
+    fun killTreeVerifiedSkipsDeadOrReusedRoot(): Unit = runBlocking {
+        val p = Runtime.getRuntime().exec(arrayOf("sh", "-c", "sleep 300 & sleep 300; wait"))
+        val pid = hostPidOf(p)
+        assertTrue("fixture root pid unreadable", pid != null)
+        Thread.sleep(1_000) // children up
+        val ident = identityOf(pid!!)
+        assertTrue("fixture root identity unreadable", ident != null)
+        val kids = treeOf(pid, scanProc()).filter { it != pid }
+        assertTrue("fixture children missing", kids.size >= 2)
+        val kidIdents = kids.mapNotNull { identityOf(it) }.toSet()
+        try {
+            // (b) recycled root: live pid, wrong starttime -> skip.
+            val bogus = PIdent(pid, ident!!.start + "0", ident.uid)
+            val leftBogus = killTreeVerified(bogus, emptySet())
+            assertTrue("reused-root walk must reap nothing", leftBogus.isEmpty())
+            val aliveAfterBogus = kidIdents.count { id -> identityOf(id.pid)?.start == id.start }
+            assertTrue("reused-root walk signaled the tree", aliveAfterBogus == kidIdents.size && p.isAlive)
+            // (a) dead root: SIGKILL it ourselves, stale identity reap.
+            android.os.Process.sendSignal(pid, android.system.OsConstants.SIGKILL)
+            p.waitFor()
+            Thread.sleep(500)
+            val leftDead = killTreeVerified(ident, emptySet())
+            assertTrue("dead-root walk must reap nothing", leftDead.isEmpty())
+            val aliveAfterDead = kidIdents.count { id -> identityOf(id.pid)?.start == id.start }
+            assertTrue("dead-root walk signaled orphaned children", aliveAfterDead == kidIdents.size)
+        } finally {
+            val left = killTreeVerified(null, kidIdents.map { it as PIdent? }.toSet())
+            if (left.isNotEmpty()) Log.e(TAG, "fixture cleanup leftovers: " + left)
+            p.destroyForcibly()
+        }
     }
 
     /** Stream a bounded tail of a device-side log into logcat with explicit
@@ -520,11 +630,23 @@ class MobileShellSpikeTest {
      *  the identity captured at snapshot/launch time - a reused PID is
      *  never signaled. Leftovers fail the caller's assert: fail closed,
      *  never claim a clean kill we did not verify. */
-    private fun killTreeVerified(root: Int, extraIdents: Set<PIdent?> = emptySet()): List<Int> {
-        val all0 = scanProc()
+    private fun killTreeVerified(rootIdent: PIdent?, extraIdents: Set<PIdent?> = emptySet()): List<Int> {
         val idents = HashMap<Int, PIdent>()
-        for (pid in treeOf(root, all0)) identityOf(pid)?.let { idents[pid] = it }
+        if (rootIdent != null) {
+            // Root identity BEFORE the walk (owner review of 7c96b4a):
+            // treeOf follows CURRENT ppid links, so a root pid that died
+            // and got recycled would drag an unrelated tree into the kill
+            // set. Dead or (starttime, uid)-mismatched root -> skip the
+            // walk entirely, no signals from the root path at all.
+            val cur = identityOf(rootIdent.pid)
+            if (cur != null && cur.start == rootIdent.start && cur.uid == rootIdent.uid) {
+                for (pid in treeOf(rootIdent.pid, scanProc())) identityOf(pid)?.let { idents[pid] = it }
+            } else {
+                Log.i(TAG, "killTreeVerified: root pid=" + rootIdent.pid + " dead or reused - walk skipped, no root-path signals")
+            }
+        }
         for (e in extraIdents) if (e != null) idents[e.pid] = e
+        if (idents.isEmpty()) return emptyList()
         fun signal(sig: Int) {
             for (id in idents.values) {
                 val cur = identityOf(id.pid)

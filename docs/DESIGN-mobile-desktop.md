@@ -269,3 +269,31 @@ behaves differently - runtime script[15805] died at 10:47:09.648); probe
 window lookup must match the class tuple ("xterm" "XTerm"), not the window
 title; host pcmanfm (non-noble build) did not set _NET_WM_WINDOW_TYPE on its
 desktop window - do not read local pcmanfm behavior as product evidence.
+
+## Runtime lifecycle evidence, run 41212895379 (2026-10-31)
+
+All three scale rounds launched, mapped and tore down clean on the emulator
+(x86_64): probes xterm 1064x2116+5+30 (scale=1.0), 1068x1925+5+24 (0.75,
+exact match with the local Xvfb evidence), 1054x1894+5+60 (2.0); per-round
+killTreeVerified returned empty; the phantom trimmer never fired in that
+capture (zero "Trimming" events in 80,408 lines - one run's absence, not a
+universal guarantee). The X server survived every session (continuous reset
+cycles in xserver.log).
+
+The sole failure was the gate-2 forward cell: SIGKILL to script's child
+session shell (delivered 15:36:33.941, libcore "Sending signal" line)
+collapsed the script layer, but the proot root stayed pinned >30s by nine
+surviving tracees (inner session shell, jwm, pcmanfm, xterm, session
+dbus-daemon, gvfs daemons) - confirmed alive until the suite-end uid kill
+113s later. This is the orphan-pin mechanism --kill-on-exit (8445688)
+addresses: the flag reaps remaining tracees when the main tracee exits.
+
+Container service notes: pcmanfm logs AT-SPI ("org.a11y.Bus not provided")
+and GVFS ("remote volume monitor ... not supported", "modules directory is
+not accessible") warnings on every launch, plus a burst of GLib-GIO
+CRITICALs about GFileInfo attributes. These were NONFATAL IN THE OBSERVED
+CASES - windows mapped and trees reaped with them present - but their
+feature and performance impact is UNMEASURED; do not read this as "benign".
+Session dbus is per-launch (dbus-launch under proot, no systemd/logind);
+anything in the guest that assumes a full systemd/logind environment must
+degrade on its own absence path, not be assumed present.
