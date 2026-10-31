@@ -461,6 +461,40 @@ object GuestUbuntu {
               done
               [ "${'$'}PAINT" = 1 ] || echo "gnome-launch: no viewable window after ~65s launch=${'$'}LAUNCH_ID (guest-side map silence suspected, not proven)"
               echo "gnome-launch: x11-geometry=${'$'}(xdpyinfo 2>/dev/null | awk '/dimensions:/{print ${'$'}2}') surface-compare=pending"
+              # Renderer probe (bounded, non-blocking, opt-in install):
+              # glxinfo -B reports THIS PROBE CLIENT's GLX context vendor/
+              # device/renderer - it is NOT proof of mutter's active EGL
+              # renderer and cannot alone settle virgl vs llvmpipe for the
+              # compositor; correlate with mutter-side evidence before any
+              # active-renderer claim. Existing binary preferred; mesa-utils
+              # install only when LDOA_GLX_PROBE_INSTALL=1, time-boxed so a
+              # slow network can never delay the session (this subshell is
+              # already asynchronous to the launch and ends with the ~65s
+              # viewable-window poll - bounded lifetime).
+              if ! command -v glxinfo >/dev/null 2>&1 && [ "${'$'}LDOA_GLX_PROBE_INSTALL" = 1 ]; then
+                timeout 60 apt-get install -y mesa-utils >/dev/null 2>&1
+              fi
+              if command -v glxinfo >/dev/null 2>&1; then
+                echo "gnome-launch: renderer-probe-glx BEGIN launch=${'$'}LAUNCH_ID (probe-client GLX context, not mutter EGL - correlate before renderer claim)"
+                timeout 30 glxinfo -B 2>&1 | grep -E "Accelerated|Device:|OpenGL renderer string|OpenGL version string" | head -6 | while read -r L; do echo "gnome-launch: renderer-probe-glx launch=${'$'}LAUNCH_ID ${'$'}L"; done
+                echo "gnome-launch: renderer-probe-glx END launch=${'$'}LAUNCH_ID"
+              else
+                echo "gnome-launch: renderer-probe-glx SKIPPED launch=${'$'}LAUNCH_ID (no glxinfo; opt-in install via LDOA_GLX_PROBE_INSTALL=1) - renderer identity unverified this launch"
+              fi
+              # Component-roster evidence (read-only, bounded): which gsd
+              # plugins actually run after the gates - harvest checks
+              # gsd-rfkill/gsd-usb-protection absent and the rest healthy.
+              # Shell Mode + enabled-extensions tie the runtime back to the
+              # unchanged identity inputs (ubuntu:GNOME, ubuntu-dock).
+              echo "gnome-launch: gsd-roster launch=${'$'}LAUNCH_ID ${'$'}(ps -A -o comm= 2>/dev/null | grep '^gsd-' | sort | tr '\n' ' ')"
+              echo "gnome-launch: shell-mode launch=${'$'}LAUNCH_ID ${'$'}(timeout 4 gdbus call --session --timeout 2 --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Properties.Get org.gnome.Shell Mode 2>&1 | head -1)"
+              echo "gnome-launch: shell-extensions launch=${'$'}LAUNCH_ID ${'$'}(timeout 4 gsettings get org.gnome.shell enabled-extensions 2>&1 | head -1)"
+              if command -v glxinfo >/dev/null 2>&1; then
+                echo "gnome-launch: renderer-probe-glx BEGIN (probe-client GLX context, not mutter EGL - correlate before renderer claim)"
+                timeout 30 glxinfo -B 2>&1 | grep -E "Accelerated|Device:|OpenGL renderer string|OpenGL version string" | head -6 | while read -r L; do echo "gnome-launch: renderer-probe-glx ${'$'}L"; done
+              else
+                echo "gnome-launch: renderer-probe-glx SKIPPED (no glxinfo; opt-in install via LDOA_GLX_PROBE_INSTALL=1) - renderer identity unverified this launch"
+              fi
             ) &
             # Diag (exit=1 root-cause): gnome-session's g_debug output names the
             # phase/app transitions and the acceleration-check verdicts; the
@@ -488,6 +522,88 @@ object GuestUbuntu {
             echo "gnome-launch: ice-link-probe home=${'$'}ICEHOME tmpxdg=${'$'}ICETMP"
             echo "gnome-launch: ice-pkg $(dpkg-query -W -f='${'$'}{Package}=${'$'}{Version} ' libice6 gnome-session 2>&1)"
             export ICEAUTHORITY=/tmp/xdg/ICEauthority
+            # BOUNDED + REVERSIBLE crash-component exclusion, two INDEPENDENT
+            # gates: gateRfkill and gateUsbProtection. Evidence (corroborated,
+            # chain not fully proven): POCO phone log 2026-10-30 launch
+            # 1793346581 shows gsd-rfkill SIGABRT (rfkill udev device has no
+            # device file under proot) and gsd-usb-protection SIGSEGV; both
+            # .desktop files ship X-GNOME-AutoRestart=true, supporting the
+            # crash-LOOP mechanism that ended in gnome-session-failed - the
+            # exact escalation chain (required-component vs autorestart) is
+            # NOT proven by that log alone. Grounded in the actual Noble
+            # packages (not memory): ubuntu-session_46.0-1ubuntu4
+            # ubuntu.session RequiredComponents (Rfkill present; UsbProtection
+            # absent) and gnome-settings-daemon_46.0-1ubuntu1.24.04.1
+            # /etc/xdg/autostart/org.gnome.SettingsDaemon.{Rfkill,UsbProtection}.desktop.
+            # LOOKUP grounded in gnome-session 46.0 source (gsm-session-fill.c
+            # find_valid_session_keyfile): the session file is searched in
+            # user-config, system-config, then system-data dirs in order -
+            # /usr/local/share precedes /usr/share in the glib default
+            # XDG_DATA_DIRS (this script never sets XDG_DATA_DIRS), so a
+            # same-name file under /usr/local/share/gnome-session/sessions/
+            # wins WITHOUT touching the stock file. IDENTITY PRESERVED BY
+            # CONSTRUCTION: the session NAME stays "ubuntu", and every
+            # identity-relevant input (name, env) is byte-identical to the
+            # dock/yaru-pixel-verified configuration - XDG_CURRENT_DESKTOP=
+            # ubuntu:GNOME is exported by this script itself above;
+            # DESKTOP_SESSION/XDG_SESSION_DESKTOP/GNOME_SHELL_SESSION_MODE
+            # derivation, OnlyShowIn matching, dock and theme behavior cannot
+            # change from a RequiredComponents-only diff.
+            # OWNERSHIP: nothing pre-existing is overwritten. The marker alone
+            # never authorizes a write: an existing file must ALSO match its
+            # last .ldoa-manifest sha256, otherwise it is someone else's
+            # edit and is preserved (gate BLOCKED, both hashes logged).
+            # Revert = remove manifest-listed ldoa-managed files only.
+            ldoa_sha() { sha256sum "${'$'}1" 2>/dev/null | awk '{print ${'$'}1}'; }
+            ldoa_manifest_sha() { [ -f "${'$'}2" ] && awk -v p="${'$'}1" '${'$'}1==p {s=${'$'}2} END {if (s!="") print s}' "${'$'}2"; }
+            # ldoa_put_managed PATH MANIFEST LABEL - content on stdin
+            ldoa_put_managed() {
+              if [ -f "${'$'}1" ]; then
+                if ! grep -q '^# ldoa-managed' "${'$'}1" 2>/dev/null; then
+                  echo "gnome-launch: ${'$'}3 BLOCKED - ${'$'}1 exists, not ldoa-managed (sha256=${'$'}(ldoa_sha "${'$'}1")) - left untouched"
+                  return 1
+                fi
+                MS=${'$'}(ldoa_manifest_sha "${'$'}1" "${'$'}2"); CS=${'$'}(ldoa_sha "${'$'}1")
+                if [ -z "${'$'}MS" ] || [ "${'$'}MS" != "${'$'}CS" ]; then
+                  echo "gnome-launch: ${'$'}3 BLOCKED - ${'$'}1 ldoa-managed but changed since manifest (manifest=${'$'}{MS:-none} current=${'$'}CS) - preserving unknown modified content"
+                  return 1
+                fi
+              fi
+              if ! cat > "${'$'}1" 2>/dev/null || ! grep -q '^# ldoa-managed' "${'$'}1" 2>/dev/null; then
+                rm -f "${'$'}1"
+                echo "gnome-launch: ${'$'}3 WRITE-FAILED - ${'$'}1 removed, stock/defaults in effect"
+                return 1
+              fi
+              echo "${'$'}1 ${'$'}(ldoa_sha "${'$'}1")" >> "${'$'}2"
+              return 0
+            }
+            LDOA_SESS_DIR=/usr/local/share/gnome-session/sessions
+            LDOA_AUTO_DIR=/root/.config/autostart
+            SESS_STATE=stock
+            if [ -f /usr/share/gnome-session/sessions/ubuntu.session ]; then
+              mkdir -p "${'$'}LDOA_SESS_DIR" 2>/dev/null
+              if { echo '# ldoa-managed: stock ubuntu.session minus Rfkill in RequiredComponents (revert: remove manifest-listed file)'
+                   sed 's/;org.gnome.SettingsDaemon.Rfkill//' /usr/share/gnome-session/sessions/ubuntu.session; } | \
+                   ldoa_put_managed "${'$'}LDOA_SESS_DIR/ubuntu.session" "${'$'}LDOA_SESS_DIR/.ldoa-manifest" "gateRfkill session-override" \
+                 && grep -q 'RequiredComponents=org.gnome.Shell;org.gnome.SettingsDaemon.A11ySettings' "${'$'}LDOA_SESS_DIR/ubuntu.session" \
+                 && ! grep -q 'SettingsDaemon.Rfkill' "${'$'}LDOA_SESS_DIR/ubuntu.session"; then
+                SESS_STATE=ldoa-minus-rfkill
+                echo "gnome-launch: gateRfkill session-override ACTIVE - ${'$'}LDOA_SESS_DIR/ubuntu.session (name stays ubuntu; only Rfkill removed; stock untouched)"
+              else
+                [ "${'$'}SESS_STATE" = stock ] && echo "gnome-launch: gateRfkill session-override INACTIVE - stock session in effect"
+              fi
+            else
+              echo "gnome-launch: gateRfkill stock ubuntu.session MISSING - session override skipped"
+            fi
+            # Autostart masks, one independent verdict per component.
+            mkdir -p "${'$'}LDOA_AUTO_DIR" 2>/dev/null
+            for A in Rfkill UsbProtection; do
+              if printf '# ldoa-managed: Hidden mask for gsd %s (revert: remove manifest-listed file)\n[Desktop Entry]\nType=Application\nName=org.gnome.SettingsDaemon.%s (ldoa-disabled)\nHidden=true\n' "${'$'}A" "${'$'}A" | \
+                 ldoa_put_managed "${'$'}LDOA_AUTO_DIR/org.gnome.SettingsDaemon.${'$'}A.desktop" "${'$'}LDOA_AUTO_DIR/.ldoa-manifest" "gate${'$'}A mask"; then
+                echo "gnome-launch: gate${'$'}A mask ACTIVE (Hidden=true; stock /etc/xdg file untouched)"
+              fi
+            done
+            echo "gnome-launch: exclusion-state session=${'$'}SESS_STATE XDG_DATA_DIRS='${'$'}XDG_DATA_DIRS' (unset = glib default, /usr/local/share before /usr/share)"
             echo "gnome-launch: trying gnome-session --session=ubuntu (top bar + ubuntu-dock + yaru)"
             # Syscall-level ICE evidence (run 41192498450): the link probe
             # proved link(2) works from the shell in BOTH candidate dirs,
