@@ -372,7 +372,9 @@ class MobileShellSpikeTest {
             assertTrue("gate2 " + cell + ": script identity missing", scriptId != null)
             assertTrue("gate2 " + cell + ": session-shell identity missing", shellId != null)
             val victim = if (cell == "forward") shellId!! else scriptId!!
+            val tSignal = System.currentTimeMillis()
             assertTrue("gate2 " + cell + ": victim identity stale before signal", signalVerified(victim, android.system.OsConstants.SIGKILL))
+            Log.i(TAG, "gate2 " + cell + ": victim pid=" + victim.pid + " SIGKILL verified-sent at wall=" + tSignal)
             val died = awaitProcessDeath(proc, 30_000)
             // Victim truth (run 41212895379): forward kills script's
             // DIRECT child sh (the pty session leader, sid==pid); the
@@ -381,6 +383,7 @@ class MobileShellSpikeTest {
             assertTrue("gate2 " + cell + ": tracked proot root alive 30s after SIGKILL to " +
                 (if (cell == "forward") "script's child session shell" else "the script layer") +
                 " (victim pid=" + victim.pid + ")", died)
+            Log.i(TAG, "gate2 " + cell + ": root death observed after " + (System.currentTimeMillis() - tSignal) + "ms")
             Thread.sleep(5_000) // SIGHUP cascade grace
             val orphans = (idents + listOfNotNull(busIdentity)).filter { id ->
                 val cur = identityOf(id.pid); cur != null && cur.start == id.start
@@ -402,6 +405,7 @@ class MobileShellSpikeTest {
                 // (owner review): catch, log, let the primary propagate.
                 try {
                     val leaked = killTreeVerified(rootIdent, setOfNotNull(busIdentity))
+                    if (leaked.isEmpty()) Log.i(TAG, "gate2 " + cell + ": finally cleanup no-op - all captured identities already reaped")
                     if (leaked.isNotEmpty()) Log.e(TAG, "gate2 " + cell + ": finally reaped leaked identities: " + leaked)
                 } catch (t: Throwable) {
                     Log.e(TAG, "gate2 " + cell + ": finally cleanup failed - primary result preserved", t)
@@ -497,6 +501,440 @@ class MobileShellSpikeTest {
             if (left.isNotEmpty()) Log.e(TAG, "fixture cleanup leftovers: " + left)
             p.destroyForcibly()
         }
+    }
+
+    /** GATE-3 input outcome (proposal (c), scope-qualified 2026-11-01):
+     *  the two-finger wheel gesture is proven END TO END in the custom
+     *  desktop - delivery AND legacy-client outcome - closing the
+     *  "xev delivery alone != scroll" gap (GNOME harness arm8 is
+     *  delivery-only by design; arm6 is pixel-logged, never asserted).
+     *  Sub-cell A (delivery control): a tagged held xev window records
+     *  which button (4 = scrollback, 5 = forward) each drag sign emits -
+     *  delivery asserted AND the outcome cell's direction calibrated
+     *  in-run, never assumed. Sub-cell B (outcome): a test-owned xterm
+     *  (-sl 2000 explicit scrollback, -T ldoa-scrolltest) filled with a
+     *  deterministic NON-PERIODIC ASCII intensity fingerprint
+     *  (k(i) = ((i*2654435761+12345) mod 2^31) mod 41 bar glyphs +
+     *  literal index) is scrolled with the calibrated drag; in-process
+     *  Bitmap row-luminance correlation over a bounded ROI must show the
+     *  content shifted down by >= 1 measured text line, with ambiguity
+     *  REJECTED (corr >= 0.95 AND margin >= 0.03 over every candidate
+     *  outside +-lh/2, else honest failure - periodic peaks collapsed the
+     *  margin to ~0 in local validation 2026-11-01, which is why the
+     *  fingerprint is non-periodic). A no-gesture negative control must
+     *  pass first (shift <= 2px) or the capture is declared unstable and
+     *  the test fails instead of asserting on noise. xev is fully torn
+     *  down (window gone) before B so nothing occludes the measured ROI.
+     *  Isolated session lifetime; finally reaps by captured identities.
+     *  Emulator-only: no smoothness/FPS/ARM/device claim. */
+    @Test
+    fun mobileTwoFingerScrollOutcome(): Unit = runBlocking {
+        val instr = InstrumentationRegistry.getInstrumentation()
+        val ctx = instr.targetContext
+        val device = UiDevice.getInstance(instr)
+        val d = Distros.UBUNTU
+        val installer = DistroInstaller(ctx)
+        if (!installer.isInstalled(d)) {
+            var last: InstallState = InstallState.NotInstalled
+            val ok = installer.install(d) { last = it }
+            assertTrue("ubuntu install failed at state=$last", ok)
+        }
+        assertTrue(installer.isInstalled(d))
+        val rootfs = installer.rootfsDir(d)
+        if (!GuestMobileShell.hasMobileShell(rootfs)) {
+            val r = GuestMobileShell.provisionMobileShell(ctx, rootfs)
+            Log.i(TAG, "scroll: provision exit=${r.exitCode}")
+            assertTrue("mobile provision failed exit=${r.exitCode}", r.exitCode == 0)
+        }
+        XServer.start(ctx) // idempotent: a live server is reused
+        val xtermBind = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix")
+        val defaultPrefs = MobileModeSettings.read(ctx)
+        val logFile = File(ctx.filesDir, "mobile-desktop.log")
+        var logOffset = if (logFile.isFile) logFile.length() else 0L
+
+        fun guest(cmd: String): String = GuestDesktop.guestShell(ctx, rootfs, cmd, extraBinds = xtermBind)
+
+        // X readiness (same xset q semantics as the suite method).
+        val xDeadline = System.currentTimeMillis() + 90_000
+        var xUp = false
+        while (System.currentTimeMillis() < xDeadline) {
+            if (GuestDesktop.guestOk(ctx, rootfs, "DISPLAY=:0 xset q")) { xUp = true; break }
+            Thread.sleep(2_000)
+        }
+        assertTrue("scroll: X :0 never became ready", xUp)
+
+        MobileModeSettings.write(ctx, defaultPrefs.copy(scale = 1.0f, windowMode = "maximized"))
+        val proc = GuestMobileShell.launchMobileSession(ctx, rootfs)
+        logOffset = awaitJwmAlive(proc, logFile, logOffset)
+        Thread.sleep(20_000) // session clients map
+        val rootPid = hostPidOf(proc)
+        assertTrue("scroll: proot root unreadable", rootPid != null)
+        val rootIdent = identityOf(rootPid!!)
+        assertTrue("scroll: proot root identity unreadable", rootIdent != null)
+        val busIdentity = File(rootfs, "root/.mobile-bus.pid")
+            .takeIf { it.isFile }?.readText()?.trim()?.toIntOrNull()
+            ?.let { identityOf(it) }
+        ctx.startActivity(Intent(ctx, com.termux.x11.MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        Thread.sleep(15_000)
+        Shot.dismissSystemDialogs(device)
+
+        var xevProc: Process? = null
+        var xtermProc: Process? = null
+        val heldIdents = HashSet<PIdent?>()
+        val xevLog = File(ctx.filesDir, "scroll-xev.log")
+        val xtermLog = File(ctx.filesDir, "scroll-xterm.log")
+        try {
+            // device<->guest affine map from two pointer probes (pattern
+            // proven in the GNOME harness). Probes run BEFORE the test
+            // xterm maps so the 1px micro-drag cannot touch the measured
+            // window's content.
+            fun probeX(devX: Int, devY: Int): Pair<Int, Int>? {
+                device.swipe(devX, devY, devX + 1, devY, 5)
+                Thread.sleep(600)
+                val out = guest("DISPLAY=:0 xdotool getmouselocation --shell 2>/dev/null || true")
+                val x = Regex("X=(-?\\d+)").find(out)?.groupValues?.get(1)?.toIntOrNull()
+                val y = Regex("Y=(-?\\d+)").find(out)?.groupValues?.get(1)?.toIntOrNull()
+                return if (x != null && y != null) Pair(x, y) else null
+            }
+            val p1 = probeX(300, 1200)
+            val p2 = probeX(700, 1700)
+            Log.i(TAG, "scroll: mapping probes dev(300,1200)->" + p1 + " dev(700,1700)->" + p2)
+            assertTrue("scroll: mapping probes failed", p1 != null && p2 != null)
+            assertTrue("scroll: probe delta too small for a stable map",
+                Math.abs(p2!!.first - p1!!.first) >= 10 && Math.abs(p2.second - p1.second) >= 10)
+            fun guestToDevice(gx: Double, gy: Double): Pair<Int, Int> {
+                val a = p1!!; val b = p2!!
+                val ax = (700 - 300).toDouble() / (b.first - a.first)
+                val bx = 300 - ax * a.first
+                val ay = (1700 - 1200).toDouble() / (b.second - a.second)
+                val by = 1200 - ay * a.second
+                return Pair((ax * gx + bx).toInt(), (ay * gy + by).toInt())
+            }
+
+            // ---- SUB-CELL A: wheel DELIVERY + direction calibration
+            xevLog.delete()
+            xevProc = heldGuest(listOf("/usr/bin/xev", "-event", "button"), xevLog)
+            heldIdents.add(hostPidOf(xevProc!!)?.let { identityOf(it) })
+            var xev: WinGeom? = null
+            val xevDeadline = System.currentTimeMillis() + 60_000
+            while (System.currentTimeMillis() < xevDeadline && xev == null) {
+                xev = windowGeom(guest("DISPLAY=:0 xwininfo -root -tree 2>/dev/null || true"), "Event Tester")
+                if (xev == null) Thread.sleep(2_500)
+            }
+            assertTrue("scroll: xev window never mapped", xev != null)
+            Log.i(TAG, "scroll: xev window " + xev)
+            val xevG = xev!!
+            assertTrue("scroll: xev window too small to target: " + xevG, xevG.w > 60 && xevG.h > 60)
+            val xevCenter = guestToDevice(xevG.x + xevG.w / 2.0, xevG.y + xevG.h / 2.0)
+            tap(instr, xevCenter.first.toFloat(), xevCenter.second.toFloat())
+            Thread.sleep(1_000)
+            var delivered = 0
+            var wheelUpDySign = 0
+            for (dySign in listOf(1, -1)) {
+                val before = if (xevLog.isFile) xevLog.readText() else ""
+                twoFingerDrag(instr, xevCenter.first.toFloat(), xevCenter.second.toFloat(), 300f * dySign)
+                Thread.sleep(1_500)
+                val after = if (xevLog.isFile) xevLog.readText() else ""
+                val chunk = after.removePrefix(before)
+                val p4 = Regex("ButtonPress event[^\\n]*button 4[^0-9]").findAll(chunk).count()
+                val p5 = Regex("ButtonPress event[^\\n]*button 5[^0-9]").findAll(chunk).count()
+                delivered += p4 + p5
+                Log.i(TAG, "scroll: xev drag dySign=" + dySign + " button4=" + p4 + " button5=" + p5)
+                if (p4 > 0 && wheelUpDySign == 0) wheelUpDySign = dySign
+            }
+            Shot.save("scroll-a-xev")
+            assertTrue("scroll: no wheel button delivered to xev for either drag sign", delivered > 0)
+            assertTrue("scroll: no drag sign produced button 4 (scrollback) - outcome impossible", wheelUpDySign != 0)
+            xevProc!!.destroy()
+            Thread.sleep(1_000)
+            val xevGoneDeadline = System.currentTimeMillis() + 15_000
+            var xevGone = false
+            while (System.currentTimeMillis() < xevGoneDeadline) {
+                if (windowGeom(guest("DISPLAY=:0 xwininfo -root -tree 2>/dev/null || true"), "Event Tester") == null) {
+                    xevGone = true; break
+                }
+                Thread.sleep(2_000)
+            }
+            assertTrue("scroll: xev window survived teardown - occlusion risk for the outcome ROI", xevGone)
+            Log.i(TAG, "scroll: delivery control OK (delivered=" + delivered + ", wheelUpDySign=" + wheelUpDySign + "), xev reaped and unmapped")
+
+            // ---- SUB-CELL B: scroll OUTCOME on a test-owned legacy client
+            xtermLog.delete()
+            // dash-safe fingerprint loop: no ${'$'} inside $(( )); bar via
+            // a builtin-only char loop (no fork per line under proot).
+            val printLoop = "i=0; while [ ${'$'}i -lt 240 ]; do k=${'$'}(( ( (i * 2654435761 + 12345) % 2147483648 ) % 41 )); " +
+                "printf 'M%03d ' ${'$'}i; j=0; while [ ${'$'}j -lt ${'$'}k ]; do printf '#'; j=${'$'}((j+1)); done; " +
+                "printf '\\n'; i=${'$'}((i+1)); done; exec /bin/sh"
+            xtermProc = heldGuest(listOf("/usr/bin/xterm", "-sl", "2000",
+                "-fa", "DejaVu Sans Mono", "-fs", "13",
+                "-T", "ldoa-scrolltest", "-e", "/bin/sh", "-c", printLoop), xtermLog)
+            heldIdents.add(hostPidOf(xtermProc!!)?.let { identityOf(it) })
+            var xt: WinGeom? = null
+            val xtDeadline = System.currentTimeMillis() + 60_000
+            while (System.currentTimeMillis() < xtDeadline && xt == null) {
+                xt = windowGeom(guest("DISPLAY=:0 xwininfo -root -tree 2>/dev/null || true"), "ldoa-scrolltest")
+                if (xt == null) Thread.sleep(2_500)
+            }
+            assertTrue("scroll: test xterm never mapped", xt != null)
+            val mapState = guest("DISPLAY=:0 xwininfo -id " + xt!!.id + " 2>/dev/null | grep 'Map State' || true")
+            Log.i(TAG, "scroll: test xterm " + xt + " mapState=" + mapState.trim())
+            assertTrue("scroll: test xterm not IsViewable: " + mapState, mapState.contains("IsViewable"))
+            val xtG = xt!!
+            assertTrue("scroll: test xterm geometry implausible (expected maximized): " + xtG,
+                xtG.w > 400 && xtG.h > 800)
+            Thread.sleep(10_000) // fingerprint print settles
+
+            // Content ROI (guest coords): inside the client window, inset
+            // 8px, bottom 196px excluded (prompt + cursor rows; lh <= 120).
+            val roiX = xtG.x + 8; val roiY = xtG.y + 8
+            val roiW = xtG.w - 16; val roiH = xtG.h - 196
+            assertTrue("scroll: ROI degenerate", roiW > 200 && roiH > 400)
+            val tl = guestToDevice(roiX.toDouble(), roiY.toDouble())
+            val br = guestToDevice((roiX + roiW).toDouble(), (roiY + roiH).toDouble())
+
+            fun shotRoi(): Pair<DoubleArray, android.graphics.Bitmap> {
+                val bmp = instr.uiAutomation.takeScreenshot()
+                    ?: throw AssertionError("scroll: takeScreenshot null")
+                val x0 = tl.first.coerceIn(0, bmp.width - 1)
+                val y0 = tl.second.coerceIn(0, bmp.height - 1)
+                val x1 = br.first.coerceIn(x0 + 1, bmp.width)
+                val y1 = br.second.coerceIn(y0 + 1, bmp.height)
+                assertTrue("scroll: ROI outside screenshot bounds", x1 - x0 > 150 && y1 - y0 > 300)
+                return Pair(rowBrightness(bmp, x0, y0, x1 - x0, y1 - y0), bmp)
+            }
+
+            val (pre, bmpPre) = shotRoi()
+            Thread.sleep(3_000)
+            val (pre2, bmpPre2) = shotRoi()
+            val lhEst = estLineHeight(pre)
+            Log.i(TAG, "scroll: measured line height " + lhEst + " device px")
+            assertTrue("scroll: line height unmeasurable or implausible: " + lhEst, lhEst != null && lhEst in 10..120)
+            val lh = lhEst!!
+            val ctrl = measureScroll(pre, pre2, lh, 4 * lh)
+            Log.i(TAG, "scroll: negative control " + ctrl)
+            assertTrue("scroll: capture UNSTABLE without gesture - outcome unprovable: " + ctrl,
+                ctrl.status == "ACCEPT" && ctrl.shiftPx <= 2)
+            Shot.save("scroll-b-pre")
+
+            val xtCenter = guestToDevice(roiX + roiW / 2.0, roiY + roiH / 2.0)
+            tap(instr, xtCenter.first.toFloat(), xtCenter.second.toFloat())
+            Thread.sleep(600)
+            twoFingerDrag(instr, xtCenter.first.toFloat(), xtCenter.second.toFloat(), 300f * wheelUpDySign)
+            Thread.sleep(2_500)
+            Shot.save("scroll-b-post")
+            val (post, bmpPost) = shotRoi()
+            val m = measureScroll(pre, post, lh, 12 * lh)
+            Log.i(TAG, "scroll: outcome " + m + " (lh=" + lh + "px, ~" + (m.shiftPx / lh) + " lines)")
+            bmpPre.recycle(); bmpPre2.recycle(); bmpPost.recycle()
+            assertTrue("scroll: outcome correlation rejected honestly (no largest-peak acceptance): " + m,
+                m.status == "ACCEPT")
+            assertTrue("scroll: no scrollback movement - shift " + m.shiftPx + "px < 1 line (" + lh + "px)",
+                m.shiftPx >= lh)
+            assertTrue("scroll: implausible shift " + m.shiftPx + "px > 24 lines", m.shiftPx <= 24 * lh)
+            Log.i(TAG, "SCROLL-OUTCOME-OK wheel delivered to legacy client (xev button4/5) " +
+                "and xterm scrollback content moved ~" + (m.shiftPx / lh) + " lines " +
+                "(CI emulator only - no smoothness/FPS/ARM claim)")
+        } finally {
+            // Fail-closed AND clean: a failed cell must not leak its
+            // session; a cleanup failure must not mask the primary result.
+            try { xevProc?.destroy() } catch (t: Throwable) { }
+            try { xtermProc?.destroy() } catch (t: Throwable) { }
+            try {
+                val left = killTreeVerified(rootIdent, heldIdents + setOfNotNull(busIdentity))
+                if (left.isEmpty()) Log.i(TAG, "scroll: finally cleanup no-op - all captured identities already reaped")
+                else Log.e(TAG, "scroll: finally reaped leaked identities: " + left)
+            } catch (t: Throwable) {
+                Log.e(TAG, "scroll: finally cleanup failed - primary result preserved", t)
+            }
+            try { dumpLogTail("scroll-xev.log", xevLog, 16384) } catch (t: Throwable) { }
+            try { dumpLogTail("scroll-xterm.log", xtermLog, 16384) } catch (t: Throwable) { }
+            MobileModeSettings.write(ctx, defaultPrefs)
+        }
+    }
+
+    /** Held guest process for test-owned X clients (xev control, the
+     *  scrolltest xterm): its own proot root with --kill-on-exit so
+     *  destroy() reaps the whole tree, PLINUX_SESSION tag for the tagged
+     *  sweep, output to a device-side log file. The caller captures the
+     *  root identity for the finally sweep. */
+    private fun heldGuest(cmd: List<String>, log: File): Process {
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val nd = ctx.applicationInfo.nativeLibraryDir
+        val rootfs = DistroInstaller(ctx).rootfsDir(Distros.UBUNTU)
+        val pb = ProcessBuilder(listOf(
+            File(nd, "libproot.so").absolutePath, "--link2symlink", "--kill-on-exit", "-0",
+            "-r", rootfs.absolutePath,
+            "-b", "/dev", "-b", "/proc", "-b", "/sys",
+            "-b", XServer.socketDir(ctx).absolutePath + ":/tmp/.X11-unix",
+            "-w", "/root") + cmd)
+        pb.environment().putAll(mapOf(
+            "PROOT_LOADER" to File(nd, "libproot_loader.so").absolutePath,
+            "PROOT_LOADER_32" to File(nd, "libproot_loader32.so").absolutePath,
+            "LD_LIBRARY_PATH" to nd,
+            "HOME" to "/root",
+            "DISPLAY" to ":0",
+            "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "PROOT_TMP_DIR" to Proot.prootTmpDir(ctx).absolutePath,
+            "TMPDIR" to "/tmp",
+            "PLINUX_SESSION" to "desktop"))
+        pb.redirectErrorStream(true)
+        pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))
+        return pb.start()
+    }
+
+    private class WinGeom(val id: String, val x: Int, val y: Int, val w: Int, val h: Int) {
+        override fun toString(): String = id + " " + w + "x" + h + "+" + x + "+" + y
+    }
+
+    /** Named CLIENT window geometry from xwininfo -root -tree: the tree
+     *  line is `id "name": ("Class" "class")  WxH+relX+relY  +absX+absY`;
+     *  the ABSOLUTE pair is used. */
+    private fun windowGeom(tree: String, title: String): WinGeom? {
+        val re = Regex("(0x[0-9a-fA-F]+) \"[^\"]*" + Regex.escape(title) + "[^\"]*\": \\([^)]*\\)\\s+" +
+            "(\\d+)x(\\d+)[+-](\\d+)[+-](\\d+)\\s+[+-](\\d+)[+-](\\d+)")
+        val m = re.find(tree) ?: return null
+        val g = m.groupValues
+        return WinGeom(g[1], g[6].toInt(), g[7].toInt(), g[2].toInt(), g[3].toInt())
+    }
+
+    /** Mean luminance per pixel row of a Bitmap rect (columns subsampled
+     *  every 3 px). */
+    private fun rowBrightness(bmp: android.graphics.Bitmap, x: Int, y: Int, w: Int, h: Int, colStep: Int = 3): DoubleArray {
+        val px = IntArray(w * h)
+        bmp.getPixels(px, 0, w, x, y, w, h)
+        val out = DoubleArray(h)
+        for (r in 0 until h) {
+            var sum = 0.0; var n = 0
+            var c = 0
+            while (c < w) {
+                val v = px[r * w + c]
+                sum += 0.2126 * ((v shr 16) and 0xFF) + 0.7152 * ((v shr 8) and 0xFF) + 0.0722 * (v and 0xFF)
+                n++; c += colStep
+            }
+            out[r] = sum / n
+        }
+        return out
+    }
+
+    /** Median gap between strong row-luminance edges = text line height,
+     *  measured from the actual frame (never hardcoded). */
+    private fun estLineHeight(d: DoubleArray): Int? {
+        val mean = d.average()
+        val sd = Math.sqrt(d.map { (it - mean) * (it - mean) }.average())
+        if (sd <= 0) return null
+        val edges = ArrayList<Int>()
+        for (i in 0 until d.size - 1) if (Math.abs(d[i + 1] - d[i]) > 0.5 * sd) edges.add(i)
+        if (edges.size < 4) return null
+        val gaps = (1 until edges.size).map { edges[it] - edges[it - 1] }.filter { it in 10..84 }.sorted()
+        return if (gaps.isEmpty()) null else gaps[gaps.size / 2]
+    }
+
+    private class ScrollMeasure(val status: String, val shiftPx: Int, val corr: Double, val margin: Double) {
+        override fun toString(): String = "status=" + status + " shiftPx=" + shiftPx +
+            " corr=" + "%.4f".format(corr) + " margin=" + "%.4f".format(margin)
+    }
+
+    /** Bounded-window Pearson shift: post = pre shifted DOWN by s px
+     *  (scrollback content moves down in view). ACCEPT needs corr >= 0.95
+     *  AND margin >= 0.03 over every candidate outside +-lh/2 of the
+     *  winner; LOWCORR/AMBIGUOUS are honest failures, never a default
+     *  acceptance of the largest peak. Locally validated 2026-11-01
+     *  against zero/known 2/3/7-line/negative shifts, an unrelated frame,
+     *  a cursor-blink frame and 2x noise: all recovered within 2px or
+     *  rejected; periodic content correctly lands AMBIGUOUS. */
+    private fun measureScroll(pre: DoubleArray, post: DoubleArray, lhPx: Int, maxShiftPx: Int): ScrollMeasure {
+        val h = minOf(pre.size, post.size)
+        val maxS = minOf(maxShiftPx, h / 2)
+        fun corrAt(s: Int): Double {
+            val n = h - s
+            var ma = 0.0; var mb = 0.0
+            for (i in 0 until n) { ma += pre[i]; mb += post[s + i] }
+            ma /= n; mb /= n
+            var sab = 0.0; var saa = 0.0; var sbb = 0.0
+            for (i in 0 until n) {
+                val da = pre[i] - ma; val db = post[s + i] - mb
+                sab += da * db; saa += da * da; sbb += db * db
+            }
+            val dv = Math.sqrt(saa * sbb)
+            return if (dv > 0) sab / dv else 0.0
+        }
+        var best = 0; var cb = Double.NEGATIVE_INFINITY
+        for (s in 0..maxS) {
+            val c = corrAt(s)
+            if (c > cb) { cb = c; best = s }
+        }
+        var second = Double.NEGATIVE_INFINITY
+        val lo = Math.max(0, best - lhPx / 2); val hi = Math.min(maxS, best + lhPx / 2)
+        for (s in 0..maxS) {
+            if (s in lo..hi) continue
+            val c = corrAt(s)
+            if (c > second) second = c
+        }
+        val margin = if (second == Double.NEGATIVE_INFINITY) cb else cb - second
+        val status = when {
+            cb < 0.95 -> "LOWCORR"
+            margin < 0.03 -> "AMBIGUOUS"
+            else -> "ACCEPT"
+        }
+        return ScrollMeasure(status, best, cb, margin)
+    }
+
+    // ---- MotionEvent helpers (multi-pointer sequences; same mechanism
+    // as the GNOME harness: Instrumentation.sendPointerSync) ----
+
+    private fun mProps(id: Int) = android.view.MotionEvent.PointerProperties().apply {
+        this.id = id; toolType = android.view.MotionEvent.TOOL_TYPE_FINGER
+    }
+
+    private fun mCoords(x: Float, y: Float) = android.view.MotionEvent.PointerCoords().apply {
+        this.x = x; this.y = y; pressure = 1f; size = 1f
+    }
+
+    private fun ev1(down: Long, action: Int, x: Float, y: Float) = android.view.MotionEvent.obtain(down,
+        android.os.SystemClock.uptimeMillis(), action, 1,
+        arrayOf(mProps(0)), arrayOf(mCoords(x, y)), 0, 0, 1f, 1f, 0, 0,
+        android.view.InputDevice.SOURCE_TOUCHSCREEN, 0)
+
+    private fun ev2(down: Long, action: Int, actionIndex: Int,
+            x0: Float, y0: Float, x1: Float, y1: Float): android.view.MotionEvent {
+        val act = if (action == android.view.MotionEvent.ACTION_POINTER_DOWN ||
+            action == android.view.MotionEvent.ACTION_POINTER_UP)
+            action or (actionIndex shl android.view.MotionEvent.ACTION_POINTER_INDEX_SHIFT) else action
+        return android.view.MotionEvent.obtain(down,
+            android.os.SystemClock.uptimeMillis(), act, 2,
+            arrayOf(mProps(0), mProps(1)), arrayOf(mCoords(x0, y0), mCoords(x1, y1)), 0, 0, 1f, 1f, 0, 0,
+            android.view.InputDevice.SOURCE_TOUCHSCREEN, 0)
+    }
+
+    private fun sendEv(instr: android.app.Instrumentation, e: android.view.MotionEvent) {
+        try { instr.sendPointerSync(e) } finally { e.recycle() }
+    }
+
+    private fun tap(instr: android.app.Instrumentation, x: Float, y: Float) {
+        val down = android.os.SystemClock.uptimeMillis()
+        sendEv(instr, ev1(down, android.view.MotionEvent.ACTION_DOWN, x, y))
+        Thread.sleep(60)
+        sendEv(instr, ev1(down, android.view.MotionEvent.ACTION_UP, x, y))
+    }
+
+    /** Two-finger vertical drag: DOWN, second finger +60px, 8 MOVE steps
+     *  50ms apart, lifts. dy > 0 = fingers move DOWN the screen. */
+    private fun twoFingerDrag(instr: android.app.Instrumentation, x: Float, y: Float, dy: Float) {
+        val down = android.os.SystemClock.uptimeMillis()
+        sendEv(instr, ev1(down, android.view.MotionEvent.ACTION_DOWN, x, y))
+        Thread.sleep(80)
+        sendEv(instr, ev2(down, android.view.MotionEvent.ACTION_POINTER_DOWN, 1, x, y, x + 60f, y))
+        Thread.sleep(80)
+        val steps = 8
+        for (i in 1..steps) {
+            sendEv(instr, ev2(down, android.view.MotionEvent.ACTION_MOVE, 0,
+                x, y + dy * i / steps, x + 60f, y + dy * i / steps))
+            Thread.sleep(50)
+        }
+        sendEv(instr, ev2(down, android.view.MotionEvent.ACTION_POINTER_UP, 1, x, y + dy, x + 60f, y + dy))
+        Thread.sleep(40)
+        sendEv(instr, ev1(down, android.view.MotionEvent.ACTION_UP, x, y + dy))
     }
 
     /** Stream a bounded tail of a device-side log into logcat with explicit
