@@ -195,6 +195,13 @@ class MobileShellSpikeTest {
         }
         val logFile = File(ctx.filesDir, "mobile-desktop.log")
         val defaultPrefs = MobileModeSettings.read(ctx)
+        // Floating-path coverage without a session round (pure-function
+        // checks): outside maximized mode the window layer emits no jwm
+        // rules and xterm keeps its fixed startup geometry. Forced
+        // floating copy keeps this independent of stored prefs.
+        val floatingPrefs = defaultPrefs.copy(windowMode = "floating")
+        assertTrue("floating mode must not emit jwm window rules", GuestMobileWindows.jwmWindowRules(floatingPrefs).isEmpty())
+        assertTrue("floating mode must keep fixed xterm geometry", GuestMobileWindows.xtermGeometryArg(floatingPrefs).isNotEmpty())
         var logOffset = 0L
 
         // One full launch->evidence->verified-teardown cycle per scale.
@@ -219,6 +226,14 @@ class MobileShellSpikeTest {
             val proc = GuestMobileShell.launchMobileSession(ctx, rootfs)
             logOffset = awaitJwmAlive(proc, logFile, logOffset)
             assertTrue("mobile session process died before the evidence window closed (scale=$scale)", proc.isAlive)
+            // Window-layer coverage (deterministic, no pixel calibration):
+            // launchMobileSession wrote root/.jwmrc from this round's
+            // prefs - maximized Group rule and Home button present, no
+            // unreplaced template markers.
+            val jwmrcText = File(rootfs, "root/.jwmrc").readText()
+            assertTrue("mobile jwmrc missing maximized Group rule (scale=$scale)", jwmrcText.contains("<Option>maximized</Option>"))
+            assertTrue("mobile jwmrc missing Home tray button (scale=$scale)", jwmrcText.contains("showdesktop"))
+            assertTrue("mobile jwmrc has unreplaced template marker (scale=$scale)", !jwmrcText.contains("__WINDOW_RULES__"))
             // GATE-2 reentry identity: each round's proot root
             // (pid, starttime) must be NEW and every prior round's root
             // DEAD - freshness by identity, never by pts number.
