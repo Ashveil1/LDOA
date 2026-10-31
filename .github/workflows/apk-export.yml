@@ -5,6 +5,12 @@ name: apk-export
 # workflow published an installable APK of that head.
 on:
   workflow_dispatch:
+  push:
+    # Narrow request path: only an explicit request-file bump fires this
+    # build-only lane (product pushes stay on input-harness).
+    branches: [gnome/evidence]
+    paths:
+      - 'ci/apk-export-request.txt'
 
 jobs:
   build:

@@ -11,6 +11,7 @@ on:
       - '.github/workflows/mobile-desktop.yml'
       - '.github/workflows/input-harness.yml'
       - '.github/workflows/apk-export.yml'
+      - 'ci/apk-export-request.txt'
     branches: [gnome/evidence]
   workflow_dispatch:
     inputs:
