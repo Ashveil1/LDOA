@@ -15,6 +15,11 @@ object Proot {
 
     data class Result(val exitCode: Int, val stdout: String, val stderr: String, val wallMs: Long)
 
+    /** Synthetic exitCode for the bounded-exec timeout path (runGuest/
+     *  exec timeoutMs > 0); real guest exits are >= 0 and -1 is the
+     *  exec-failed catch path. */
+    const val EXIT_TIMED_OUT: Int = -2
+
     private fun nativeDir(ctx: Context): String = ctx.applicationInfo.nativeLibraryDir
 
     fun binariesPresent(ctx: Context): Boolean {
@@ -33,7 +38,7 @@ object Proot {
      *  fakeRoot (-0): guest sees uid 0. Required for apt/dpkg (they refuse
      *  to install as non-root); Alpine's apk never needed it, so the flag
      *  is opt-in per call site, not a global behavior change. */
-    fun runGuest(ctx: Context, rootfs: File, guestCmd: List<String>, extraBinds: List<Pair<String, String>> = emptyList(), extraEnv: Map<String, String> = emptyMap(), fakeRoot: Boolean = false, onLine: ((String) -> Unit)? = null): Result {
+    fun runGuest(ctx: Context, rootfs: File, guestCmd: List<String>, extraBinds: List<Pair<String, String>> = emptyList(), extraEnv: Map<String, String> = emptyMap(), fakeRoot: Boolean = false, onLine: ((String) -> Unit)? = null, timeoutMs: Long = 0): Result {
         val args = buildList {
             add(prootPath(ctx))
             add("--link2symlink")
@@ -46,7 +51,7 @@ object Proot {
             add("-w"); add("/root")
             addAll(guestCmd)
         }
-        return exec(ctx, args, extraEnv, onLine)
+        return exec(ctx, args, extraEnv, onLine, timeoutMs)
     }
 
     private fun prootPath(ctx: Context) = File(nativeDir(ctx), "libproot.so").absolutePath
@@ -57,7 +62,7 @@ object Proot {
     fun prootTmpDir(ctx: Context): File =
         File(ctx.cacheDir, "proot-tmp").apply { mkdirs() }
 
-    private fun exec(ctx: Context, argv: List<String>, extraEnv: Map<String, String> = emptyMap(), onLine: ((String) -> Unit)? = null): Result {
+    private fun exec(ctx: Context, argv: List<String>, extraEnv: Map<String, String> = emptyMap(), onLine: ((String) -> Unit)? = null, timeoutMs: Long = 0): Result {
         val nd = nativeDir(ctx)
         val env = mutableMapOf(
             "PROOT_LOADER" to File(nd, "libproot_loader.so").absolutePath,
@@ -88,11 +93,43 @@ object Proot {
                 proc.errorStream.bufferedReader().forEachLine { errSb.append(it).append('\n') }
             }
             val outSb = StringBuilder()
-            proc.inputStream.bufferedReader().forEachLine {
-                outSb.append(it).append('\n')
-                onLine?.invoke(it)
+            // timeoutMs > 0: drain stdout on its own thread so the caller can
+            // bound the wait. WEDGE EVIDENCE (run 41176270704): proot stays
+            // alive while any backgrounded tracee lives, so stdout never
+            // EOFs for fire-and-forget guest launches; an on-thread drain
+            // then blocks the caller for the whole JUnit timeout (nautilus
+            // pid 13954 ran 06:43:17-06:57:36, the full blocked window).
+            val outThread: Thread? = if (timeoutMs > 0) kotlin.concurrent.thread {
+                proc.inputStream.bufferedReader().forEachLine {
+                    outSb.append(it).append('\n')
+                    onLine?.invoke(it)
+                }
+            } else null
+            val code: Int
+            if (timeoutMs > 0) {
+                val exited = proc.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+                if (exited) {
+                    code = proc.exitValue()
+                } else {
+                    // SIGKILL proot directly: backgrounded tracees are
+                    // orphaned (kept alive) rather than torn down with it -
+                    // intentional for fire-and-forget guest launches; the
+                    // Android phantom-process reaper bounds them at app
+                    // death. A SIGTERM-first path risks proot taking the
+                    // launched app down and hiding that it ever started.
+                    proc.destroyForcibly()
+                    proc.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
+                    code = EXIT_TIMED_OUT
+                    errSb.append("TIMED_OUT after ").append(timeoutMs).append(" ms; proot killed, backgrounded tracees orphaned\n")
+                }
+                outThread!!.join(10_000)
+            } else {
+                proc.inputStream.bufferedReader().forEachLine {
+                    outSb.append(it).append('\n')
+                    onLine?.invoke(it)
+                }
+                code = proc.waitFor()
             }
-            val code = proc.waitFor()
             errThread.join(10_000)
             val out = outSb.toString()
             val err = errSb.toString()

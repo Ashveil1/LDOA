@@ -143,7 +143,8 @@ class LdoaInputHarnessTest {
         // before trusting tap coordinates.
         fun xwinEarly(cmd: String): String {
             val r = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c", "export DISPLAY=:0; " + cmd),
-                extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"))
+                extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"),
+                timeoutMs = 60_000)
             return r.stdout
         }
         val readyDeadline = System.currentTimeMillis() + 240_000
@@ -170,9 +171,16 @@ class LdoaInputHarnessTest {
             "] gtk3=[" + xwinEarly("cat /root/.config/gtk-3.0/settings.ini 2>/dev/null || echo absent").replace("\n", " | ") + "]")
         Log.i(TAG, "harness: gtk4-query-settings=" + xwinEarly("gtk4-query-settings 2>/dev/null | grep -i long-press || echo unavailable").trim())
 
+        // Bounded (60s): fire-and-forget guest launches keep proot alive
+        // while the backgrounded app runs, so stdout never EOFs (run
+        // 41176270704: this arm wedged 14 min on the nautilus launch until
+        // the JUnit timeout). On timeout the launch is verified separately
+        // by the visibility poll below; a short query returning TIMED_OUT
+        // is a real guest failure, now bounded and diagnosable.
         fun xwin(cmd: String): String {
             val r = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c", "export DISPLAY=:0; " + cmd),
-                extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"))
+                extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"),
+                timeoutMs = 60_000)
             return r.stdout
         }
         fun windowIds(pattern: String): List<String> =
