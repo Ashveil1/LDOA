@@ -25,6 +25,7 @@ import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import kotlin.concurrent.thread
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
@@ -263,7 +264,11 @@ class MainActivity : ComponentActivity() {
                                 TextButton(onClick = {
                                     vm.log += "[tap] desktop error dialog: stop session\n"
                                     vm.desktopError = null
-                                    XServer.stopDesktopMode(this@MainActivity)
+                                    // stopDesktopMode sleeps ~5s in its SIGTERM/SIGKILL grace waits
+                                    // plus /proc scans: on the UI thread that is a guaranteed ANR
+                                    // (POCO 2026-10-31 14:20: ANR on Stop session). Background it;
+                                    // teardown is idempotent and identity-verified.
+                                    thread(name = "desktop-stop") { XServer.stopDesktopMode(applicationContext) }
                                 }) { Text("Stop session") }
                                 TextButton(onClick = { vm.desktopError = null }) { Text("Close") }
                             } },

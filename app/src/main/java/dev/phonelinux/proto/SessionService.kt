@@ -60,7 +60,10 @@ class SessionService : Service() {
         when (intent?.action) {
             ACTION_STOP -> {
                 Log.i(TAG, "user stop: ending desktop session, releasing wakelock, stopping service")
-                XServer.stopDesktopMode(applicationContext)
+                // Same UI-thread ANR hazard as the dialog's Stop button:
+                // stopDesktopMode blocks seconds; onStartCommand runs on the
+                // main thread. Background the teardown.
+                thread(name = "desktop-stop") { XServer.stopDesktopMode(applicationContext) }
                 stopSelf()
                 return START_NOT_STICKY
             }
