@@ -97,8 +97,8 @@ jobs:
             if [ "$LANE" = full ]; then timeout -s KILL 1500 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.LdoaInputHarnessTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr.log | tail -15 || echo "HARNESS-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"; else echo "harness SKIPPED (lane=$LANE)" > /tmp/instr.log; fi
             if [ "$LANE" = full ]; then grep -q "OK (" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED; fi
             if [ -f /tmp/PHONELINUX_TESTS_FAILED ]; then echo "HARNESS-DIAG survivors at bound:"; adb -s emulator-5554 shell "ps -A -o PID,PPID,ARGS" | grep -E "phonelinux|proot|nautilus|Xlorie|soffice" || true; adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/harness-owned-ledger.txt > harness-owned-ledger.txt 2>/dev/null || echo "LEDGER-PULL-FAILED rc=$? (ledger needs the test-side spawn-ledger patch)"; adb -s emulator-5554 shell am force-stop dev.phonelinux.proto || true; fi
-            adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/guest-gnome.log > guest-gnome.log || echo "GNOME-LOG-PULL-FAILED rc=$?"
-            adb -s emulator-5554 logcat -d > /tmp/shotlog.txt || true
+            timeout 60 adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/guest-gnome.log > guest-gnome.log || echo "GNOME-LOG-PULL-FAILED rc=$?"
+            timeout 60 adb -s emulator-5554 logcat -d > /tmp/shotlog.txt || true
             python3 .github/scripts/extract_shots.py /tmp/shotlog.txt screenshots || true
             python3 .github/scripts/extract_shots.py /tmp/instr.log screenshots || true
             find screenshots -type f | sort || true
