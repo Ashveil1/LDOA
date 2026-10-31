@@ -1,2 +1,2 @@
 request: build diagnostic APK of current head for user delivery (Ash, 2026-10-31)
-reason: user asked for the APK now; gate tests running separately on 35ffbdb
+reason: diagnostic sampler build c954fb2 - more capture per support bundle
