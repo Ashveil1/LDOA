@@ -201,33 +201,13 @@ class DesktopClientTest {
         // fail the suite, but a mode that NEVER moves the pointer must.
         // Runs 8302b1e/772fadb/425ab98: tap A warped, tap B silently did
         // not (no cursor update in logcat); the retry characterizes which.
+        // The tap points are DEVICE-anchored mid-screen coordinates that
+        // land on the st client body under any plausible map (the st body
+        // is the suite's established inert region: its own menu-dismiss
+        // click targets it) - never map-derived, so even a fully broken
+        // map cannot steer a calibration tap onto live controls or system
+        // UI, and all stay inside the actual display bounds.
         val tapPoints = listOf(Pair(540, 800), Pair(400, 750), Pair(600, 850), Pair(360, 700), Pair(520, 760))
-        val reads = mutableListOf<Pair<Pair<Int, Int>, Pair<Int, Int>?>>()
-        var calib: Pair<Pair<Pair<Int, Int>, Pair<Int, Int>>, Pair<Pair<Int, Int>, Pair<Int, Int>>>? = null
-        for (tp in tapPoints) {
-            Shot.dismissSystemDialogs(device)
-            device.click(tp.first, tp.second)
-            Thread.sleep(1_000)
-            val r = pointerPos()
-            reads.add(tp to r)
-            android.util.Log.i("PHONEDIAG", "calibration tap(" + tp.first + "," + tp.second + ")->" + r)
-            val prev = reads.firstOrNull { it.second != null && r != null &&
-                Math.abs(it.second!!.first - r.first) > 20 && Math.abs(it.second!!.second - r.second) > 10 }
-            if (prev != null && r != null) {
-                calib = (prev.first to prev.second!!) to (tp to r)
-                break
-            }
-        }
-        if (calib == null) {
-            val focus = try { device.executeShellCommand("dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'") } catch (t: Throwable) { "(dumpsys failed)" }
-            throw AssertionError("direct-touch mapping never observed; taps=" + reads + " focusedWindow=" + focus)
-        }
-        if (reads.size > 2) {
-            // Dropped taps are a REAL usability signal, not noise to hide:
-            // record how many taps the run lost before the map locked.
-            android.util.Log.w("PHONEDIAG", "DROPPED-TAPS=" + (reads.size - 2) +
-                " of " + reads.size + " calibration taps - repeated touch loss would be a product input defect; reads=" + reads)
-        }
         var sX = 0.0; var oX = 0.0; var sY = 0.0; var oY = 0.0
         fun applyCalib(tap1: Pair<Pair<Int, Int>, Pair<Int, Int>>, tap2: Pair<Pair<Int, Int>, Pair<Int, Int>>) {
             val a = tap1.second; val b = tap2.second
@@ -237,7 +217,36 @@ class DesktopClientTest {
             oY = a.second - sY * tap1.first.second
             android.util.Log.i("PHONEDIAG", "calibrated map sX=" + sX + " oX=" + oX + " sY=" + sY + " oY=" + oY)
         }
-        applyCalib(calib.first, calib.second)
+        fun calibrateOnce(label: String): Boolean {
+            val reads = mutableListOf<Pair<Pair<Int, Int>, Pair<Int, Int>?>>()
+            for (tp in tapPoints) {
+                Shot.dismissSystemDialogs(device)
+                device.click(tp.first, tp.second)
+                Thread.sleep(1_000)
+                val r = pointerPos()
+                reads.add(tp to r)
+                android.util.Log.i("PHONEDIAG", "calibration[" + label + "] tap(" + tp.first + "," + tp.second + ")->" + r)
+                val prev = reads.firstOrNull { it.second != null && r != null &&
+                    Math.abs(it.second!!.first - r.first) > 20 && Math.abs(it.second!!.second - r.second) > 10 }
+                if (prev != null && r != null) {
+                    if (reads.size > 2) {
+                        // Dropped taps are a REAL usability signal, not noise to
+                        // hide: record how many taps the run lost before the
+                        // map locked.
+                        android.util.Log.w("PHONEDIAG", "DROPPED-TAPS=" + (reads.size - 2) +
+                            " of " + reads.size + " calibration taps [" + label + "] - repeated touch loss would be a product input defect; reads=" + reads)
+                    }
+                    applyCalib((prev.first to prev.second!!), (tp to r))
+                    return true
+                }
+            }
+            android.util.Log.w("PHONEDIAG", "calibration[" + label + "] found no moving pair; taps=" + reads)
+            return false
+        }
+        if (!calibrateOnce("start")) {
+            val focus = try { device.executeShellCommand("dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'") } catch (t: Throwable) { "(dumpsys failed)" }
+            throw AssertionError("direct-touch mapping never observed; focusedWindow=" + focus)
+        }
 
         // Anchor all st measurements to the ORIGINAL terminal's window id:
         // after the menu-launch test two "script" clients exist and
@@ -370,51 +379,22 @@ class DesktopClientTest {
         // gesture leaves a re-post window during the settle. Each dismissal
         // is counted and logged; repeats stay visible, never hidden.
 
-        // Map revalidation before the gesture (run 41189879248: the initial
+        // Fresh-frame map at the gesture (run 41189879248: the suite-start
         // calibration locked on stale anchors - X(20,1995) was requested at
         // device (179,119), the status bar, and the Pixel Launcher ANR
         // dialog it surfaced then owned the screen; the "menu did not open"
-        // assert measured that, not jwm). A wrong map must be caught at the
-        // gesture that needs it: tap a harmless probe point, compare the X
-        // pointer landing against the map's prediction, recalibrate once on
-        // mismatch, and fail loud if the map still does not predict.
-        run {
-            val probeDev = Pair(540, 1000)
-            val expected = Pair((oX + sX * probeDev.first).toInt(), (oY + sY * probeDev.second).toInt())
-            device.click(probeDev.first, probeDev.second)
-            Thread.sleep(1_000)
-            val actual = pointerPos()
-            val ok = actual != null && Math.abs(actual.first - expected.first) <= 30 && Math.abs(actual.second - expected.second) <= 25
-            android.util.Log.i("PHONEDIAG", "map-check[jwm-menu] probeDev=" + probeDev + " expectedX=" + expected + " actualX=" + actual + " ok=" + ok)
-            if (!ok) {
-                android.util.Log.w("PHONEDIAG", "map-check[jwm-menu] invalid - recalibrating once")
-                var recalib: Pair<Pair<Pair<Int, Int>, Pair<Int, Int>>, Pair<Pair<Int, Int>, Pair<Int, Int>>>? = null
-                val reads2 = mutableListOf<Pair<Pair<Int, Int>, Pair<Int, Int>?>>()
-                for (tp in tapPoints) {
-                    Shot.dismissSystemDialogs(device)
-                    device.click(tp.first, tp.second)
-                    Thread.sleep(1_000)
-                    val r = pointerPos()
-                    reads2.add(tp to r)
-                    android.util.Log.i("PHONEDIAG", "recalibration tap(" + tp.first + "," + tp.second + ")->" + r)
-                    val prev = reads2.firstOrNull { it.second != null && r != null &&
-                        Math.abs(it.second!!.first - r.first) > 20 && Math.abs(it.second!!.second - r.second) > 10 }
-                    if (prev != null && r != null) {
-                        recalib = (prev.first to prev.second!!) to (tp to r)
-                        break
-                    }
-                }
-                assertTrue("touch map invalid before jwm-menu and recalibration found no moving pair; taps=" + reads2, recalib != null)
-                applyCalib(recalib!!.first, recalib.second)
-                val expected2 = Pair((oX + sX * probeDev.first).toInt(), (oY + sY * probeDev.second).toInt())
-                device.click(probeDev.first, probeDev.second)
-                Thread.sleep(1_000)
-                val actual2 = pointerPos()
-                val ok2 = actual2 != null && Math.abs(actual2.first - expected2.first) <= 30 && Math.abs(actual2.second - expected2.second) <= 25
-                android.util.Log.i("PHONEDIAG", "map-check[jwm-menu] post-recalib expectedX=" + expected2 + " actualX=" + actual2 + " ok=" + ok2)
-                assertTrue("touch map still does not predict pointer landings after recalibration (expectedX=" + expected2 + " actualX=" + actual2 + ")", ok2)
-            }
-        }
+        // assert measured that, not jwm). Re-derive the map NOW from the
+        // same device-anchored st-body points - a wrong map cannot steer
+        // these taps - and compare it against the suite-start map as a
+        // reference-X landing: drift means the old map was stale, the fresh
+        // same-frame map wins, and the drift is logged, not hidden.
+        val refX = Pair(540.0, 1000.0)
+        val oldDevRef = Pair(((refX.first - oX) / sX), ((refX.second - oY) / sY))
+        assertTrue("touch-map recalibration before jwm-menu found no moving pair", calibrateOnce("jwm-menu"))
+        val newDevRef = Pair(((refX.first - oX) / sX), ((refX.second - oY) / sY))
+        val drift = Math.hypot(newDevRef.first - oldDevRef.first, newDevRef.second - oldDevRef.second)
+        android.util.Log.i("PHONEDIAG", "map-drift[jwm-menu] refX=" + refX + " oldDev=" + oldDevRef + " newDev=" + newDevRef + " drift=" + drift +
+            (if (drift > 35.0) " ADOPTED-FRESH (suite-start map was stale)" else " stable"))
         // 1. Tap the JWM menu button (tray = 1080x34+0+1978, button at the
         // left end ~X(20,1995)). jwm menus are override-redirect popups: a
         // new top-level window appears while the menu is open.
@@ -426,6 +406,14 @@ class DesktopClientTest {
         device.click(menuBtn.first, menuBtn.second)
         Thread.sleep(2_000)
         Shot.save("09-jwm-menu-tapped")
+        // Actual-delivery evidence: the X cursor must be where the gesture
+        // aimed (generous tolerance: menu grab can nudge the warp). This
+        // binds the requested coordinate to the OS-delivered one in the
+        // same frame instead of trusting the test's intent log.
+        val menuPtr = pointerPos()
+        android.util.Log.i("PHONEDIAG", "jwm-menu delivery: requested dev=" + menuBtn + " -> X cursor=" + menuPtr + " target=X(20,1995)")
+        assertTrue("menu tap did not land at the tray button (requested dev=" + menuBtn + ", X cursor=" + menuPtr + ", target X(20,1995))",
+            menuPtr != null && Math.abs(menuPtr.first - 20) <= 60 && Math.abs(menuPtr.second - 1995) <= 45)
         val menuAfter = topCount()
         android.util.Log.i("PHONEDIAG", "jwm-menu tap dev=" + menuBtn + " windows before=" + menuBefore + " after=" + menuAfter)
         assertTrue("JWM menu did not open after tapping the menu button (dev=" + menuBtn +
