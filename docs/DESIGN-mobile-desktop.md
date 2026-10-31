@@ -207,10 +207,16 @@ open maximized into the tray-respecting work area (one-app-at-a-time),
 task switching stays in the existing TaskList. jwm 2.4.3 (noble
 2.4.3-1build2) Group rule <Type>normal</Type> + <Option>maximized</Option>
 (group.c ApplyGroups and-s patterns; desktop-type surfaces unframed, so
-pcmanfm --desktop is untouched). Floating remains the product default until the settings card is wired
-and runtime-proven; the maximized layer is exercised through the bounded
-test configuration (per-round pref write), and flipping the product
-default is a separate later proposal, not this patch.
+pcmanfm --desktop is untouched). Floating remains the product default
+until the settings card is wired and runtime-proven; the maximized layer
+is exercised through the bounded test configuration (per-round pref
+write), and flipping the product default is a separate later proposal,
+not this patch.
+Home affordance: a tray button running jwm's showdesktop action
+(iconify all; a TaskList tap raises one back). 2.4.3 tray buttons
+support ONLY exec:/root:/showdesktop (action.c AddAction) - keybind
+window cycling is not touch-reachable, so per-task switching stays in
+the touch-scaled TaskList.
 Render-path neutral: window MANAGEMENT only - no compositor/GL/driver
 choice made here. Runtime validation rides the next gate run (existing
 xwininfo -tree evidence captures window geometry); not mobile/iOS-ready

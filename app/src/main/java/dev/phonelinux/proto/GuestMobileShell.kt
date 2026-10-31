@@ -109,6 +109,7 @@ object GuestMobileShell {
               __WINDOW_RULES__
               <Tray x="0" y="$trayY" height="$trayH">
                 <TrayButton label="LDOA">root:1</TrayButton>
+                ${GuestMobileWindows.jwmTrayHome()}
                 <Pager/>
                 <TaskList/>
                 <Clock format="%H:%M"/>

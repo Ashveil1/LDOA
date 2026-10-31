@@ -12,6 +12,10 @@ package dev.phonelinux.proto
  *  (group.c windowTypeMapping), and OPTION_MAXIMIZED (group.c) applies
  *  on map. pcmanfm --desktop's surface is _NET_WM_WINDOW_TYPE_DESKTOP,
  *  which jwm does not frame, so the rule never touches the desktop.
+ *  Tray buttons in 2.4.3 accept ONLY exec:/root:/showdesktop actions
+ *  (action.c AddAction; nextstacked/prevstacked exist as Key bindings,
+ *  not touch-reachable) - so the Home affordance below uses showdesktop
+ *  and per-task switching stays in the TaskList.
  *
  *  Render-path neutral BY DESIGN: window MANAGEMENT semantics only - no
  *  compositor, GL, or driver involvement, and the rules carry over
@@ -34,4 +38,10 @@ object GuestMobileWindows {
      *  before jwm maximizes on map. Leading space included when set. */
     fun xtermGeometryArg(ui: MobileUiPrefs): String =
         if (ui.windowMode == "maximized") "" else " -geometry 100x30+40+120"
+
+    /** Home affordance: tray button running jwm's showdesktop action
+     *  (iconify all clients; a TaskList tap raises one back). Button
+     *  height follows the already touch-scaled tray height. */
+    fun jwmTrayHome(): String =
+        """<TrayButton label="Home">showdesktop</TrayButton>"""
 }
