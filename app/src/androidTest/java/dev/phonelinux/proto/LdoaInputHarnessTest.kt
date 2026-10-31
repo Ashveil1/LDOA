@@ -654,7 +654,12 @@ class LdoaInputHarnessTest {
                 "DISPLAY" to ":0",
                 "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 "PROOT_TMP_DIR" to Proot.prootTmpDir(ctx).absolutePath,
-                "TMPDIR" to "/tmp"))
+                "TMPDIR" to "/tmp",
+                // Session tag: xevProc.destroy() kills only the proot root;
+                // the xev guest process would orphan (custom gate
+                // 41191922079 survivors xev 15179/15186). The tag lets the
+                // teardown sweep reap it with the rest of the tree.
+                "PLINUX_SESSION" to "desktop"))
             pb.redirectErrorStream(true)
             pb.redirectOutput(ProcessBuilder.Redirect.appendTo(xevLog))
             val xevProc = pb.start()
@@ -709,8 +714,31 @@ class LdoaInputHarnessTest {
             try {
                 Log.i(TAG, "harness: teardown begin (owned-only)")
                 ledgerNote("pre-teardown gnome-launcher", proc)
-                try { proc.destroy() } catch (t: Throwable) { Log.i(TAG, "harness: proc.destroy threw " + t) }
+                // stopDesktopMode BEFORE destroy: its identity-verified
+                // tree walk needs the session root ALIVE. destroy() first
+                // kills the root, the walk is then skipped as "root
+                // exited", and the guest tree orphans (custom gate
+                // 41191922079: this test's GNOME proot root + ~20 services
+                // + arm8's xev survived test end, pushed the phantom count
+                // up, and the resulting trims killed the shared X server).
                 try { XServer.stopDesktopMode(ctx) } catch (t: Throwable) { Log.i(TAG, "harness: stopDesktopMode threw " + t) }
+                try { proc.destroy() } catch (t: Throwable) { Log.i(TAG, "harness: proc.destroy threw " + t) }
+                // Sweep what host-side teardown cannot see: orphaned guest
+                // processes still carrying this session's tag (the
+                // gnome-launch script exports PLINUX_SESSION=desktop; the
+                // arm8 xev is tagged at spawn for the same reason). Never
+                // swallow the reap: killed + residual are logged, one
+                // retry, survivors stay visible in the ledger.
+                try {
+                    var swept = GuestDesktop.killDesktopClients(ctx, rootfs)
+                    var residual = GuestDesktop.desktopClientCount(ctx, rootfs)
+                    if (residual > 0) {
+                        Thread.sleep(1_000)
+                        swept += GuestDesktop.killDesktopClients(ctx, rootfs)
+                        residual = GuestDesktop.desktopClientCount(ctx, rootfs)
+                    }
+                    Log.i(TAG, "harness: teardown sweep killed=" + swept + " residual=" + residual)
+                } catch (t: Throwable) { Log.w(TAG, "harness: teardown sweep threw (survivors possible): " + t) }
                 Thread.sleep(2_000)
                 ledgerNote("post-teardown gnome-launcher", proc)
                 Log.i(TAG, "harness: teardown end; survivor state in filesDir/harness-owned-ledger.txt")
