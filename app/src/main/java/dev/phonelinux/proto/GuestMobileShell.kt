@@ -94,12 +94,12 @@ object GuestMobileShell {
               <!-- LDOA mobile mode: touch-sized layout on a transparently
                    reused jwm. Font/tray sizes derive from MobileModeSettings
                    and the device's real density. -->
+              <!-- Phone shell: no Restart/Exit entries - on a phone session
+                   "Exit" kills the window manager with no recovery affordance
+                   (iOS-class shells do not offer self-termination). -->
               <RootMenu onroot="1">
                 <Program label="Terminal">xterm -fa "DejaVu Sans Mono" -fs $termFont</Program>
                 <Program label="Files">pcmanfm /root</Program>
-                <Separator/>
-                <Restart label="Restart"/>
-                <Exit label="Exit"/>
               </RootMenu>
               <MenuStyle><Font>DejaVu Sans-$menuFont</Font></MenuStyle>
               <WindowStyle><Font>DejaVu Sans-$titleFont</Font><Width>5</Width><Height>$titleH</Height></WindowStyle>

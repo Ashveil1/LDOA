@@ -217,6 +217,9 @@ Home affordance: a tray button running jwm's showdesktop action
 support ONLY exec:/root:/showdesktop (action.c AddAction) - keybind
 window cycling is not touch-reachable, so per-task switching stays in
 the touch-scaled TaskList.
+Root menu pruned for phone: Restart/Exit entries removed - on a phone
+session "Exit" kills jwm with no recovery affordance; launcher entries
+(Terminal, Files) unchanged.
 Render-path neutral: window MANAGEMENT only - no compositor/GL/driver
 choice made here. Runtime validation rides the next gate run (existing
 xwininfo -tree evidence captures window geometry); not mobile/iOS-ready
