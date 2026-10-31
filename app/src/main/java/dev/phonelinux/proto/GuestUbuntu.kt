@@ -221,6 +221,25 @@ object GuestUbuntu {
             # none of the source's exit=1 signatures (fail-whale paths are
             # silent when zenity cannot run under proot).
             export GNOME_SESSION_DEBUG=1
+            # ICE lock probe + ICEAUTHORITY relocation (exit=1 fix attempt):
+            # gnome-session died immediately after "IceLockAuthFile failed:
+            # Function not implemented" (ENOSYS). libICE IceLockAuthFile
+            # (authutil.c) locks with the link() hardlink algorithm - no
+            # fcntl/flock - so ENOSYS names a filesystem or proot-emulation
+            # gap for link(2). gsm-xsmp-server.c treats the ICEauthority
+            # update failure as fatal (gsm_util_init_error(TRUE) -> exit(1)).
+            # Probe link() in /root and /tmp/xdg so the log distinguishes
+            # path-dependent failure from syscall-level failure, and point
+            # ICEAUTHORITY at /tmp/xdg (honored as the full authority path
+            # by IceAuthFileName) so the lock lives on tmpfs when /root's
+            # backing fs rejects hardlinks.
+            ICEHOME=""; ICETMP=""
+            touch /root/.iceprobe-a 2>/dev/null && { ln /root/.iceprobe-a /root/.iceprobe-b 2>/dev/null && ICEHOME=OK || ICEHOME=FAIL; }
+            rm -f /root/.iceprobe-a /root/.iceprobe-b
+            touch /tmp/xdg/.iceprobe-a 2>/dev/null && { ln /tmp/xdg/.iceprobe-a /tmp/xdg/.iceprobe-b 2>/dev/null && ICETMP=OK || ICETMP=FAIL; }
+            rm -f /tmp/xdg/.iceprobe-a /tmp/xdg/.iceprobe-b
+            echo "gnome-launch: ice-link-probe home=${'$'}ICEHOME tmpxdg=${'$'}ICETMP"
+            export ICEAUTHORITY=/tmp/xdg/ICEauthority
             echo "gnome-launch: trying gnome-session --session=ubuntu (top bar + ubuntu-dock + yaru)"
             gnome-session --session=ubuntu 2>&1 &
             GSPID=${'$'}!
