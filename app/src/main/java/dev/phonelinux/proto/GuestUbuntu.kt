@@ -215,6 +215,12 @@ object GuestUbuntu {
               [ "${'$'}PAINT" = 1 ] || echo "gnome-launch: no viewable window after ~65s launch=${'$'}LAUNCH_ID (guest-side map silence suspected, not proven)"
               echo "gnome-launch: x11-geometry=${'$'}(xdpyinfo 2>/dev/null | awk '/dimensions:/{print ${'$'}2}') surface-compare=pending"
             ) &
+            # Diag (exit=1 root-cause): gnome-session's g_debug output names the
+            # phase/app transitions and the acceleration-check verdicts; the
+            # captured stderr otherwise ends at the IceLockAuthFile warning with
+            # none of the source's exit=1 signatures (fail-whale paths are
+            # silent when zenity cannot run under proot).
+            export GNOME_SESSION_DEBUG=1
             echo "gnome-launch: trying gnome-session --session=ubuntu (top bar + ubuntu-dock + yaru)"
             gnome-session --session=ubuntu 2>&1 &
             GSPID=${'$'}!
