@@ -174,6 +174,11 @@ object XServer {
         // A live bus daemon is NOT desktop health: gnome-shell must still
         // exist in the session's own process tree, or bypassing the gate
         // would forward the user to a desktop that is no longer there.
+        // ACCEPTED GAP: this is process-tree liveness, not a bus-owner
+        // check - a shell process that lost org.gnome.Shell ownership but
+        // stayed alive still passes. A NameHasOwner probe needs a guest
+        // round-trip per reuse (proot exec, seconds + new failure modes),
+        // so it is deliberately not on this path.
         if (!treeHasProcessNamed(pid, Regex("gnome-shell")))
             return "gnome-shell gone from the session tree (a live session bus does not imply a live desktop)"
         return null

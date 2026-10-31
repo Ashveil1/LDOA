@@ -29,13 +29,13 @@ object Diagnostics {
      *  is NOT redacted: ICEAUTHORITY=/XAUTHORITY= file paths and the
      *  unix:path=...,guid=... session bus address carry no auth data. */
     private val SCRUB_RULES: List<Pair<Regex, String>> = listOf(
-        Regex("(?i)(Authorization\\s*:\\s*Bearer)\\s+\\S+") to "$1 [redacted]",
-        Regex("(?i)\\b(Bearer)\\s+[A-Za-z0-9._~+/=-]{8,}") to "$1 [redacted]",
-        Regex("(?i)(\\"(?:password|passwd|secret|token|api[_-]?key|authorization|cookie)\\"\\s*:\\s*\\")[^\\"]*(\\")") to "$1[redacted]$2",
-        Regex("(?i)([?&](?:token|key|password|secret|sig|signature)=)[^\\s&\\"']+") to "$1[redacted]",
-        Regex("(?i)(Cookie\\s*:\\s*)[^\\r\\n]+") to "$1[redacted]",
-        Regex("(?i)(--?(?:password|passwd|token|secret|api[_-]?key|cookie)(?:=|\\s+))\\S+") to "$1[redacted]",
-        Regex("(?i)((?:password|passwd|secret|token|api[_-]?key|authorization|cookie)\\s*[:=]\\s*)\\S+") to "$1[redacted]"
+        Regex("(?i)(Authorization\\s*:\\s*Bearer)\\s+\\S+") to "${'$'}1 [redacted]",
+        Regex("(?i)\\b(Bearer)\\s+[A-Za-z0-9._~+/=-]{8,}") to "${'$'}1 [redacted]",
+        Regex("(?i)(\\"(?:password|passwd|secret|token|api[_-]?key|authorization|cookie)\\"\\s*:\\s*\\")[^\\"]*(\\")") to "${'$'}1[redacted]${'$'}2",
+        Regex("(?i)([?&](?:token|key|password|secret|sig|signature)=)[^\\s&\\"']+") to "${'$'}1[redacted]",
+        Regex("(?i)(Cookie\\s*:\\s*)[^\\r\\n]+") to "${'$'}1[redacted]",
+        Regex("(?i)(--?(?:password|passwd|token|secret|api[_-]?key|cookie)(?:=|\\s+))\\S+") to "${'$'}1[redacted]",
+        Regex("(?i)((?:password|passwd|secret|token|api[_-]?key|authorization|cookie)\\s*[:=]\\s*)\\S+") to "${'$'}1[redacted]"
     )
 
     internal fun scrub(text: String): String {
