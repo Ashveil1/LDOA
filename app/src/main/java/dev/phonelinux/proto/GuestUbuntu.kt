@@ -239,6 +239,7 @@ object GuestUbuntu {
             touch /tmp/xdg/.iceprobe-a 2>/dev/null && { ln /tmp/xdg/.iceprobe-a /tmp/xdg/.iceprobe-b 2>/dev/null && ICETMP=OK || ICETMP=FAIL; }
             rm -f /tmp/xdg/.iceprobe-a /tmp/xdg/.iceprobe-b
             echo "gnome-launch: ice-link-probe home=${'$'}ICEHOME tmpxdg=${'$'}ICETMP"
+            echo "gnome-launch: ice-pkg $(dpkg-query -W -f='${'$'}{Package}=${'$'}{Version} ' libice6 gnome-session 2>&1)"
             export ICEAUTHORITY=/tmp/xdg/ICEauthority
             echo "gnome-launch: trying gnome-session --session=ubuntu (top bar + ubuntu-dock + yaru)"
             gnome-session --session=ubuntu 2>&1 &
