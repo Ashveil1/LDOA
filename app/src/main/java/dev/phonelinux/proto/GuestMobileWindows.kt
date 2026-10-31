@@ -12,6 +12,16 @@ package dev.phonelinux.proto
  *  (group.c windowTypeMapping), and OPTION_MAXIMIZED (group.c) applies
  *  on map. pcmanfm --desktop's surface is _NET_WM_WINDOW_TYPE_DESKTOP,
  *  which jwm does not frame, so the rule never touches the desktop.
+ *  jwm 2.4.3-1build2 BUG (hint.c ReadWindowState): ClientState.windowType
+ *  is left UNINITIALIZED when the client sets no _NET_WM_WINDOW_TYPE, so
+ *  <Type>normal</Type> matching is nondeterministic for type-less
+ *  clients (xterm) - run 41186745767: xterm maximized at scale 1.0 but
+ *  cascaded at 0.75 with the identical rule; reproduced locally under
+ *  Xvfb. Fixed upstream post-2.4.3 (master hint.c defaults
+ *  windowType=WINDOW_TYPE_NORMAL) but noble ships the broken build.
+ *  Mitigation below: explicit <Class> group for known type-less clients
+ *  (Class matching reads WM_CLASS, always set) alongside the Type rule.
+ *
  *  Tray buttons in 2.4.3 accept ONLY exec:/root:/showdesktop actions
  *  (action.c AddAction; nextstacked/prevstacked exist as Key bindings,
  *  not touch-reachable) - so the Home affordance below uses showdesktop
@@ -29,7 +39,11 @@ object GuestMobileWindows {
      *  style block and the Tray definition. */
     fun jwmWindowRules(ui: MobileUiPrefs): String {
         if (ui.windowMode != "maximized") return ""
-        return "<Group><Type>normal</Type><Option>maximized</Option></Group>"
+        // Type rule covers conforming clients (GTK/Qt set the type atom);
+        // the Class group deterministically covers type-less xterm while
+        // noble's jwm carries the uninitialized-windowType build.
+        return "<Group><Type>normal</Type><Option>maximized</Option></Group>" +
+            "<Group><Class>XTerm</Class><Option>maximized</Option></Group>"
     }
 
     /** xterm launch geometry argument: fixed startup geometry only in

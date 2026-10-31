@@ -212,6 +212,16 @@ until the settings card is wired and runtime-proven; the maximized layer
 is exercised through the bounded test configuration (per-round pref
 write), and flipping the product default is a separate later proposal,
 not this patch.
+jwm 2.4.3-1build2 (noble) bug found via run 41186745767 + local Xvfb
+repro: ReadWindowState (hint.c) never initializes
+ClientState.windowType when _NET_WM_WINDOW_TYPE is absent, so
+<Type>normal</Type> Group matching is nondeterministic for type-less
+clients (xterm maximized at scale 1.0, cascaded at 0.75, identical
+rule). Upstream master defaults windowType=WINDOW_TYPE_NORMAL (post
+-2.4.3); noble's package carries the bug. Mitigation: an explicit
+<Class>XTerm</Class> Group alongside the Type rule (WM_CLASS is always
+set). Per-window _NET_WM_STATE/type/hints probe added to the gate test
+to calibrate a future assert.
 Home affordance: a tray button running jwm's showdesktop action
 (iconify all; a TaskList tap raises one back). 2.4.3 tray buttons
 support ONLY exec:/root:/showdesktop (action.c AddAction) - keybind
