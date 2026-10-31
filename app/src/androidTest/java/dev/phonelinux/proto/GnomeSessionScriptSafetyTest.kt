@@ -1,5 +1,6 @@
 package dev.phonelinux.proto
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -15,10 +16,11 @@ import org.junit.Test
  * (tracees detach and continue), so no fallback ever ran and managed
  * components survived as orphans.
  *
- * Process-level behavior (wrapper+child teardown, stale/healthy/failed
- * bus, fail-closed suppression) is fixture-verified with real processes
- * outside CI; these tests pin the shipped script's structure so the
- * invariants cannot silently regress.
+ * Process-level behavior (wrapper+child teardown, stale/healthy/failed/
+ * busy bus, fail-closed suppression) is fixture-verified with real
+ * processes outside CI; these tests pin the shipped script's structure
+ * so the invariants cannot silently regress. They do NOT replace the
+ * executed fixtures.
  */
 class GnomeSessionScriptSafetyTest {
 
@@ -26,13 +28,35 @@ class GnomeSessionScriptSafetyTest {
 
     @Test fun systemBusProbePrecedesAnySocketRemoval() {
         val probe = script.indexOf("sysbus_live()")
-        val unavailable = script.indexOf("system-bus listener UNAVAILABLE")
-        val removal = script.indexOf("""rm -f "${'$'}DBUS_RUN_DIR/system_bus_socket"""")
+        val removal = script.indexOf("rm -f \"\$DBUS_RUN_DIR/system_bus_socket\"")
         assertTrue("liveness probe function must exist", probe >= 0)
-        assertTrue("unavailable branch must exist", unavailable >= 0)
-        assertTrue("stale-removal must exist", removal >= 0)
+        assertTrue("stale-removal must exist (inside start_system_bus)", removal >= 0)
         assertTrue("probe definition must precede removal", probe < removal)
-        assertTrue("removal only inside the probe-proven unavailable branch", unavailable < removal)
+        assertEquals("exactly one socket/pidfile removal site", 1,
+            script.split("system_bus_socket\" \"\$DBUS_RUN_DIR/pid").size - 1)
+    }
+
+    /** A failed/timed-out ListNames probe is NOT proof of a dead daemon:
+     *  when the pidfile names a LIVE dbus-daemon the endpoint must be
+     *  preserved (bounded retry, then fail closed) - never unlinked. */
+    @Test fun liveDaemonEndpointIsPreservedWhenProbeFails() {
+        val branch = script.indexOf("dbus-daemon*)")
+        val retry = script.indexOf("system-bus LIVE after retry (transient probe failure)")
+        val failClosed = script.indexOf("alive but not answering after retry - FAIL CLOSED: endpoint preserved (no unlink/restart)")
+        assertTrue("live-daemon branch must exist", branch >= 0)
+        assertTrue("bounded retry verdict must exist", retry >= 0)
+        assertTrue("fail-closed verdict must exist", failClosed >= 0)
+        assertTrue("retry and fail-closed belong to the live-daemon branch",
+            branch < retry && branch < failClosed)
+        assertEquals("start_system_bus: one definition + exactly two call sites (stale-pidfile and no-live-daemon branches only)",
+            3, script.split("start_system_bus").size - 1)
+    }
+
+    /** A stale pidfile (live UNRELATED process, dead listener) may be
+     *  cleared; the referenced process itself is never killed. */
+    @Test fun stalePidfileBranchGroundsEndpointDeath() {
+        assertTrue(script.contains("pidfile stale (pid="))
+        assertTrue(script.contains("not a daemon) and listener unavailable"))
     }
 
     @Test fun healthySystemBusIsPreservedUntouched() {

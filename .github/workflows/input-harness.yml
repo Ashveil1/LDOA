@@ -91,7 +91,7 @@ jobs:
             # gates the user-facing ZIP export). Full output printed and
             # archived - no tail-only retention for gate classes.
             date -u +"EXPORT/REUSEGATE start %H:%M:%S"
-            timeout -s KILL 300 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.DiagnosticsExportTest,dev.phonelinux.proto.ReuseGateHealthTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-export.log || echo "EXPORT-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"
+            timeout -s KILL 300 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.DiagnosticsExportTest,dev.phonelinux.proto.ReuseGateHealthTest,dev.phonelinux.proto.GnomeSessionScriptSafetyTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-export.log || echo "EXPORT-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"
             grep -q "OK (" /tmp/instr-export.log || touch /tmp/PHONELINUX_EXPORT_FAILED
             date -u +"HARNESS arms start %H:%M:%S (lane=$LANE)"
             if [ "$LANE" = full ]; then timeout -s KILL 1500 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.LdoaInputHarnessTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr.log | tail -15 || echo "HARNESS-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"; else echo "harness SKIPPED (lane=$LANE)" > /tmp/instr.log; fi
