@@ -1,2 +1,2 @@
-request: build diagnostic APK of current head for user delivery (Ash, 2026-10-31)
-reason: diagnostic sampler build c954fb2 - more capture per support bundle
+request: build diagnostic APK of current head
+reason: narrow-verbose diagnostic sampler build, supersedes the c954fb2 export
