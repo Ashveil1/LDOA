@@ -183,6 +183,34 @@ object GuestUbuntu {
                 echo "gnome-launch: shell-missing-state xdg=$(ls /tmp/xdg 2>&1 | tr '\n' '|') ice=$(ls /tmp/.ICE-unix 2>&1 | tr '\n' '|') x11=$(ls /tmp/.X11-unix 2>&1 | tr '\n' '|')"
                 ps 2>&1 | head -25
               fi ) &
+            # FIRST-PAINT window evidence (diagnostic): the bus poll above
+            # proves only session-bus registration, not windows on screen.
+            # Splitting "guest never mapped a window" from "guest mapped,
+            # app-side presentation black" needs guest-side window ground
+            # truth in this log; the app-side wait conditions are the
+            # renderer.cpp buffer-wait logs (Buffer not found / not of
+            # expected size). xwininfo/xdpyinfo exist in this rootfs (POCO
+            # 2026-10-30). The IsViewable count is INDICATIVE ONLY: on a
+            # healthy session mutter's stage/composite windows make it
+            # nonzero, but it is not proof of pixels presented on screen.
+            ( sleep 5
+              PAINT=0
+              for i in ${'$'}(seq 1 30); do
+                V=0
+                for id in ${'$'}(xwininfo -root -children 2>/dev/null | awk '${'$'}1 ~ /^0x/ {print ${'$'}1}'); do
+                  S=${'$'}(xwininfo -id "${'$'}id" 2>/dev/null | awk '/Map State:/{print ${'$'}3}')
+                  [ "${'$'}S" = "IsViewable" ] && V=${'$'}((V + 1))
+                done
+                if [ "${'$'}V" -gt 0 ]; then
+                  echo "gnome-launch: first-viewable-window +${'$'}((5 + (i - 1) * 2))s count=${'$'}V launch=${'$'}LAUNCH_ID (indicative, not pixel proof)"
+                  PAINT=1
+                  break
+                fi
+                sleep 2
+              done
+              [ "${'$'}PAINT" = 1 ] || echo "gnome-launch: no viewable window after ~65s launch=${'$'}LAUNCH_ID (guest-side map silence suspected, not proven)"
+              echo "gnome-launch: x11-geometry=${'$'}(xdpyinfo 2>/dev/null | awk '/dimensions:/{print ${'$'}2}') surface-compare=pending"
+            ) &
             echo "gnome-launch: trying gnome-session --session=ubuntu (top bar + ubuntu-dock + yaru)"
             gnome-session --session=ubuntu 2>&1 &
             GSPID=${'$'}!
