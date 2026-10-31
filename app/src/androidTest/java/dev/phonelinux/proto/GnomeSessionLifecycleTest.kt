@@ -100,6 +100,23 @@ class GnomeSessionLifecycleTest {
             System.currentTimeMillis() - t0 < 30_000)
     }
 
+    /** Fail-closed suppression verdict (watchdog teardown incomplete):
+     *  the gate must fail fast exactly like the plain definitive verdict -
+     *  the script's suppression line embeds the same matched substring
+     *  with a truthful qualifier. */
+    @Test fun gateFailsFastOnSuppressedFallbackVerdict() {
+        val log = File.createTempFile("gate", ".log", ctx.cacheDir)
+        log.writeText(
+            "gnome-launch: session bus unix:path=/tmp/dbus-TEST,guid=abc\n" +
+            "gnome-launch: fallback shell missing after 90s (not attempted: managed teardown incomplete - fail closed, duplicate-WM risk)\n")
+        val p = sleeper()
+        val t0 = System.currentTimeMillis()
+        val hit = XServer.awaitShellRegistered(p, log, 0L, 60_000)
+        assertNull(hit)
+        assertTrue("fail-fast on suppressed-fallback verdict, not the full budget",
+            System.currentTimeMillis() - t0 < 30_000)
+    }
+
     /** Gate patience: the first-phase verdict alone must NOT end the gate;
      *  the unified fallback may still be starting. Expiry must come from
      *  the budget, not an early exit. */
