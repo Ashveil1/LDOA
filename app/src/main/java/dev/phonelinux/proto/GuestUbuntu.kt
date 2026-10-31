@@ -619,12 +619,35 @@ object GuestUbuntu {
             # proves the failing call sits outside the filter. Install is
             # guarded: rootfs bootstrap already proved apt works here.
             if ! command -v strace >/dev/null 2>&1; then
-              apt-get install -y strace >/dev/null 2>&1
+              timeout 60 apt-get install -y strace >/dev/null 2>&1
             fi
+            # strace 6.8 source (src/strace.c test_ptrace_seize): a failed
+            # PTRACE_SEIZE self-test is error_func_msg_and_die - strace
+            # EXITS 1 BEFORE tracing anything (run 41236388769: "unexpected
+            # wait status 0" under proot, zero session output). So a dead
+            # strace WRAPPER's exit code is not a gnome-session exit.
+            # Self-test first; a blind strace must never masquerade as a
+            # session death - fall back to an untraced launch whose exit
+            # status IS the real session's, and label the branch.
+            TRACED=untraced
             if command -v strace >/dev/null 2>&1; then
-              strace -f -o /tmp/xdg/gs-ice.strace -e trace=link,linkat,unlink,unlinkat,creat,open,openat,stat,newfstatat,fcntl,flock,close,dup,dup2,dup3 gnome-session --session=ubuntu 2>&1 &
+              timeout 30 strace -f -o /tmp/xdg/.strace-selftest -e trace=none /bin/true >/dev/null 2>&1
+              STRC=${'$'}?
+              if [ "${'$'}STRC" = 0 ]; then
+                TRACED=traced
+              else
+                echo "gnome-launch: strace self-test FAILED rc=${'$'}STRC (nonzero/timeout=124: ptrace blind here, run 41236388769: unexpected wait status 0) - launching UNTRACED"
+              fi
             else
               echo "gnome-launch: strace unavailable - launching untraced"
+            fi
+            if [ "${'$'}TRACED" = traced ]; then
+              WNOTE="strace WRAPPER exit - session status UNKNOWN (a self-test pass does not prove this traced run; wrapper death never proves session death)"
+              echo "gnome-launch: branch=traced (wrapper=strace; its exit is NOT the session exit)"
+              strace -f -o /tmp/xdg/gs-ice.strace -e trace=link,linkat,unlink,unlinkat,creat,open,openat,stat,newfstatat,fcntl,flock,close,dup,dup2,dup3 gnome-session --session=ubuntu 2>&1 &
+            else
+              WNOTE="untraced - this IS the real session exit"
+              echo "gnome-launch: branch=untraced"
               gnome-session --session=ubuntu 2>&1 &
             fi
             GSPID=${'$'}!
@@ -735,13 +758,13 @@ object GuestUbuntu {
             WATCHDOG_PID=${'$'}!
             sleep 20
             if kill -0 ${'$'}GSPID 2>/dev/null; then
-              echo "gnome-launch: gnome-session alive pid=${'$'}GSPID"
+              echo "gnome-launch: gnome-session alive pid=${'$'}GSPID branch=${'$'}TRACED"
               snapshot_owned_tree "${'$'}GSPID" 2>/dev/null || true
               wait ${'$'}GSPID
-              echo "gnome-launch: gnome-session exited=${'$'}? after surviving the 20s check - falling back to bare gnome-shell --x11"
+              echo "gnome-launch: session launcher exited=${'$'}? after surviving the 20s check (branch=${'$'}TRACED: ${'$'}WNOTE) - falling back to bare gnome-shell --x11"
             else
               wait ${'$'}GSPID 2>/dev/null
-              echo "gnome-launch: gnome-session died exit=${'$'}? - falling back to bare gnome-shell --x11"
+              echo "gnome-launch: session launcher died exit=${'$'}? (branch=${'$'}TRACED: ${'$'}WNOTE) - falling back to bare gnome-shell --x11"
             fi
             if [ -f /tmp/xdg/gs-ice.strace ]; then
               echo "gnome-launch: ice-strace ENOSYS lines:"
