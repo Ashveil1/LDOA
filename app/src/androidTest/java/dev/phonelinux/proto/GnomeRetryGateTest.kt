@@ -11,8 +11,8 @@ import org.junit.runner.RunWith
 import java.io.File
 
 /**
- * Regression coverage for the 2026-10-30 approved GNOME retry/stop fixes
- * (Ash 10:35). Runs in the emulator-test job (no GNOME/rootfs needed: the
+ * Regression coverage for the GNOME retry/stop fixes (2026-10-30).
+ * Runs in the emulator-test job (no GNOME/rootfs needed: the
  * gate only reads a log file and polls a live Process; a sleep process
  * stands in for the session). Bounded: ~20s total.
  *

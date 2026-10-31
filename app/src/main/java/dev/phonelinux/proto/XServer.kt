@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.system.Os
 import android.system.OsConstants
@@ -50,6 +51,50 @@ object XServer {
      *  (gate passed) never sets this and is still reused/brought forward. */
     @Volatile private var retainedSessionFailed = false
 
+    /** Readiness/ownership timeline for the diagnostic export: a bounded
+     *  ring of gate decisions with monotonic + wall-clock stamps, so a late
+     *  failure dialog can be matched to the exact launch it judged.
+     *  Diagnostics only - never read by control flow. */
+    internal data class GateEvent(val monoMs: Long, val wallMs: Long, val text: String)
+    private val gateTimeline = ArrayDeque<GateEvent>()
+    internal fun gateLog(text: String) {
+        synchronized(gateTimeline) {
+            gateTimeline.addLast(GateEvent(SystemClock.elapsedRealtime(), System.currentTimeMillis(), text))
+            while (gateTimeline.size > 128) gateTimeline.removeFirst()
+        }
+        Log.i(TAG, "gate: " + text)
+    }
+
+    /** Diagnostic snapshot for the export ZIP: session/ownership state +
+     *  the gate timeline. Diagnostics only; contains no user data. */
+    internal fun diagnosticSnapshot(ctx: Context): String {
+        val prefs = ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
+        val sb = StringBuilder()
+        sb.append("build_version=").append(BuildConfig.VERSION_NAME).append('\n')
+        sb.append("build_git=").append(BuildConfig.GIT_SHA).append('\n')
+        sb.append("now_wall_ms=").append(System.currentTimeMillis()).append('\n')
+        sb.append("now_mono_ms=").append(SystemClock.elapsedRealtime()).append('\n')
+        sb.append("ubuntu_desktop_active=").append(prefs.getBoolean("ubuntu_desktop_active", false)).append('\n')
+        sb.append("ubuntu_desktop_degraded=").append(prefs.getBoolean("ubuntu_desktop_degraded", false)).append('\n')
+        sb.append("preparing=").append(preparing).append('\n')
+        sb.append("xserver_alive=").append(process?.isAlive).append('\n')
+        sb.append("gnome_session_alive=").append(gnomeSession?.second?.isAlive).append('\n')
+        sb.append("gnome_session_reusable_ubuntu=").append(gnomeSessionActive(Distros.UBUNTU)).append('\n')
+        sb.append("retained_session_failed=").append(retainedSessionFailed).append('\n')
+        sb.append("ownership_generation=").append(ownershipGeneration).append('\n')
+        sb.append("session_bus=").append(gnomeSessionBus ?: "(none)").append('\n')
+        sb.append("session_root_ident=").append(sessionRootIdent?.let { "pid=" + it.pid + " start=" + it.start + " uid=" + it.uid } ?: "(none)").append('\n')
+        sb.append("session_bus_ident=").append(sessionBusIdent?.let { "pid=" + it.pid + " start=" + it.start + " uid=" + it.uid } ?: "(none)").append('\n')
+        sb.append("-- gate timeline (mono_ms | wall | event) --\n")
+        synchronized(gateTimeline) {
+            for (e in gateTimeline) sb.append(e.monoMs).append(" | ").append(isoTime(e.wallMs)).append(" | ").append(e.text).append('\n')
+        }
+        return sb.toString()
+    }
+
+    private fun isoTime(wallMs: Long): String =
+        java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", java.util.Locale.US).format(java.util.Date(wallMs))
+
     /** Bus address of the TRACKED session, captured from its own
      *  "gnome-launch: session bus" log line when the gate first sees it.
      *  A retry on the REUSED session gets no fresh bus line, so the gate
@@ -94,6 +139,52 @@ object XServer {
         return@synchronized GuestUbuntu.launchGnomeSession(ctx, rootfs).also { gnomeSession = distro.id to it; gnomeSessionBus = null; ownershipGeneration++ }
     }
 
+    /** True when [p] is the ALREADY-RUNNING tracked session (the reuse
+     *  branch of launchOrReuseGnomeSession), not a fresh launch. */
+    private fun isReusedSession(distro: Distro, p: Process, wasAlive: Boolean): Boolean =
+        wasAlive && p === (gnomeSession?.second) && gnomeSessionActive(distro)
+
+    /** Reuse health for a session that passed its gate earlier. Process
+     *  liveness alone is not health: the tracked root must be the SAME
+     *  process (pid + start time + uid, so a recycled pid is never "our"
+     *  session and can never be signaled by mistake), the session bus
+     *  must be alive, and the X server must not be younger than the
+     *  session (a restarted X orphaned every guest client - forwarding
+     *  there would show an empty display). Returns null when healthy,
+     *  else a short diagnosis reason. Never signals or kills anything. */
+    internal fun healthyReuseOrReason(ctx: Context, distro: Distro, p: Process): String? {
+        val pid = pidOf(p) ?: return "session pid unreadable"
+        val snap = synchronized(ownershipLock) { Triple(sessionRootIdent, sessionBusIdent, process) }
+        val nowIdent = identityOf(pid) ?: return "session process exited between checks"
+        val captured = snap.first ?: return "no launch-time identity captured"
+        if (captured.pid != nowIdent.pid || captured.start != nowIdent.start || captured.uid != nowIdent.uid)
+            return "session pid " + pid + " identity changed (a recycled pid is not our session)"
+        val busPid = sessionBusPid(ctx) ?: return "session bus pid file missing"
+        val busNow = identityOf(busPid) ?: return "session bus process gone"
+        val busCaptured = snap.second
+        if (busCaptured != null && (busCaptured.start != busNow.start || busCaptured.uid != busNow.uid))
+            return "session bus pid " + busPid + " identity changed"
+        val xs = snap.third
+        if (xs == null || !xs.isAlive) return "X server not running"
+        val xpid = pidOf(xs) ?: return "X server pid unreadable"
+        val xIdent = identityOf(xpid) ?: return "X server identity unreadable"
+        val xStart = xIdent.start.toLongOrNull(); val sStart = nowIdent.start.toLongOrNull()
+        if (xStart != null && sStart != null && xStart > sStart)
+            return "X server restarted after the session launched - its guest clients died with the old server"
+        return null
+    }
+
+    /** Test-only seam: install session/X state exactly as launch-confirm
+     *  would, from caller-owned processes. App code never calls this. */
+    internal fun installSessionStateForTest(distro: Distro, session: Process?, xserver: Process?) {
+        synchronized(ownershipLock) {
+            gnomeSession = session?.let { distro.id to it }
+            sessionRootIdent = session?.let { pidOf(it)?.let { pid -> identityOf(pid) } }
+            sessionBusIdent = null
+            process = xserver
+        }
+    }
+
     fun tmpDir(ctx: Context): File = File(ctx.filesDir, "usr/tmp")
     fun socketDir(ctx: Context): File = File(tmpDir(ctx), ".X11-unix")
 
@@ -104,6 +195,13 @@ object XServer {
         val lib = File(ctx.applicationInfo.nativeLibraryDir, "libXlorie.so")
         check(lib.isFile) { "libXlorie.so missing from nativeLibraryDir" }
         val log = File(ctx.filesDir, "xserver.log")
+        // Same bounded retention as the guest log: keep one previous
+        // generation instead of growing forever.
+        if (log.isFile && log.length() > 4L * 1024 * 1024) {
+            val prev = File(ctx.filesDir, "xserver.prev.log")
+            try { prev.delete(); if (!log.renameTo(prev)) Log.w(TAG, "xserver log rotation rename failed") }
+            catch (t: Throwable) { Log.w(TAG, "xserver log rotation failed", t) }
+        }
         val pb = ProcessBuilder("/system/bin/app_process", "/", "com.termux.x11.CmdEntryPoint", ":0")
         val env = pb.environment()
         env["CLASSPATH"] = ctx.applicationInfo.sourceDir
@@ -172,7 +270,7 @@ object XServer {
                 val fresh = log.readText().substring(logBase.toInt().coerceAtMost(log.length().toInt()))
                 val bus = fresh.lineSequence().firstOrNull { it.contains("gnome-launch: session bus ") }
                     ?.substringAfter("gnome-launch: session bus ")?.trim()
-                if (bus != null) gnomeSessionBus = bus
+                if (bus != null) { gnomeSessionBus = bus; gateLog("session bus captured") }
                 // Reused session: no fresh bus line - fall back to the
                 // tracked address of THIS process's own launch. A marker
                 // naming any other bus (stale or foreign session) still
@@ -189,7 +287,7 @@ object XServer {
                 // may still register. The fallback-phase verdict IS - fail
                 // fast instead of burning the whole budget.
                 if (fresh.contains("gnome-launch: fallback shell missing after 90s")) {
-                    Log.w(TAG, "gate: script reported definitive fallback failure")
+                    gateLog("script reported definitive fallback failure - fail fast")
                     return null
                 }
             }
@@ -216,7 +314,8 @@ object XServer {
             var launched = false
             var failure: String? = null
             try {
-                teardownRetainedFailedSession(ctx)
+                gateLog("openDesktop begin distro=" + distro.id)
+                if (teardownRetainedFailedSession(ctx)) gateLog("tore down retained FAILED session before relaunch")
                 onStage("Starting X server")
                 start(ctx)
                 val installer = DistroInstaller(ctx)
@@ -277,7 +376,20 @@ object XServer {
                                 // append-only across retries).
                                 val gnomeLog = File(ctx.filesDir, "guest-gnome.log")
                                 val logBase = if (gnomeLog.isFile) gnomeLog.length() else 0L
+                                val wasAlive = gnomeSessionActive(distro)
                                 val p = launchOrReuseGnomeSession(ctx, distro, rootfs)
+                                val reused = isReusedSession(distro, p, wasAlive)
+                                // Process-alive alone is NOT reuse health:
+                                // verify the tracked root is the SAME
+                                // process (pid + start time), its session
+                                // bus is alive, and the X server is not
+                                // younger than the session (a restarted X
+                                // orphaned every guest client).
+                                val reuseReason = if (reused) healthyReuseOrReason(ctx, distro, p) else null
+                                val bypassGate = reused && reuseReason == null
+                                gateLog(if (bypassGate) "reusing HEALTHY session (identity+bus+X verified)"
+                                    else if (reused) "reuse UNHEALTHY: " + reuseReason + " - fail closed, session NOT touched"
+                                    else "fresh session launch, logBase=" + logBase)
                                 // Readiness gate (P0/P2): only a shell that
                                 // REGISTERED on THIS launch's session bus
                                 // passes - "gnome-session alive" and the bare
@@ -286,7 +398,29 @@ object XServer {
                                 // stalled, black screen). Bus address must
                                 // match this launch's own bus line so an owner
                                 // from a stale session can never satisfy it.
-                                val marker = awaitShellRegistered(p, gnomeLog, logBase, 210_000)
+                                // A HEALTHY reused session writes no new log
+                                // lines, so the freshness-gated poll below
+                                // could only burn the full budget and then
+                                // false-fail - and retainFailedSessionOwnership
+                                // would then mark a WORKING desktop failed,
+                                // letting the next "Try again" kill it
+                                // (POCO 2026-10-31 18:20: desktop open and
+                                // usable, then "did not start / guest-gnome.log
+                                // has no new output" on returning to the app).
+                                // A HEALTHY reused session passed its own gate
+                                // at launch: bring it forward without re-gating.
+                                // An unhealthy one never bypasses.
+                                // An unhealthy reuse is diagnosed, never
+                                // force-restarted: the poll could never
+                                // pass (no new log lines), so fail closed
+                                // NOW with the reason, retain ownership for
+                                // Stop session, and touch nothing.
+                                val marker = when {
+                                    bypassGate -> "reused healthy session (identity+bus+X verified)"
+                                    reused -> null
+                                    else -> awaitShellRegistered(p, gnomeLog, logBase, 210_000)
+                                }
+                                gateLog(if (marker != null) "gate PASS: " + marker.take(120) else "gate TIMEOUT/fail after budget, process " + (if (p.isAlive) "alive" else "exited"))
                                 if (marker != null) {
                                     Log.i(TAG, "GNOME session evidence: " + marker)
                                     ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
@@ -311,11 +445,16 @@ object XServer {
                                         }
                                     }
                                 } else {
-                                    val tail = if (gnomeLog.isFile && gnomeLog.length() > logBase)
-                                        gnomeLog.readText().substring(logBase.toInt().coerceAtMost((gnomeLog.length()).toInt())).takeLast(1500)
-                                        else "(guest-gnome.log has no new output)"
-                                    failure = "GNOME shell did not register on its session bus within 210s incl. fallback window (process " +
-                                        (if (p.isAlive) "still running" else "exited") + "). Log tail:\n" + tail
+                                    if (reused && reuseReason != null) {
+                                        failure = "The desktop session on this device is not healthy (" + reuseReason +
+                                            "). Nothing was killed - Stop session tears it down cleanly."
+                                    } else {
+                                        val tail = if (gnomeLog.isFile && gnomeLog.length() > logBase)
+                                            gnomeLog.readText().substring(logBase.toInt().coerceAtMost((gnomeLog.length()).toInt())).takeLast(1500)
+                                            else "(guest-gnome.log has no new output)"
+                                        failure = "GNOME shell did not register on its session bus within 210s incl. fallback window (process " +
+                                            (if (p.isAlive) "still running" else "exited") + "). Log tail:\n" + tail
+                                    }
                                     // Retain ownership of the still-running session so
                                     // Stop session can tear it down by identity.
                                     retainFailedSessionOwnership(ctx, p)
@@ -442,6 +581,7 @@ object XServer {
 
     internal fun retainFailedSessionOwnership(ctx: Context, p: Process) {
         if (p.isAlive) {
+            gateLog("retained FAILED session ownership (Stop session can tear it down)")
             synchronized(ownershipLock) {
                 retainedSessionFailed = true
                 sessionProcess = p
@@ -491,7 +631,7 @@ object XServer {
         return out
     }
 
-    private class PIdent(val pid: Int, val start: String, val uid: Int)
+    internal class PIdent(val pid: Int, val start: String, val uid: Int)
 
     /** Identity of one live process, or null if gone or NOT ours (all
      *  guest processes run as the app uid). */

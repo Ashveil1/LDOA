@@ -14,6 +14,9 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0-spike"
+        // Stamp the exact source the APK was built from so a phone log can
+        // never again be read against the wrong code revision.
+        buildConfigField("String", "GIT_SHA", "\"" + gitSha() + "\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Ship only ABIs with a complete native set (proot + loaders +
         // lorie); the armeabi-v7a/x86 builds lack proot and would install
@@ -31,7 +34,10 @@ android {
         }
     }
 
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
 
     packaging {
         // extractNativeLibs=true requires legacy (uncompressed) packaging so our
@@ -63,3 +69,11 @@ dependencies {
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
 }
+
+/** Best-effort source stamp; "unknown" when the build host has no git
+ *  checkout metadata. Never fails the build. */
+fun gitSha(): String = try {
+    val p = ProcessBuilder("git", "rev-parse", "--short=12", "HEAD").directory(rootDir).start()
+    val out = p.inputStream.readBytes().toString(Charsets.UTF_8).trim()
+    if (p.waitFor() == 0 && out.isNotEmpty()) out else "unknown"
+} catch (e: Exception) { "unknown" }

@@ -124,26 +124,30 @@ class SpikeViewModel : ViewModel() {
 
 class MainActivity : ComponentActivity() {
 
-    /** Read the append-only guest-gnome.log for export: bounded tail read on a
-     *  background thread (the file grows across launches; clipboard and
-     *  ACTION_SEND payloads ride binder's ~1MB transaction cap), then invoke
-     *  [onReady] on the main thread. 256 KiB keeps the payload well under the
-     *  cap while covering many full sessions. */
-    private fun exportGnomeLog(onReady: MainActivity.(String) -> Unit) {
-        val f = java.io.File(filesDir, "guest-gnome.log")
-        thread(name = "log-export") {
-            val maxBytes = 256 * 1024
-            val body = if (!f.isFile) "(guest-gnome.log missing)" else {
-                val len = f.length()
-                val skip = if (len > maxBytes) len - maxBytes else 0L
-                val text = f.inputStream().use { ins ->
-                    var remaining = skip
-                    while (remaining > 0) remaining -= ins.skip(remaining)
-                    ins.readBytes().toString(Charsets.UTF_8)
+    /** Build the diagnostic ZIP off the UI thread, then hand it to the
+     *  system share sheet via FileProvider. A file survives WhatsApp as a
+     *  full document attachment; the old clipboard route capped the payload
+     *  at 256 KiB of one log (binder's ~1MB transaction cap) and dropped
+     *  every other evidence stream. */
+    private fun shareDiagnostics() {
+        thread(name = "diagnostics-export") {
+            try {
+                val res = Diagnostics.buildZip(applicationContext)
+                val uri = androidx.core.content.FileProvider.getUriForFile(
+                    this@MainActivity, packageName + ".fileprovider", res.zip)
+                val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                    type = "application/zip"
+                    putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                    addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
-                if (skip > 0) "[truncated: last " + maxBytes + " bytes of " + len + "]\n" + text else text
+                runOnUiThread {
+                    vm.log += "[..] diagnostics ZIP ready (" + res.bytes + " bytes, " + res.entries + " entries" +
+                        (if (res.omitted.isEmpty()) "" else "; omitted: " + res.omitted.joinToString()) + ")\n"
+                    startActivity(android.content.Intent.createChooser(send, "Share diagnostic ZIP"))
+                }
+            } catch (t: Throwable) {
+                runOnUiThread { vm.log += "[!!] diagnostics export failed: " + t + "\n" }
             }
-            runOnUiThread { onReady(body) }
         }
     }
 
@@ -274,17 +278,14 @@ class MainActivity : ComponentActivity() {
                                 requestDesktop(Distros.UBUNTU)
                             }) { Text("Try again") } },
                             dismissButton = { Row {
-                                // Ash 2026-10-30 10:35 approval: copy the FULL
-                                // guest log (the 1500-char tail above cannot
-                                // carry the launch evidence) + stop the failed
-                                // session (handle retained by XServer on failure).
+                                // Full evidence export as a shareable file:
+                                // the dialog's 1500-char tail cannot carry
+                                // the launch evidence. The failed session's
+                                // handle stays retained for Stop session.
                                 TextButton(onClick = {
-                                    exportGnomeLog { body ->
-                                        val cm = this@MainActivity.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                                        cm.setPrimaryClip(android.content.ClipData.newPlainText("guest-gnome.log", body))
-                                        vm.log += "[tap] desktop error dialog: copied guest-gnome.log (" + body.length + " chars)\n"
-                                    }
-                                }) { Text("Copy log") }
+                                    vm.log += "[tap] desktop error dialog: export diagnostics\n"
+                                    shareDiagnostics()
+                                }) { Text("Share diagnostic ZIP") }
 
                                 TextButton(onClick = {
                                     vm.log += "[tap] desktop error dialog: stop session\n"
@@ -329,7 +330,8 @@ class MainActivity : ComponentActivity() {
                                     else -> vm.install(this@MainActivity, d)
                                 }
                             },
-                            onDesktop = { d -> requestDesktop(d) })
+                            onDesktop = { d -> requestDesktop(d) },
+                            onExportDiagnostics = { shareDiagnostics() })
                         Screen.TERMINAL -> TerminalScreen(vm, onBack = { vm.closeTerminal() })
                     }
                 }
@@ -400,7 +402,7 @@ private fun FirstRunScreen(vm: SpikeViewModel, onInstall: () -> Unit, onResumeDe
 }
 
 @Composable
-private fun PickerScreen(distros: List<Distro>, vm: SpikeViewModel, onPrimary: (Distro) -> Unit, onDesktop: (Distro) -> Unit) {
+private fun PickerScreen(distros: List<Distro>, vm: SpikeViewModel, onPrimary: (Distro) -> Unit, onDesktop: (Distro) -> Unit, onExportDiagnostics: () -> Unit) {
     Column(Modifier.fillMaxSize().statusBarsPadding().padding(20.dp)) {
         Text("Phone Linux", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
         Text("prototype - terminal build", color = TextDim, fontSize = 13.sp)
@@ -423,7 +425,13 @@ private fun PickerScreen(distros: List<Distro>, vm: SpikeViewModel, onPrimary: (
         }
         GestureToggles()
         Spacer(Modifier.height(8.dp))
-        Text("Output", color = TextDim, fontSize = 13.sp)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Output", color = TextDim, fontSize = 13.sp, modifier = Modifier.weight(1f))
+            TextButton(onClick = onExportDiagnostics,
+                modifier = Modifier.semantics { contentDescription = "export-diagnostics" }) {
+                Text("Export diagnostics ZIP", color = Accent)
+            }
+        }
         Spacer(Modifier.height(6.dp))
         Box(Modifier.fillMaxSize().clip(RoundedCornerShape(14.dp)).background(Color(0xFF0A0E1A)).padding(12.dp)) {
             Text(vm.log, color = Accent2, fontFamily = FontFamily.Monospace, fontSize = 12.sp,

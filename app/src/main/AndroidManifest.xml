@@ -34,6 +34,17 @@
              alive with a persistent notification + manual wakelock toggle.
              specialUse = "not covered by other types"; dataSync would be a
              mis-type. Same process as the app - no process move in L1. -->
+        <!-- Diagnostic export: share the ZIP via the system sheet; the
+             provider grants the receiving app read access to this one file. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="dev.phonelinux.proto.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
         <service
             android:name=".SessionService"
             android:exported="false"

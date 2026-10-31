@@ -329,6 +329,14 @@ object GuestUbuntu {
         File(rootfs, "root/gnome-session.sh").writeText(gnomeSessionScript())
         val nd = ctx.applicationInfo.nativeLibraryDir
         val log = File(ctx.filesDir, "guest-gnome.log")
+        // Bounded retention: the log is append-only across launches; keep one
+        // previous generation instead of growing forever (the diagnostic
+        // export includes both files, tail-capped).
+        if (log.isFile && log.length() > 4L * 1024 * 1024) {
+            val prev = File(ctx.filesDir, "guest-gnome.prev.log")
+            try { prev.delete(); if (!log.renameTo(prev)) Log.w(TAG, "gnome log rotation rename failed") }
+            catch (t: Throwable) { Log.w(TAG, "gnome log rotation failed", t) }
+        }
         val pb = ProcessBuilder(
             File(nd, "libproot.so").absolutePath,
             "--link2symlink",
