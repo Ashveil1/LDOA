@@ -222,6 +222,16 @@ rule). Upstream master defaults windowType=WINDOW_TYPE_NORMAL (post
 <Class>XTerm</Class> Group alongside the Type rule (WM_CLASS is always
 set). Per-window _NET_WM_STATE/type/hints probe added to the gate test
 to calibrate a future assert.
+Local maximize-probe recipe (Xvfb, no device needed): build jwm from
+the v2.4.3 source tag against local X libs; generate the jwmrc exactly
+as GuestMobileShell.jwmrc does (fonts/tray from MobileUiPrefs); start
+Xvfb at 1080x2012x24, sleep 2s BEFORE starting jwm (jwm exits with
+"could not open display" if it races the server - two contaminated
+probe reads were discarded for this), sleep 4s, launch xterm with the
+round's -fs value, then read the client id from xwininfo -root -tree
+(jwm reparents: one-level -children misses clients) and xprop
+_NET_WM_STATE / _NET_WM_WINDOW_TYPE / WM_NORMAL_HINTS. Expected fixed
+behavior: maximized atoms present, geometry inc-rounded to workarea.
 Home affordance: a tray button running jwm's showdesktop action
 (iconify all; a TaskList tap raises one back). 2.4.3 tray buttons
 support ONLY exec:/root:/showdesktop (action.c AddAction) - keybind
