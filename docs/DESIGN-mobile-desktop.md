@@ -244,3 +244,28 @@ Render-path neutral: window MANAGEMENT only - no compositor/GL/driver
 choice made here. Runtime validation rides the next gate run (existing
 xwininfo -tree evidence captures window geometry); not mobile/iOS-ready
 until pixel/input proof on device.
+
+## Local window-layer evidence, both gate scales (2026-10-31, run 41191922079 follow-up)
+
+Xvfb 1080x2012x24, jwm 2.4.3 (source build), type-less xterm, jwmrc exactly as
+generated (Group Type-normal + Group Class-XTerm, tray 48px bottom; scale-1.0:
+titleH 30 / term fs 13 / dpi 420; scale-0.75: titleH 24 / fs 10 / dpi 315):
+
+- scale=1.0: xterm 1060x1918+5+30, _NET_WM_STATE = MAXIMIZED_HORZ,
+  MAXIMIZED_VERT, FOCUSED; _NET_WM_WINDOW_TYPE absent (type-less client).
+  Matches runtime round-1 probe (shotlog L71043).
+- scale=0.75: xterm 1068x1925+5+24, identical maximized atoms. This is the
+  endpoint run 41191922079 could not reach (round-2 session cascade-died in
+  the shared-X trim before its probe executed). Class-group matching reads
+  WM_CLASS (always set), so it does not depend on the uninitialized
+  windowType that made the Type-only rule flaky.
+- X-loss cascade timing: jwm + xterm both dead <=255ms after Xvfb SIGKILL.
+  Consistent with runtime: round-2's X clients died within ~50ms of the
+  10:47:09.62 cgroup kill of the shared X server (6900).
+
+Harness caveats (local only, not product bugs): util-linux script 2.37 does
+not exit while the session dbus-daemon holds the pty (noble's newer script
+behaves differently - runtime script[15805] died at 10:47:09.648); probe
+window lookup must match the class tuple ("xterm" "XTerm"), not the window
+title; host pcmanfm (non-noble build) did not set _NET_WM_WINDOW_TYPE on its
+desktop window - do not read local pcmanfm behavior as product evidence.
