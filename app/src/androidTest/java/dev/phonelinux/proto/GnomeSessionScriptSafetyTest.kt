@@ -168,6 +168,46 @@ class GnomeSessionScriptSafetyTest {
             script.contains("""kill -0 ${'$'}GSPID 2>/dev/null || exit 0"""))
     }
 
+
+    /** The watchdog budget is a wall-clock DEADLINE, not a loop count:
+     *  unbounded pings under bus congestion must not stretch the fire
+     *  point by iterations x call latency (phone evidence 2026-10-31:
+     *  watchdog never fired within the app gate's 210s). Each ping is
+     *  doubly bounded: gdbus --timeout 2 (bus-level clean error) inside
+     *  external `timeout 4` (kills a wedged gdbus process) - the two
+     *  mechanisms are not interchangeable. SECONDS is dash-empty; the
+     *  deadline arithmetic must use date +%s. */
+    @Test fun watchdogBudgetIsDeadlineBasedWithDoublyBoundedPings() {
+        assertTrue("deadline anchor must exist",
+            script.contains("WD_START=") && script.contains("date +%s"))
+        assertTrue("deadline comparison must exist",
+            script.contains("-lt ${'$'}WD_BUDGET"))
+        assertFalse("loop-count budget stretches by call latency - forbidden",
+            script.contains("seq 1 55"))
+        assertFalse("SECONDS is empty in dash - deadline must not use it",
+            script.contains("SECONDS"))
+        assertEquals("watchdog + fallback pings must be doubly bounded (gdbus --timeout 2 inside timeout 4)", 4,
+            script.split("timeout 4 gdbus call --session --timeout 2").size - 1)
+    }
+
+    /** Sampler X11 calls have no internal timeout: a hung X server wedged
+     *  the sampler after sample 1 on the 2026-10-31 phone run. Every X
+     *  call in the sampler must be externally bounded, and the client-list
+     *  parse must never read error text as window ids. */
+    @Test fun samplerXCallsAreBoundedAndParseGuarded() {
+        assertTrue("timeout tool must be probed at sampler start",
+            script.contains("pgrep pidof xprop timeout; do"))
+        assertTrue("client list call must be bounded",
+            script.contains("CL=${'$'}(timeout 3 xprop -root _NET_CLIENT_LIST 2>/dev/null)"))
+        assertTrue("per-window xwininfo must be bounded",
+            script.contains("INFO=${'$'}(timeout 3 xwininfo -id"))
+        assertTrue("parse must only run on a real list header (error text is not window ids)",
+            script.contains("*\" # \"*)"))
+        assertTrue("unavailable marker must exist",
+            script.contains("win-list probe unavailable/empty:"))
+        assertFalse("unbounded xprop in the sampler window loop is forbidden",
+            script.contains("for id in ${'$'}(xprop -root _NET_CLIENT_LIST"))
+    }
     @Test fun diagnosticProbesPresent() {
         assertTrue("installed-version probe must exist", script.contains("dpkg-query -W -f="))
         assertTrue("sampler system-bus liveness probe must exist", script.contains("sysbus_live="))

@@ -347,7 +347,7 @@ object GuestUbuntu {
               {
               if [ "${'$'}ROTATED" = yes ]; then echo "=== ldoa-probes rotated: previous session's samples are in ldoa-probes.prev.log ==="; fi
               echo "=== ldoa-probes begin utc=${'$'}(date -u +%FT%TZ) launch=${'$'}LAUNCH_ID ==="
-              for t in gdbus xwininfo xdpyinfo xrandr glxinfo pgrep pidof xprop; do
+              for t in gdbus xwininfo xdpyinfo xrandr glxinfo pgrep pidof xprop timeout; do
                 if command -v "${'$'}t" >/dev/null 2>&1; then echo "tool ${'$'}t=available"; else echo "tool ${'$'}t=UNAVAILABLE"; fi
               done
               XP=${'$'}(pgrep -f CmdEntryPoint | head -1)
@@ -384,12 +384,22 @@ object GuestUbuntu {
                   echo "xserver_now NOT_FOUND"
                 fi
                 V=0; N=0
-                for id in ${'$'}(xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# //' | tr ',' ' '); do
-                  N=${'$'}((N + 1)); [ "${'$'}N" -gt 12 ] && break
-                  INFO=${'$'}(xwininfo -id "${'$'}id" 2>/dev/null | awk '/Map State:/{ms=${'$'}3} /Width:/{w=${'$'}2} /Height:/{h=${'$'}2} END{printf "map=%s geo=%sx%s", ms, w, h}')
-                  case "${'$'}INFO" in *IsViewable*) V=${'$'}((V + 1)) ;; esac
-                  echo "win ${'$'}id ${'$'}INFO class=${'$'}(xprop -id "${'$'}id" WM_CLASS 2>/dev/null | sed 's/.*= //')"
-                done
+                # X calls have NO internal timeout - bound each with external
+                # `timeout` (3s) or a hung X server wedges the sampler (phone
+                # evidence 2026-10-31: probes file froze after sample 1).
+                # Guard the parse: an absent property yields error text, not
+                # a "# id" list - never parse error text as window ids.
+                CL=${'$'}(timeout 3 xprop -root _NET_CLIENT_LIST 2>/dev/null)
+                case "${'$'}CL" in
+                  *" # "*)
+                    for id in ${'$'}(echo "${'$'}CL" | sed 's/.*# //' | tr ',' ' '); do
+                      N=${'$'}((N + 1)); [ "${'$'}N" -gt 12 ] && break
+                      INFO=${'$'}(timeout 3 xwininfo -id "${'$'}id" 2>/dev/null | awk '/Map State:/{ms=${'$'}3} /Width:/{w=${'$'}2} /Height:/{h=${'$'}2} END{printf "map=%s geo=%sx%s", ms, w, h}')
+                      case "${'$'}INFO" in *IsViewable*) V=${'$'}((V + 1)) ;; esac
+                      echo "win ${'$'}id ${'$'}INFO class=${'$'}(timeout 3 xprop -id "${'$'}id" WM_CLASS 2>/dev/null | sed 's/.*= //')"
+                    done ;;
+                  *) echo "win-list probe unavailable/empty: ${'$'}(echo "${'$'}CL" | head -1 | cut -c1-80)" ;;
+                esac
                 echo "client_windows=${'$'}N viewable=${'$'}V (sample-time map state of managed clients; titles excluded at collection)"
                 if [ "${'$'}i" = "3" ] || [ "${'$'}i" = "8" ]; then
                   if [ -n "${'$'}SP" ]; then
@@ -597,24 +607,32 @@ object GuestUbuntu {
             # Watchdog: an unbounded wait would let a wedged gnome-session (shell
             # never registers, session never exits) block the fallback forever
             # while the app gate burns its budget. If no shell owns the bus by
-            # ~+112s, terminate the managed tree so the unified fallback runs; the
-            # fallback poll's marker or the definitive verdict then lands within
-            # the app budget (210s: 112 + <=7 teardown + 90 fallback poll). On an
-            # incomplete teardown the fallback is SUPPRESSED (fail closed): the
-            # gate-matched definitive verdict is emitted with its reason, and the
-            # main flow exits instead of exec'ing a second WM.
-            ( for i in ${'$'}(seq 1 55); do
+            # the +106s DEADLINE, terminate the managed tree so the unified
+            # fallback runs. The budget is a wall-clock deadline, NOT a loop
+            # count: each ping is doubly bounded (gdbus --timeout 2 inside
+            # `timeout 4` - the two mechanisms are not interchangeable: the
+            # gdbus one gives a clean bus-level error, the external one kills
+            # a wedged gdbus process), so bus congestion cannot stretch the
+            # fire point by iterations x call latency (phone evidence
+            # 2026-10-31: watchdog never fired within the 210s gate).
+            # Worst case: 106 + <=6 (last sleep+ping) + <=7 teardown + 90
+            # fallback poll = <=209s, inside the app gate's 210s. On an
+            # incomplete teardown the fallback is SUPPRESSED (fail closed):
+            # the gate-matched definitive verdict is emitted with its reason,
+            # and the main flow exits instead of exec'ing a second WM.
+            ( WD_START=${'$'}(date +%s); WD_BUDGET=${'$'}{LDOA_WD_BUDGET_S:-106}
+              while [ ${'$'}(( ${'$'}(date +%s) - WD_START )) -lt ${'$'}WD_BUDGET ]; do
                 sleep 2
                 # Session gone on its own? The main flow is already heading
                 # to the fallback; this poll's work is over. (Also bounds
                 # the main flow's "wait WATCHDOG_PID" below to one cycle.)
                 kill -0 ${'$'}GSPID 2>/dev/null || exit 0
-                if gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
+                if timeout 4 gdbus call --session --timeout 2 --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
                   exit 0
                 fi
               done
-              if ! gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
-                echo "gnome-launch: no shell on bus by +112s - terminating managed session tree (wrapper pid=${'$'}GSPID) to reach the fallback"
+              if ! timeout 4 gdbus call --session --timeout 2 --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
+                echo "gnome-launch: no shell on bus by +${'$'}(( ${'$'}(date +%s) - WD_START ))s (deadline-bounded, budget=${'$'}WD_BUDGET) - terminating managed session tree (wrapper pid=${'$'}GSPID) to reach the fallback"
                 managed_teardown "${'$'}GSPID"; TRC=${'$'}?
                 if [ "${'$'}TRC" -eq 1 ]; then
                   echo "gnome-launch: fallback shell missing after 90s (not attempted: managed teardown incomplete - fail closed, duplicate-WM risk)"
@@ -674,14 +692,15 @@ object GuestUbuntu {
             # marker the app gate matches; this phase's verdict is the
             # definitive failure (the first-phase "shell missing after 60s"
             # is not - the fallback may still be coming).
-            ( for i in ${'$'}(seq 1 45); do
+            ( FP_START=${'$'}(date +%s)
+              while [ ${'$'}(( ${'$'}(date +%s) - FP_START )) -lt 90 ]; do
                 sleep 2
-                if gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
+                if timeout 4 gdbus call --session --timeout 2 --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
                   echo "gnome-launch: fallback shell registered launch=${'$'}LAUNCH_ID bus=${'$'}DBUS_SESSION_BUS_ADDRESS"
                   break
                 fi
               done
-              if ! gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
+              if ! timeout 4 gdbus call --session --timeout 2 --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
                 echo "gnome-launch: fallback shell missing after 90s launch=${'$'}LAUNCH_ID"
               fi ) &
             exec gnome-shell --x11
