@@ -305,6 +305,21 @@ class MobileShellSpikeTest {
             // case-insensitive but Kotlin contains() is not - a line
             // carrying only "XTerm" would pass grep yet fail the assert.
             assertTrue("no xterm window mapped on :0 (scale=$scale)", wins.lowercase().contains("xterm"))
+            // WM-state probe (EVIDENCE ONLY, no assert - calibrate first):
+            // noble jwm 2.4.3-1build2 leaves ClientState.windowType
+            // uninitialized for type-less clients (hint.c ReadWindowState;
+            // fixed upstream post-2.4.3), making <Type> group matching
+            // nondeterministic (run 41186745767: xterm maximized at scale
+            // 1.0, cascaded at 0.75; local Xvfb repro agreed). Dump each
+            // client's real _NET_WM_STATE / type / size hints per round.
+            val winIds = Regex("""(0x[0-9a-f]+) "(?:xterm|root)"""", RegexOption.IGNORE_CASE)
+                .findAll(wins).map { it.groupValues[1] }.distinct().toList()
+            for (wid in winIds) {
+                val wst = GuestDesktop.guestShell(ctx, rootfs,
+                    "DISPLAY=:0 xprop -id $wid _NET_WM_STATE _NET_WM_WINDOW_TYPE WM_NORMAL_HINTS 2>/dev/null || true",
+                    extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"))
+                Log.i(TAG, "mobile window state (scale=$scale $wid): $wst")
+            }
 
             // TEARDOWN PROOF (every round): host-parentage kill walk from
             // the tracked proot root PLUS the session bus (dbus-daemon
