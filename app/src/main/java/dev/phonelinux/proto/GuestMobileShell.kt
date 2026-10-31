@@ -212,6 +212,18 @@ object GuestMobileShell {
         val pb = ProcessBuilder(
             File(nd, "libproot.so").absolutePath,
             "--link2symlink",
+            // proot's DEFAULT keeps the root alive until the LAST tracee
+            // exits: an abruptly-dead session shell (gate2 forward cell,
+            // run 41212895379) lets setsid'd daemons (session bus, gvfs)
+            // pin the root as a lingering phantom - the exact accumulation
+            // the Android trimmer fed on (run 41191922079: root 15803 died
+            // only with its last guest processes, 135s after its script).
+            // --kill-on-exit (present in the vendored binary, verified by
+            // strings) reaps every remaining tracee when `script` exits,
+            // so shell death tears down the whole guest tree. Normal
+            // teardown is unchanged: killTreeVerified kills the tree
+            // first; this only owns the abrupt path.
+            "--kill-on-exit",
             "-0", // fake root: session components + dbus expect euid 0
             "-r", rootfs.absolutePath,
             "-b", "/dev", "-b", "/proc", "-b", "/sys",
