@@ -615,7 +615,12 @@ class MobileShellSpikeTest {
             // ---- SUB-CELL A: wheel DELIVERY + direction calibration
             xevLog.delete()
             xevProc = heldGuest(listOf("/usr/bin/xev", "-event", "button"), xevLog)
-            heldIdents.add(hostPidOf(xevProc!!)?.let { identityOf(it) })
+            val xevRootPid = hostPidOf(xevProc!!)
+            assertTrue("scroll: xev proot root unreadable", xevRootPid != null)
+            val xevRootIdent = identityOf(xevRootPid!!)
+            assertTrue("scroll: xev proot root identity unreadable", xevRootIdent != null)
+            Log.i(TAG, "scroll: xev held root pid=" + xevRootPid)
+            heldIdents.add(xevRootIdent)
             var xev: WinGeom? = null
             val xevDeadline = System.currentTimeMillis() + 60_000
             while (System.currentTimeMillis() < xevDeadline && xev == null) {
@@ -650,9 +655,21 @@ class MobileShellSpikeTest {
             Shot.save("scroll-a-xev")
             assertTrue("scroll: no wheel button delivered to xev for either drag sign", delivered > 0)
             assertTrue("scroll: no drag sign produced button 4 (scrollback) - outcome impossible", wheelUpDySign != 0)
+            // Verified teardown (run 41230541977): destroy() SIGTERMs only
+            // the proot ROOT; --kill-on-exit fires on MAIN-TRACEE exit, not
+            // on root TERM, so a held xev OUTLIVED its root 21s+ as an
+            // orphan keeping its X connection and window (reaped only by
+            // the next lane's PLINUX_SESSION tagged sweep; 40/41 shots
+            // clean). Capture the tree BEFORE destroy, then reap with
+            // per-signal identity rechecks; the root-dead walk-skip guard
+            // makes this safe if destroy already worked.
+            val xevTreeIdents = treeOf(xevRootPid, scanProc()).mapNotNull { identityOf(it) }.toSet()
+            Log.i(TAG, "scroll: xev held tree: " + xevTreeIdents.map { it.pid.toString() + "(" + (procDetail(it.pid)?.comm ?: "?") + ")" })
+            heldIdents.addAll(xevTreeIdents)
             xevProc!!.destroy()
-            Thread.sleep(1_000)
-            val xevGoneDeadline = System.currentTimeMillis() + 15_000
+            val xevLeft = killTreeVerified(xevRootIdent, xevTreeIdents)
+            assertTrue("scroll: xev held tree survived verified teardown: " + xevLeft, xevLeft.isEmpty())
+            val xevGoneDeadline = System.currentTimeMillis() + 30_000
             var xevGone = false
             while (System.currentTimeMillis() < xevGoneDeadline) {
                 if (windowGeom(guest("DISPLAY=:0 xwininfo -root -tree 2>/dev/null || true"), "Event Tester") == null) {
@@ -660,7 +677,7 @@ class MobileShellSpikeTest {
                 }
                 Thread.sleep(2_000)
             }
-            assertTrue("scroll: xev window survived teardown - occlusion risk for the outcome ROI", xevGone)
+            assertTrue("scroll: xev window outlived its verified-dead tree >30s - server-side anomaly, occlusion risk for the outcome ROI", xevGone)
             Log.i(TAG, "scroll: delivery control OK (delivered=" + delivered + ", wheelUpDySign=" + wheelUpDySign + "), xev reaped and unmapped")
 
             // ---- SUB-CELL B: scroll OUTCOME on a test-owned legacy client
@@ -673,7 +690,12 @@ class MobileShellSpikeTest {
             xtermProc = heldGuest(listOf("/usr/bin/xterm", "-sl", "2000",
                 "-fa", "DejaVu Sans Mono", "-fs", "13",
                 "-T", "ldoa-scrolltest", "-e", "/bin/sh", "-c", printLoop), xtermLog)
-            heldIdents.add(hostPidOf(xtermProc!!)?.let { identityOf(it) })
+            val xtermRootPid = hostPidOf(xtermProc!!)
+            assertTrue("scroll: test xterm proot root unreadable", xtermRootPid != null)
+            val xtermRootIdent = identityOf(xtermRootPid!!)
+            assertTrue("scroll: test xterm proot root identity unreadable", xtermRootIdent != null)
+            Log.i(TAG, "scroll: test xterm held root pid=" + xtermRootPid)
+            heldIdents.add(xtermRootIdent)
             var xt: WinGeom? = null
             val xtDeadline = System.currentTimeMillis() + 60_000
             while (System.currentTimeMillis() < xtDeadline && xt == null) {
@@ -687,6 +709,9 @@ class MobileShellSpikeTest {
             val xtG = xt!!
             assertTrue("scroll: test xterm geometry implausible (expected maximized): " + xtG,
                 xtG.w > 400 && xtG.h > 800)
+            val xtermTreeIdents = treeOf(xtermRootPid, scanProc()).mapNotNull { identityOf(it) }.toSet()
+            Log.i(TAG, "scroll: test xterm held tree: " + xtermTreeIdents.map { it.pid.toString() + "(" + (procDetail(it.pid)?.comm ?: "?") + ")" })
+            heldIdents.addAll(xtermTreeIdents)
             Thread.sleep(10_000) // fingerprint print settles
 
             // Content ROI (guest coords): inside the client window, inset
