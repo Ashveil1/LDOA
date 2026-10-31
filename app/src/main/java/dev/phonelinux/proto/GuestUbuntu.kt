@@ -247,14 +247,20 @@ object GuestUbuntu {
             # the dpkg line pinned libice6=2:1.0.10-1build3, yet
             # IceLockAuthFile still fails ENOSYS inside gnome-session -
             # so the failure is process-context-specific, not path/fs.
-            # Trace the exact failing syscall + args; the excerpt lands in
-            # this log after the death path below. Install is guarded:
-            # rootfs bootstrap already proved apt works in this guest.
+            # Trace the failing syscall + args; the excerpt lands in this
+            # log after the death path below. The filter covers the path
+            # syscalls AND the lock family (fcntl/flock): the 2026-10-31
+            # trace showed ICEauthority creat() succeed with no ENOSYS in
+            # the path set. Caveat: proot can synthesize ENOSYS in
+            # userspace (no kernel syscall for strace to see) and nested
+            # ptrace can be partial, so an empty ENOSYS section never
+            # proves the failing call sits outside the filter. Install is
+            # guarded: rootfs bootstrap already proved apt works here.
             if ! command -v strace >/dev/null 2>&1; then
               apt-get install -y strace >/dev/null 2>&1
             fi
             if command -v strace >/dev/null 2>&1; then
-              strace -f -o /tmp/xdg/gs-ice.strace -e trace=link,linkat,unlink,unlinkat,creat,open,openat,stat,newfstatat gnome-session --session=ubuntu 2>&1 &
+              strace -f -o /tmp/xdg/gs-ice.strace -e trace=link,linkat,unlink,unlinkat,creat,open,openat,stat,newfstatat,fcntl,flock,close,dup,dup2,dup3 gnome-session --session=ubuntu 2>&1 &
             else
               echo "gnome-launch: strace unavailable - launching untraced"
               gnome-session --session=ubuntu 2>&1 &
@@ -291,6 +297,9 @@ object GuestUbuntu {
               grep -n "ENOSYS" /tmp/xdg/gs-ice.strace | head -6
               echo "gnome-launch: ice-strace ICEauthority-path lines:"
               grep -n "ICEauthority" /tmp/xdg/gs-ice.strace | head -10
+              echo "gnome-launch: ice-strace lock-syscall lines:"
+              grep -nE "fcntl|flock" /tmp/xdg/gs-ice.strace | head -10
+              echo "gnome-launch: ice-strace total lines: ${'$'}(wc -l < /tmp/xdg/gs-ice.strace)"
             fi
             # A LATE gnome-session exit must not end the script. POCO log
             # 2026-10-30 (launch 1793346581): the shell REGISTERED at ~+30s,

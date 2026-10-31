@@ -20,14 +20,32 @@ object Diagnostics {
     private const val MAX_TOTAL_BYTES = 24L * 1024 * 1024 // all logs combined; rotation keeps current+prev pairs ~8 MiB, so normal exports are complete
     private const val MAX_KEPT_ZIPS = 3                   // bounded export retention
 
-    /** Secret-shaped assignments are replaced with [redacted] in every
-     *  exported text. Paths such as ICEAUTHORITY=/XAUTHORITY= are not
-     *  matched - they are evidence, not secrets. */
-    private val SECRET_PATTERN = Regex(
-        "(?i)\\b(password|passwd|secret|token|api[_-]?key|authorization|cookie)\\s*[:=]\\s*\\S+")
+    /** Secret material is replaced with [redacted] in every exported
+     *  text, in every common shape: Authorization/Bearer headers, JSON
+     *  fields ("token": "x"), URL query values (?token=x), Cookie header
+     *  values, CLI flags (--token x / --token=x), and shell assignments
+     *  (PASSWORD=x, password = x). Rule order matters: the more specific
+     *  shapes run before the generic assignment rule. App-owned evidence
+     *  is NOT redacted: ICEAUTHORITY=/XAUTHORITY= file paths and the
+     *  unix:path=...,guid=... session bus address carry no auth data. */
+    private val SCRUB_RULES: List<Pair<Regex, String>> = listOf(
+        Regex("(?i)(Authorization\\s*:\\s*Bearer)\\s+\\S+") to "$1 [redacted]",
+        Regex("(?i)\\b(Bearer)\\s+[A-Za-z0-9._~+/=-]{8,}") to "$1 [redacted]",
+        Regex("(?i)(\\"(?:password|passwd|secret|token|api[_-]?key|authorization|cookie)\\"\\s*:\\s*\\")[^\\"]*(\\")") to "$1[redacted]$2",
+        Regex("(?i)([?&](?:token|key|password|secret|sig|signature)=)[^\\s&\\"']+") to "$1[redacted]",
+        Regex("(?i)(Cookie\\s*:\\s*)[^\\r\\n]+") to "$1[redacted]",
+        Regex("(?i)(--?(?:password|passwd|token|secret|api[_-]?key|cookie)(?:=|\\s+))\\S+") to "$1[redacted]",
+        Regex("(?i)((?:password|passwd|secret|token|api[_-]?key|authorization|cookie)\\s*[:=]\\s*)\\S+") to "$1[redacted]"
+    )
 
-    internal fun scrub(text: String): String =
-        SECRET_PATTERN.replace(text) { m -> m.groupValues[1] + "=[redacted]" }
+    internal fun scrub(text: String): String {
+        var t = text
+        for ((re, rep) in SCRUB_RULES) t = re.replace(t, rep)
+        return t
+    }
+
+    /** Test-only total-budget override; null in app builds. */
+    internal var maxTotalBytesForTests: Long? = null
 
     private val LOG_NAMES = listOf(
         "guest-gnome.log", "guest-gnome.prev.log", "xserver.log", "xserver.prev.log",
@@ -63,9 +81,9 @@ object Diagnostics {
             // current+prev pair, so the usual export is complete. Only a
             // combined total over MAX_TOTAL_BYTES forces a cut, and every
             // file always gets an explicit logs-manifest.txt row.
-            var remaining = MAX_TOTAL_BYTES
+            var remaining = maxTotalBytesForTests ?: MAX_TOTAL_BYTES
             val logManifest = StringBuilder()
-            logManifest.append("name\toriginal_bytes\texported_bytes\tdropped_from_start_bytes\tfile_mtime_iso\n")
+            logManifest.append("name\toriginal_bytes_pre_redaction\texported_bytes_post_redaction\tdropped_from_start_bytes\tfile_mtime_iso\n")
             for (name in LOG_NAMES) {
                 val f = File(ctx.filesDir, name)
                 if (!f.isFile) continue

@@ -34,6 +34,12 @@ class ReuseGateHealthTest {
     private fun spawn(seconds: Int): Process =
         ProcessBuilder("/system/bin/sh", "-c", "sleep " + seconds).start().also { procs.add(it) }
 
+    /** A fake session whose tree contains a process named gnome-shell
+     *  (argv0 via exec -a), the way the real guest tree does. */
+    private fun spawnSessionWithShell(): Process =
+        ProcessBuilder("/system/bin/sh", "-c", "exec -a gnome-shell sleep 120 & exec sleep 120")
+            .start().also { procs.add(it) }
+
     private fun pidOf(p: Process): Int {
         val f = p.javaClass.getDeclaredField("pid"); f.isAccessible = true; return f.getInt(p)
     }
@@ -60,11 +66,27 @@ class ReuseGateHealthTest {
     fun healthyReusePassesIdentityBusAndXChecks() {
         val xs = spawn(120)                 // X server older than the session
         Thread.sleep(400)
-        val session = spawn(120)
+        val session = spawnSessionWithShell()
+        Thread.sleep(300)                   // let the shell child fork
         val bus = spawn(120)
         install(session, xs, bus)
-        assertNull("live session + live bus + older X must be healthy",
+        assertNull("live session+shell + live bus + older X must be healthy",
             XServer.healthyReuseOrReason(ctx, distro, session))
+    }
+
+    @Test
+    fun busAliveButShellGoneIsRejected() {
+        // The review scenario: the session bus daemon is alive and its
+        // identity matches, but gnome-shell is gone from the session
+        // tree. Bus liveness must never mask a missing desktop.
+        val xs = spawn(120)
+        Thread.sleep(400)
+        val session = spawn(120)            // NO gnome-shell child in this tree
+        val bus = spawn(120)
+        install(session, xs, bus)
+        val reason = XServer.healthyReuseOrReason(ctx, distro, session)
+        assertNotNull("bus alive but shell gone must be rejected", reason)
+        assertTrue(reason!!, reason.contains("gnome-shell gone"))
     }
 
     @Test

@@ -171,7 +171,24 @@ object XServer {
         val xStart = xIdent.start.toLongOrNull(); val sStart = nowIdent.start.toLongOrNull()
         if (xStart != null && sStart != null && xStart > sStart)
             return "X server restarted after the session launched - its guest clients died with the old server"
+        // A live bus daemon is NOT desktop health: gnome-shell must still
+        // exist in the session's own process tree, or bypassing the gate
+        // would forward the user to a desktop that is no longer there.
+        if (!treeHasProcessNamed(pid, Regex("gnome-shell")))
+            return "gnome-shell gone from the session tree (a live session bus does not imply a live desktop)"
         return null
+    }
+
+    /** True when any process in [rootPid]'s live tree has [name] in its
+     *  cmdline. Reads /proc directly; signals nothing. */
+    private fun treeHasProcessNamed(rootPid: Int, name: Regex): Boolean {
+        val all = scanProc()
+        if (!all.containsKey(rootPid)) return false
+        for (tpid in treeOf(rootPid, all)) {
+            val cmd = try { File("/proc/" + tpid + "/cmdline").readText() } catch (t: Throwable) { continue }
+            if (name.containsMatchIn(cmd)) return true
+        }
+        return false
     }
 
     /** Test-only seam: install session/X state exactly as launch-confirm
