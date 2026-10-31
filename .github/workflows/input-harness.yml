@@ -10,6 +10,7 @@ on:
       - '.github/workflows/spike.yml'
       - '.github/workflows/mobile-desktop.yml'
       - '.github/workflows/input-harness.yml'
+      - '.github/workflows/apk-export.yml'
     branches: [gnome/evidence]
   workflow_dispatch:
     inputs:

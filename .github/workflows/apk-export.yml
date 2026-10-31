@@ -1,0 +1,35 @@
+name: apk-export
+# Dispatch-only build lane: produces an installable debug APK artifact for a
+# specific head WITHOUT re-running the 25-min x86 input-harness chain.
+# Added 2026-10-31 when the verification push (0c7516d83) passed green but no
+# workflow published an installable APK of that head.
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install NDK + bison for vendored :lorie X server
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bison
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;29.0.14206865" "platforms;android-35" >/dev/null
+      - name: Build debug APK
+        run: ./gradlew assembleDebug
+      - name: Record APK identity
+        run: |
+          sha256sum app/build/outputs/apk/debug/app-debug.apk
+          ls "$ANDROID_HOME/build-tools/"*/apksigner >/dev/null 2>&1 && "$ANDROID_HOME/build-tools/"*/apksigner verify --print-certs app/build/outputs/apk/debug/app-debug.apk || echo "apksigner unavailable"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phonelinux-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
