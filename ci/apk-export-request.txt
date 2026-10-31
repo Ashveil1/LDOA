@@ -1,2 +1,2 @@
 request: build diagnostic APK of current head
-reason: narrow-verbose diagnostic sampler build, supersedes the c954fb2 export
+reason: connect-level system-bus predicate build (endpoint classification, unknown-state fail-closed), supersedes the fd97eeb export
