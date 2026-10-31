@@ -56,12 +56,20 @@ class UbuntuGnomeSpikeTest {
         }
         assertTrue("gnome-shell binary present", GuestUbuntu.hasGnome(rootfs))
 
-        // Session reset: the auto-enter test (runs first in this lane) may
-        // have left a live GNOME session on :0. Kill leftovers via /proc
-        // (no procps dependency) so this launch owns the display.
-        val kill = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c",
-            "for f in /proc/[0-9]*/cmdline; do c=${'$'}(tr '\\0' ' ' < ${'$'}f 2>/dev/null); case ${'$'}c in *cmdline*) ;; *gnome-session*|*gnome-shell*) echo ${'$'}f | cut -d/ -f3;; esac; done | xargs -r kill 2>/dev/null; sleep 3; echo reset-done"))
-        Log.i(TAG, "pre-launch session reset exit=${kill.exitCode} out=${kill.stdout.trim()}")
+        // Test-owned warm precondition IN-INVOCATION (am instrument
+        // force-stops the app per invocation - nothing tracked crosses
+        // from the auto-enter class): tracked launch -> owned teardown.
+        SessionReset.trackedWarmup(ctx, d, rootfs) { m -> Log.i(TAG, "spike: " + m) }
+        // Session reset, identity-owned (replaces the /proc name-kill).
+        // After the tracked warmup's owned teardown nothing should remain:
+        // a STARTING session is KEPT (never ended by a fresh-launch request),
+        // a retained FAILED one takes the retry-implies-stop verified
+        // teardown, a tracked ACTIVE one is explicitly stopped by captured
+        // identity, and an untracked same-name world FAILS CLOSED - it is
+        // detected, never killed by name.
+        val resetResult = SessionReset.resetForFreshLaunch(ctx, d) { m -> Log.i(TAG, m) }
+        Log.i(TAG, "pre-launch session reset result=$resetResult")
+        PhantomSampler.sample(androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation()), "spike-arm")
 
         // X server + GNOME session.
         XServer.start(ctx)
@@ -124,7 +132,7 @@ class UbuntuGnomeSpikeTest {
             val text = if (logFile.isFile) logFile.readText() else ""
             if (text.contains("gnome-launch:")) sawLaunchMarker = true
             if (text.contains("gnome-launch: gnome-session alive") ||
-                text.contains("gnome-launch: gnome-session died") ||
+                text.contains("gnome-launch: session launcher died") ||
                 text.contains("falling back to bare gnome-shell")) break
             // Decisive failures end the poll immediately (no blind waiting):
             // gnome-shell's own "sad computer" screen and hard X/dbus errors.

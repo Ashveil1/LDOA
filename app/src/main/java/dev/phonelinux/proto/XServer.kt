@@ -152,6 +152,10 @@ object XServer {
      *  mid-teardown is never signaled. */
     private val ownershipLock = Any()
     private var ownershipGeneration = 0L
+    /** Generation at which sessionBusIdent was assigned: a capture that
+     *  started in an older generation than the stored identity's never
+     *  overwrites a newer world's bus. */
+    private var busIdentGeneration = 0L
 
     /** Test-only seam: invoked inside stopDesktopMode after the ownership
      *  snapshot and before any kill or clear, so a regression test can
@@ -178,8 +182,169 @@ object XServer {
         return@synchronized GuestUbuntu.launchGnomeSession(ctx, rootfs).also {
             gnomeSession = distro.id to it; gnomeSessionBus = null; ownershipGeneration++
             retainedSessionStarting = false; sessionGatePassed = false; lateWatchFor = null
+            // Capture the root identity AT SPAWN: the launcher knows exactly
+            // which process it started. Capturing only at gate-confirm left
+            // every pre-confirm Stop/teardown with NO launch identity -
+            // stopDesktopMode skipped its tree walk and destroy()ed the
+            // tracer alone, orphaning the guest tree (the same leak class
+            // as a name-kill, just quieter). Gate-confirm re-captures below.
+            sessionRootIdent = pidOf(it)?.let { pid -> identityOf(pid) }
+            if (sessionRootIdent == null) Log.w(TAG,
+                "GNOME session root identity NOT captured at spawn: any teardown before gate-confirm degrades to tracer-destroy only (guest tree leaks)")
         }
     }
+
+    /** True once the session root's launch-captured identity
+     *  (pid+starttime+uid) exists and an identity-verified teardown can
+     *  walk the tree. Read-only test seam for qualified teardown waits. */
+    internal fun hasSessionRootIdentity(): Boolean = synchronized(ownershipLock) { sessionRootIdent != null }
+
+    internal class BusIdentRecord(val pid: Int, val startTicks: String, val uid: Int, val nonce: String)
+
+    /** The creation-time identity record the session script wrote right
+     *  after spawning THIS launch's bus (GuestUbuntu.kt, .gnome-bus.ident).
+     *  Missing or unparseable = no record = never adopt any bus. */
+    private fun busIdentRecord(ctx: Context): BusIdentRecord? {
+        val f = File(DistroInstaller(ctx).rootfsDir(Distros.UBUNTU), "root/.gnome-bus.ident")
+        val text = try { f.readText() } catch (t: Throwable) { return null }
+        val m = HashMap<String, String>()
+        for (tok in text.trim().split(Regex("\\s+"))) {
+            val i = tok.indexOf('=')
+            if (i > 0) m[tok.substring(0, i)] = tok.substring(i + 1)
+        }
+        val pid = m["pid"]?.toIntOrNull() ?: return null
+        val ticks = m["startticks"]?.takeIf { it.isNotEmpty() && it.all { c -> c.isDigit() } } ?: return null
+        val uid = m["uid"]?.toIntOrNull() ?: return null
+        val nonce = m["nonce"]?.takeIf { it.isNotEmpty() } ?: return null
+        return BusIdentRecord(pid, ticks, uid, nonce)
+    }
+
+    /** THIS launch's session-bus identity, bound by the launcher-written
+     *  creation record - or null (preserve, never kill) on ANY failure:
+     *   1. the creation record exists and parses (pid, startticks, uid,
+     *      nonce all present);
+     *   2. the record's uid is ours and the LIVE process identity
+     *      (pid+starttime+uid) verifies as ours;
+     *   3. the live start ticks EQUAL the record's creation ticks - the
+     *      actual binding: a pid reused after the recorded bus died
+     *      belongs to a different process, whatever its name or timing;
+     *   4. the live cmdline is the session bus shape (dbus-daemon +
+     *      --session) - same-uid coincidence is not ownership.
+     *  killIdentsVerified re-verifies the identity again before every
+     *  signal, so a replacement between capture and signal is never
+     *  signaled. Never a by-name adoption of any bus. */
+    private fun validatedSessionBusIdent(ctx: Context): PIdent? {
+        val rec = busIdentRecord(ctx) ?: return null
+        if (rec.uid != android.os.Process.myUid()) return null
+        val ident = identityOf(rec.pid) ?: return null
+        if (ident.start != rec.startTicks) return null
+        val cmd = try {
+            File("/proc/" + rec.pid + "/cmdline").readText().replace('\u0000', ' ')
+        } catch (t: Throwable) { return null }
+        if (!(cmd.contains("dbus-daemon") && cmd.contains("--session"))) return null
+        return ident
+    }
+
+    /** The nonce THIS launch logged with its session-bus line, read from
+     *  bytes after [logBase] (the boundary taken before THIS launch) and
+     *  after ITS OWN launch-id line in that window - never whatever
+     *  record or tail is latest. Null when this launch's bus line is not
+     *  visible: the launch's bus is then unknown and must be preserved. */
+    private fun ownLaunchBusNonce(ctx: Context, logBase: Long): String? {
+        val f = File(ctx.filesDir, "guest-gnome.log")
+        val tail = try {
+            if (!f.isFile) return null
+            val base = if (f.length() >= logBase) logBase else 0L
+            f.readText().substring(base.toInt().coerceAtMost(f.length().toInt()))
+        } catch (t: Throwable) { return null }
+        val pos = tail.lastIndexOf("gnome-launch: launch id=")
+        if (pos < 0) return null
+        return tail.substring(pos).lineSequence()
+            .lastOrNull { it.contains("gnome-launch: session bus") && it.contains("nonce=") }
+            ?.substringAfter("nonce=", "")?.trim()?.takeWhile { !it.isWhitespace() }
+    }
+
+    /** Capture the session bus for the launch whose log window starts at
+     *  [logBase]: the launcher-written creation record + exact live
+     *  tick/uid/role binding (validatedSessionBusIdent) + THIS launch's
+     *  OWN logged nonce. Null - preserve, never kill - when the launch's
+     *  nonce is unknown or any binding fails. */
+    private fun captureOwnLaunchBusIdent(ctx: Context, logBase: Long): PIdent? {
+        val nonce = ownLaunchBusNonce(ctx, logBase) ?: return null
+        val rec = busIdentRecord(ctx) ?: return null
+        if (rec.nonce != nonce) return null
+        return validatedSessionBusIdent(ctx)
+    }
+
+    /** Launch-confirm bus-identity merge: the capture is bound to the
+     *  ORIGINATING launch window ([captureBase]) - on a reused session
+     *  that is the original gate base (sessionGateLogBase), on a fresh
+     *  launch this call's own logBase, same base the gate/retain/watch
+     *  paths use. A null capture on a REUSED session means "no new
+     *  launch in that window" - UNCERTAIN, never contradictory: a
+     *  still-valid retained identity is KEPT (never clobbered) and no
+     *  record is adopted. A null capture on a FRESH launch clears the
+     *  previous world's identity (that world is gone). */
+    internal fun mergeLaunchConfirmBusIdent(ctx: Context, captureBase: Long, reused: Boolean) {
+        synchronized(ownershipLock) {
+            val found = captureOwnLaunchBusIdent(ctx, captureBase)
+            if (found != null) {
+                sessionBusIdent = found
+                busIdentGeneration = ownershipGeneration
+            } else if (!reused) {
+                sessionBusIdent = null
+                Log.w(TAG, "session bus identity NOT captured at launch-confirm " +
+                    "(no own-launch nonce/record, stale ticks, or reused pid) - stop will preserve, never kill, the bus")
+            } else if (sessionBusIdent != null) {
+                gateLog("reused session: no new launch in the current call's window - retained bus identity kept (uncertain is never contradictory)")
+            } else {
+                Log.w(TAG, "reused session: session bus identity unknown " +
+                    "(no own-launch nonce/record in the originating window) - stop will preserve, never kill, the bus")
+            }
+        }
+    }
+
+    /** Assign a validated bus identity, guarded by generation: a capture
+     *  that began in an OLDER generation than the stored identity's never
+     *  overwrites a newer world's bus. True when [ident] was stored. */
+    private fun assignBusIdentGuarded(ident: PIdent?, genAtEntry: Long): Boolean =
+        synchronized(ownershipLock) {
+            if (ident == null || busIdentGeneration > genAtEntry) return@synchronized false
+            sessionBusIdent = ident
+            busIdentGeneration = genAtEntry
+            true
+        }
+
+    /** Test seam: capture THIS launch's session-bus identity so a teardown
+     *  can end the daemonized bus too (it escapes the parentage walk).
+     *  The capture is bound by the launcher-written creation record
+     *  (validatedSessionBusIdent) AND by [expectedNonce] - the nonce THIS
+     *  launch logged with its session-bus line, so a record left by any
+     *  other launch is never adopted by reading the latest tail. Any
+     *  missing/ambiguous record, nonce mismatch, or reused pid = NOT
+     *  captured (preserve, never kill). */
+    internal fun captureSessionBusIdentityForTest(ctx: Context, expectedNonce: String): Boolean {
+        if (expectedNonce.isEmpty()) return false
+        val genAtEntry = synchronized(ownershipLock) { ownershipGeneration }
+        val rec = busIdentRecord(ctx) ?: return false
+        if (rec.nonce != expectedNonce) return false
+        return assignBusIdentGuarded(validatedSessionBusIdent(ctx), genAtEntry)
+    }
+
+    /** Test-only seam: set the STILL-STARTING retention flag directly
+     *  (fixtures that simulate a retained starting session). App code
+     *  never calls this. */
+    internal fun setRetainedSessionStartingForTest(value: Boolean) =
+        synchronized(ownershipLock) { retainedSessionStarting = value }
+
+    /** Test-only seam: install a bus identity at an explicit generation
+     *  (a simulated newer world) so the assignment guard can be exercised.
+     *  App code never calls this. */
+    internal fun installBusIdentForTest(ident: PIdent?, generation: Long) =
+        synchronized(ownershipLock) {
+            sessionBusIdent = ident
+            busIdentGeneration = generation
+        }
 
     /** True when [p] is the ALREADY-RUNNING tracked session (the reuse
      *  branch of launchOrReuseGnomeSession), not a fresh launch. */
@@ -245,6 +410,7 @@ object XServer {
             gnomeSession = session?.let { distro.id to it }
             sessionRootIdent = session?.let { pidOf(it)?.let { pid -> identityOf(pid) } }
             sessionBusIdent = null
+            busIdentGeneration = 0L
             process = xserver
         }
     }
@@ -499,8 +665,8 @@ object XServer {
                                 // session root is never READY: log evidence
                                 // alone does not make a live desktop.
                                 val gatePassed = marker != null && (bypassGate || p.isAlive)
-                                gateLog(if (gatePassed) "gate PASS: " + marker.take(120) else "gate TIMEOUT/fail after budget, process " + (if (p.isAlive) "alive" else "exited"))
-                                if (gatePassed) {
+                                gateLog(if (gatePassed) "gate PASS: " + (marker ?: "").take(120) else "gate TIMEOUT/fail after budget, process " + (if (p.isAlive) "alive" else "exited"))
+                                if (gatePassed && marker != null) {
                                     Log.i(TAG, "GNOME session evidence: " + marker)
                                     ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
                                         .edit().putBoolean("ubuntu_desktop_active", true).apply()
@@ -520,11 +686,14 @@ object XServer {
                                         sessionProcess = p
                                         ownershipGeneration++
                                         sessionRootIdent = pidOf(p)?.let { identityOf(it) }
-                                        sessionBusIdent = sessionBusPid(ctx)?.let { bp ->
-                                            identityOf(bp).also { found ->
-                                                if (found == null) Log.w(TAG, "bus pid " + bp + " unreadable at launch-confirm; stop will skip the bus")
-                                            }
-                                        }
+                                        // Bind THIS world's bus from the ORIGINATING launch window:
+                                        // a reused session launched nothing in this call, so its
+                                        // window is sessionGateLogBase (the base the gate, retain
+                                        // and watch paths already use); a fresh launch uses its
+                                        // own logBase. A null capture on reuse is UNCERTAIN,
+                                        // never contradictory - the merge keeps a still-valid
+                                        // retained identity instead of clobbering it.
+                                        mergeLaunchConfirmBusIdent(ctx, if (reused) sessionGateLogBase else logBase, reused)
                                     }
                                 } else {
                                     val gateBase = if (reused) sessionGateLogBase else logBase
@@ -533,7 +702,7 @@ object XServer {
                                             "). Nothing was killed - Stop session tears it down cleanly."
                                         // Retain ownership so Stop session tears it
                                         // down by identity.
-                                        retainFailedSessionOwnership(ctx, p)
+                                        retainFailedSessionOwnership(ctx, p, gateBase)
                                     } else {
                                         val tail = if (gnomeLog.isFile && gnomeLog.length() > gateBase)
                                             gnomeLog.readText().substring(gateBase.toInt().coerceAtMost((gnomeLog.length()).toInt())).takeLast(1500)
@@ -556,7 +725,7 @@ object XServer {
                                                     (if (p.isAlive) "still running" else "exited") + "). Log tail:\n" + tail
                                                 // Retain ownership of the still-running session so
                                                 // Stop session can tear it down by identity.
-                                                retainFailedSessionOwnership(ctx, p)
+                                                retainFailedSessionOwnership(ctx, p, gateBase)
                                             }
                                         }
                                     }
@@ -623,13 +792,19 @@ object XServer {
             busIdent = sessionBusIdent
             rootProc = sessionProcess
         }
+        // Val snapshots: the hook may swap the fields (a simulated
+        // relaunch); this teardown must proceed on the OLD snapshot, and
+        // only vals smart-cast here.
+        val rootSnap = rootIdent
+        val busSnap = busIdent
+        val procSnap = rootProc
         val idents = LinkedHashMap<Int, PIdent>()
         teardownHookForTest?.invoke()
-        if (rootIdent != null) {
-            val cur = identityOf(rootIdent.pid)
-            if (cur != null && cur.start == rootIdent.start && cur.uid == rootIdent.uid) {
+        if (rootSnap != null) {
+            val cur = identityOf(rootSnap.pid)
+            if (cur != null && cur.start == rootSnap.start && cur.uid == rootSnap.uid) {
                 // Root identity matches THIS launch: walk its live tree.
-                for (pid in treeOf(rootIdent.pid, scanProc())) identityOf(pid)?.let { idents[pid] = it }
+                for (pid in treeOf(rootSnap.pid, scanProc())) identityOf(pid)?.let { idents[pid] = it }
             } else {
                 Log.i(TAG, "stopDesktopMode: session root already exited or its PID was reused - tree walk skipped " +
                     "(reparented non-bus leftovers are L2 orphan-handling scope, not silently killed)")
@@ -637,12 +812,12 @@ object XServer {
         } else {
             Log.i(TAG, "stopDesktopMode: no launch-captured root identity - tree walk skipped")
         }
-        if (busIdent != null) idents[busIdent.pid] = busIdent
+        if (busSnap != null) idents[busSnap.pid] = busSnap
         val left = killIdentsVerified(idents)
         if (left.isNotEmpty()) Log.w(TAG, "stopDesktopMode: leftover pids after verified teardown: " + left)
         // Destroy the SNAPSHOT process, never the field: the field may
         // already belong to a newer session.
-        if (rootProc != null) { try { rootProc.destroy() } catch (t: Throwable) { } }
+        if (procSnap != null) { try { procSnap.destroy() } catch (t: Throwable) { } }
         // Check-and-clear atomically under the same lock establishers use:
         // no launch/confirm/retain can interleave between the epoch check
         // and the clears. If the epoch moved, ownership belongs to a NEW
@@ -656,6 +831,7 @@ object XServer {
             sessionProcess = null
             sessionRootIdent = null
             sessionBusIdent = null
+            busIdentGeneration = 0L
             gnomeSession = null
             gnomeSessionBus = null
             retainedSessionFailed = false
@@ -693,7 +869,7 @@ object XServer {
         return false
     }
 
-    internal fun retainFailedSessionOwnership(ctx: Context, p: Process) {
+    internal fun retainFailedSessionOwnership(ctx: Context, p: Process, logBase: Long) {
         if (p.isAlive) {
             gateLog("retained FAILED session ownership (Stop session can tear it down)")
             synchronized(ownershipLock) {
@@ -701,7 +877,10 @@ object XServer {
                 sessionProcess = p
                 ownershipGeneration++
                 sessionRootIdent = pidOf(p)?.let { identityOf(it) }
-                sessionBusIdent = sessionBusPid(ctx)?.let { bp -> identityOf(bp) }
+                sessionBusIdent = captureOwnLaunchBusIdent(ctx, logBase).also { found ->
+                    if (found == null) Log.w(TAG, "retain-failed: session bus NOT captured (no own-launch nonce/record or stale) - preserved, never killed")
+                    else busIdentGeneration = ownershipGeneration
+                }
             }
         }
     }
@@ -731,7 +910,10 @@ object XServer {
                 sessionGateLogBase = logBase
                 ownershipGeneration++
                 sessionRootIdent = pidOf(p)?.let { identityOf(it) }
-                sessionBusIdent = sessionBusPid(ctx)?.let { bp -> identityOf(bp) }
+                sessionBusIdent = captureOwnLaunchBusIdent(ctx, logBase).also { found ->
+                    if (found == null) Log.w(TAG, "retain-starting: session bus NOT captured (no own-launch nonce/record or stale) - preserved, never killed")
+                    else busIdentGeneration = ownershipGeneration
+                }
             }
         }
     }
@@ -779,7 +961,10 @@ object XServer {
                         sessionProcess = p
                         ownershipGeneration++
                         sessionRootIdent = pidOf(p)?.let { identityOf(it) }
-                        sessionBusIdent = sessionBusPid(ctx)?.let { bp -> identityOf(bp) }
+                        sessionBusIdent = captureOwnLaunchBusIdent(ctx, logBase).also { found ->
+                            if (found == null) Log.w(TAG, "late-readiness promotion: session bus NOT captured (no own-launch nonce/record or stale) - preserved, never killed")
+                            else busIdentGeneration = ownershipGeneration
+                        }
                         promoted = true
                     }
                 }

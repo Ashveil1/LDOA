@@ -24,6 +24,13 @@ import java.io.File
  */
 @RunWith(AndroidJUnit4::class)
 class GnomeRetryGateTest {
+    /** Boundary for retain calls with no launch of their own: the current
+     *  end of the guest log, so no stale bus line can ever match. */
+    private fun currentGnomeLogLength(ctx: android.content.Context): Long {
+        val f = java.io.File(ctx.filesDir, "guest-gnome.log")
+        return if (f.isFile) f.length() else 0L
+    }
+
     private val TAG = "PHONELINUX_RETRYGATE"
 
     @Test
@@ -80,7 +87,7 @@ class GnomeRetryGateTest {
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
         val proc = ProcessBuilder("/system/bin/sh", "-c", "sleep 60").start()
         try {
-            XServer.retainFailedSessionOwnership(ctx, proc)
+            XServer.retainFailedSessionOwnership(ctx, proc, currentGnomeLogLength(ctx))
             assertTrue("retained handle must be the failed session process",
                 XServer.sessionProcess === proc)
             assertTrue("failed session process not alive pre-stop", proc.isAlive)

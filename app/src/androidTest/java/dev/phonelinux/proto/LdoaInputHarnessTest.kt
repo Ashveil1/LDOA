@@ -82,9 +82,15 @@ class LdoaInputHarnessTest {
             "export DEBIAN_FRONTEND=noninteractive; apt-get install -y x11-utils xdotool"),
             fakeRoot = true)
         Log.i(TAG, "harness: ENTER lorieMouseRightClickAttribution (touchMode=3 pinned parked path)")
-        val kill = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c",
-            "for f in /proc/[0-9]*/cmdline; do c=${'$'}(tr '\\0' ' ' < ${'$'}f 2>/dev/null); case ${'$'}c in *cmdline*) ;; *gnome-session*|*gnome-shell*) echo ${'$'}f | cut -d/ -f3;; esac; done | xargs -r kill 2>/dev/null; sleep 3; echo reset-done"))
-        Log.i(TAG, "harness: session reset exit=${kill.exitCode}")
+        // Test-owned warm precondition IN-INVOCATION (am instrument
+        // force-stops the app per invocation, so nothing tracked can cross
+        // from the auto-enter class): tracked launch -> owned teardown.
+        SessionReset.trackedWarmup(ctx, d, rootfs) { m -> Log.i(TAG, "harness: " + m) }
+        // Session reset, identity-owned (replaces the /proc name-kill - see
+        // SessionReset for the branch contract; untracked worlds fail closed).
+        val resetResult = SessionReset.resetForFreshLaunch(ctx, d) { m -> Log.i(TAG, m) }
+        Log.i(TAG, "harness: session reset result=$resetResult")
+        PhantomSampler.sample(androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation()), "harness-arm-rightclick")
         // These arms test the PARKED direct-mode injection (deferred-fire
         // two-finger tap). The product default is simulated touch since the
         // 2026-10-29 23:19 approved plan, so pin the mode explicitly or the
@@ -117,7 +123,7 @@ class LdoaInputHarnessTest {
             val text = if (logFile.isFile) logFile.readText() else ""
             if (text.contains("gnome-launch:")) sawLaunchMarker = true
             if (text.contains("gnome-launch: gnome-session alive") ||
-                text.contains("gnome-launch: gnome-session died") ||
+                text.contains("gnome-launch: session launcher died") ||
                 text.contains("falling back to bare gnome-shell")) break
             if (text.contains("Oh no! Something has gone wrong") ||
                 text.contains("Cannot open display") ||
@@ -137,6 +143,7 @@ class LdoaInputHarnessTest {
         Thread.sleep(60_000)
         Shot.dismissSystemDialogs(device)
         assertTrue("gnome session died during the render window", proc.isAlive)
+        PhantomSampler.sample(device, "harness-post-launch")
         // Desktop readiness: bare gnome-shell (the gnome-session fallback)
         // can take minutes to map the dock - run e98aa13 tapped at ~2 min
         // and hit unrendered wallpaper. Poll the X tree for shell windows
@@ -712,6 +719,8 @@ class LdoaInputHarnessTest {
             // calls (the product singleton trees are this test's here), then
             // record post-teardown survivors explicitly.
             try {
+                PhantomSampler.sample(androidx.test.uiautomator.UiDevice.getInstance(
+                    androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()), "harness-pre-teardown")
                 Log.i(TAG, "harness: teardown begin (owned-only)")
                 ledgerNote("pre-teardown gnome-launcher", proc)
                 // stopDesktopMode BEFORE destroy: its identity-verified

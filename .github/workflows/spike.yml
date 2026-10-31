@@ -195,6 +195,10 @@ jobs:
             adb -s emulator-5554 logcat -d > instr-logs/logcat-instr4.txt || true
             python3 .github/scripts/extract_shots.py instr-logs/logcat-instr4.txt screenshots || true
             if grep -q "E1-BRIDGE-RESULT" /tmp/instr4.log; then echo "E1-LANE-RESULT: completed ($(grep -o 'E1-BRIDGE-RESULT.*' /tmp/instr4.log | head -1))"; elif grep -qE "INSTRUMENTATION_(FAILED|ABORTED)|FAILURES!!!" /tmp/instr4.log; then echo "E1-LANE-RESULT: invalid (instrumentation failure; see instr4.log)"; elif grep -qi "E1: skipped" /tmp/instr4.log; then echo "E1-LANE-RESULT: unknown (self-skip fired despite -e presentationBridge 1; treat as invalid until instr4.log inspected)"; else echo "E1-LANE-RESULT: unknown (no summary marker; treat as invalid until instr4.log inspected by hand)"; fi
+            # AutoEnter = cold-path coverage; it tears its session down by
+            # OWNED identity at the end. am instrument force-stops per
+            # invocation, so the spike warms ITSELF in-invocation
+            # (SessionReset.trackedWarmup) - no cross-invocation handoff.
             adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.UbuntuDesktopAutoEnterTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr1.log | tail -15
             grep -q "OK (" /tmp/instr1.log || touch /tmp/PHONELINUX_TESTS_FAILED
             cp /tmp/instr1.log instr-logs/instr1.log || true

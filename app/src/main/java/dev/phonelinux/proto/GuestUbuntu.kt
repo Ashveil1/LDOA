@@ -312,8 +312,27 @@ object GuestUbuntu {
             xprop -root -remove _DBUS_SESSION_BUS_ADDRESS 2>/dev/null
             xprop -root -remove _DBUS_SESSION_BUS_PID 2>/dev/null
             eval $(dbus-launch --sh-syntax) 2>&1
-            echo "gnome-launch: session bus ${'$'}DBUS_SESSION_BUS_ADDRESS"
+            BUS_NONCE=$(cat /proc/sys/kernel/random/uuid 2>/dev/null)
+            echo "gnome-launch: session bus ${'$'}DBUS_SESSION_BUS_ADDRESS nonce=${'$'}BUS_NONCE"
             echo ${'$'}DBUS_SESSION_BUS_PID > /root/.gnome-bus.pid 2>/dev/null
+            # Creation-time identity record of THIS launch's bus, written
+            # by the launcher that spawned it: pid + start ticks (stat
+            # field 22, parsed after the last ')' so any comm shape is
+            # safe) + uid +
+            # per-launch nonce (also logged above, so the caller binds the
+            # record to ITS OWN launch's log line, never to whatever the
+            # latest tail shows). The app adopts a bus identity ONLY by
+            # validating the live process against this record; a pid
+            # reused after the real bus died (even by another same-uid
+            # dbus-daemon, even moments later) fails the exact tick
+            # binding and is preserved, never killed.
+            { printf 'pid=%s startticks=%s uid=%s nonce=%s\n' \
+                "${'$'}DBUS_SESSION_BUS_PID" \
+                "$(sed 's/^.*) //' /proc/${'$'}DBUS_SESSION_BUS_PID/stat 2>/dev/null | awk '{print ${'$'}20}')" \
+                "$(stat -c %u /proc/${'$'}DBUS_SESSION_BUS_PID 2>/dev/null)" \
+                "${'$'}BUS_NONCE" \
+                > /root/.gnome-bus.ident.tmp \
+              && mv /root/.gnome-bus.ident.tmp /root/.gnome-bus.ident; } 2>/dev/null
             # LDOA DIAGNOSTIC SAMPLER (bounded, read-only): recurring
             # session-state samples for the export ZIP, written to
             # /tmp/ldoa-probes.log (rootfs-local tmp; the app picks it up at

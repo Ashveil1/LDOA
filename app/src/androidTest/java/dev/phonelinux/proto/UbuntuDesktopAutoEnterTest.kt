@@ -94,7 +94,7 @@ class UbuntuDesktopAutoEnterTest {
             val text = if (logFile.isFile) logFile.readText() else ""
             val m = text.lineSequence().firstOrNull {
                 it.contains("gnome-launch: gnome-session alive") ||
-                    it.contains("gnome-launch: gnome-session died") ||
+                    it.contains("gnome-launch: session launcher died") ||
                     it.contains("falling back to bare gnome-shell") }
             if (m != null) { marker = m.trim(); break }
             Thread.sleep(20_000)
@@ -107,5 +107,24 @@ class UbuntuDesktopAutoEnterTest {
         assertTrue("install did not auto-enter the desktop (no session marker in guest-gnome.log)",
             marker.isNotEmpty())
         Log.i(TAG, "UBUNTU-AUTOENTER-OK one tap -> install -> desktop session (" + marker + ")")
+    }
+
+    /** Test-owned ordered teardown, failure-safe: any session this class
+     *  brought up is tracked IN THIS PROCESS (product auto-enter launched
+     *  it), so stopDesktopMode tears it down by captured identity - on
+     *  failure too, not only on the green path. Without this, the
+     *  invocation-end force-stop (AOSP 14 AMS startInstrumentation
+     *  force-stops the target, "start instr"/"finished inst" - run
+     *  41244200992 logcat 21:41:00.885/21:47:53.893) orphans the world
+     *  UNTRACKED, and every later class would have to kill it by name.
+     *  Later classes warm themselves in-invocation (SessionReset.
+     *  trackedWarmup); nothing crosses the invocation boundary. */
+    @org.junit.After fun ownedTeardown() {
+        try {
+            XServer.stopDesktopMode(InstrumentationRegistry.getInstrumentation().targetContext)
+            Log.i(TAG, "auto-enter: owned teardown done (stopDesktopMode)")
+        } catch (t: Throwable) {
+            Log.w(TAG, "auto-enter: owned teardown failed: " + t.message)
+        }
     }
 }

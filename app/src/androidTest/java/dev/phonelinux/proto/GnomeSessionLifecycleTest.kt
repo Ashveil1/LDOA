@@ -22,6 +22,13 @@ import java.io.File
  */
 @RunWith(AndroidJUnit4::class)
 class GnomeSessionLifecycleTest {
+    /** Boundary for retain calls with no launch of their own: the current
+     *  end of the guest log, so no stale bus line can ever match. */
+    private fun currentGnomeLogLength(ctx: android.content.Context): Long {
+        val f = java.io.File(ctx.filesDir, "guest-gnome.log")
+        return if (f.isFile) f.length() else 0L
+    }
+
 
     private val ctx = InstrumentationRegistry.getInstrumentation().targetContext
     private val spawned = ArrayList<Process>()
@@ -47,7 +54,7 @@ class GnomeSessionLifecycleTest {
     @Test fun retainedFailedSessionIsTornDownBeforeRelaunch() {
         val old = sleeper(); val oldPid = pidOf(old)
         assertTrue(alive(oldPid))
-        XServer.retainFailedSessionOwnership(ctx, old)
+        XServer.retainFailedSessionOwnership(ctx, old, currentGnomeLogLength(ctx))
         assertTrue(XServer.teardownRetainedFailedSession(ctx))
         assertFalse("retained failed session must be torn down", alive(oldPid))
         assertNull(XServer.sessionProcess)
@@ -137,9 +144,9 @@ class GnomeSessionLifecycleTest {
      *  the NEW session's handles, X server and active-pref intact. */
     @Test fun stopSkipsClearsWhenOwnershipChangesHandsMidTeardown() {
         val old = sleeper(); val oldPid = pidOf(old)
-        XServer.retainFailedSessionOwnership(ctx, old)
+        XServer.retainFailedSessionOwnership(ctx, old, currentGnomeLogLength(ctx))
         val newer = sleeper(); val newPid = pidOf(newer)
-        XServer.teardownHookForTest = { XServer.retainFailedSessionOwnership(ctx, newer) }
+        XServer.teardownHookForTest = { XServer.retainFailedSessionOwnership(ctx, newer, currentGnomeLogLength(ctx)) }
         XServer.stopDesktopMode(ctx)
         assertFalse("snapshot (old) session must be torn down", alive(oldPid))
         assertTrue("concurrently established session must survive", alive(newPid))
@@ -151,7 +158,7 @@ class GnomeSessionLifecycleTest {
      *  cleared, without signaling a reused pid. */
     @Test fun concurrentStopsSettleConsistently() {
         val s = sleeper(); val pid = pidOf(s)
-        XServer.retainFailedSessionOwnership(ctx, s)
+        XServer.retainFailedSessionOwnership(ctx, s, currentGnomeLogLength(ctx))
         val t = Thread { XServer.stopDesktopMode(ctx) }
         t.start(); XServer.stopDesktopMode(ctx); t.join(30_000)
         assertFalse("concurrent stop must not wedge", t.isAlive)
