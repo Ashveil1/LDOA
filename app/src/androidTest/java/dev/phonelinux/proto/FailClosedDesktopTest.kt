@@ -92,8 +92,10 @@ class FailClosedDesktopTest {
 
             // COPY FULL LOG: the seeded file exceeds the 1500-char tail; the
             // clipboard must carry the WHOLE file incl. the seed marker.
-            val copyBtn = device.wait(Until.findObject(By.text("Copy full log")), 10_000)
-            assertTrue("Copy full log button missing from error dialog", copyBtn != null)
+            // Label is "Copy log" (bounded 256KiB tail export, MainActivity):
+            // the assert must match the shipped label, not the old unbounded one.
+            val copyBtn = device.wait(Until.findObject(By.text("Copy log")), 10_000)
+            assertTrue("Copy log button missing from error dialog", copyBtn != null)
             copyBtn.click()
             Thread.sleep(1_000)
             val cm = ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
