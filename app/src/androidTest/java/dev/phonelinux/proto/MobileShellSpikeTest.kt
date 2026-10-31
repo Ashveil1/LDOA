@@ -585,6 +585,9 @@ class MobileShellSpikeTest {
         val xevLog = File(ctx.filesDir, "scroll-xev.log")
         val xtermLog = File(ctx.filesDir, "scroll-xterm.log")
         val fpFile = File(rootfs, "root/scroll-fingerprint.sh")
+        // Ownership guard (review requirement): cleanup may only delete a
+        // file THIS run created; a pre-existing file is never deleted.
+        var fpCreated = false
         try {
             // device<->guest affine map from two pointer probes (pattern
             // proven in the GNOME harness). Probes run BEFORE the test
@@ -707,7 +710,7 @@ class MobileShellSpikeTest {
             // dash-safe fingerprint loop: no ${'$'} inside $(( )); bar via
             // a builtin-only char loop (no fork per line under proot).
             // Byte-identical arithmetic to the pre-wrapper inline loop.
-            fpFile.writeText(
+            val fpContent =
                 "#!/bin/sh\n" +
                 "# Test-owned scroll fingerprint (MobileShellSpikeTest sub-cell B).\n" +
                 "i=0\n" +
@@ -719,7 +722,14 @@ class MobileShellSpikeTest {
                 "  printf '\\n'\n" +
                 "  i=${'$'}((i+1))\n" +
                 "done\n" +
-                "exec /bin/sh\n")
+                "exec /bin/sh\n"
+            val fpPre = if (fpFile.exists()) fpFile.readText() else null
+            assertTrue("scroll: fingerprint path holds unknown content - " +
+                "preserved, FAIL CLOSED",
+                fpPre == null || fpPre == fpContent)
+            // Byte-identical leftover from a crashed prior run: reuse
+            // as-is, leave in place (do not rewrite, do not delete).
+            if (fpPre == null) { fpFile.writeText(fpContent); fpCreated = true }
             // Direct argv, no sh -c wrapper: the proot root's child IS
             // script - the flat-tree shape the verified teardown reaps.
             // The held tree then spans [proot root, script, xterm, sh];
@@ -817,7 +827,7 @@ class MobileShellSpikeTest {
             }
             try { dumpLogTail("scroll-xev.log", xevLog, 16384) } catch (t: Throwable) { }
             try { dumpLogTail("scroll-xterm.log", xtermLog, 16384) } catch (t: Throwable) { }
-            try { fpFile.delete() } catch (t: Throwable) { }
+            try { if (fpCreated) fpFile.delete() } catch (t: Throwable) { }
             MobileModeSettings.write(ctx, defaultPrefs)
         }
     }
