@@ -200,9 +200,23 @@ object GuestUbuntu {
             DBUS_RUN_DIR=${'$'}LDOA_DBUS_RUN_DIR
             [ -z "${'$'}DBUS_RUN_DIR" ] && DBUS_RUN_DIR=/run/dbus
             mkdir -p "${'$'}DBUS_RUN_DIR"
-            sysbus_live() {
-              gdbus call --system --timeout 2 --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.ListNames >/dev/null 2>&1
+            sysbus_probe() {
+              # Classifies the ENDPOINT, not just success/failure (a boolean probe
+              # cannot distinguish a dead socket from a busy live daemon).
+              # Prints "CLASS|detail": LIVE | REFUSED (socket file exists, NO
+              # listener - endpoint grounded dead) | NOENT (no socket file - no
+              # endpoint) | OTHER (timeout/auth/handshake - an endpoint may be
+              # listening but unresponsive: state UNKNOWN, preserve). LIVE
+              # carries no detail (never log the name list).
+              E=${'$'}(gdbus call --system --timeout 2 --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.ListNames 2>&1 | head -1)
+              case "${'$'}E" in
+                "("*) echo "LIVE|" ;;
+                *"Connection refused"*) echo "REFUSED|${'$'}(echo "${'$'}E" | cut -c1-120)" ;;
+                *"No such file or directory"*) echo "NOENT|${'$'}(echo "${'$'}E" | cut -c1-120)" ;;
+                *) echo "OTHER|${'$'}(echo "${'$'}E" | cut -c1-120)" ;;
+              esac
             }
+            sysbus_probe_log() { echo "gnome-launch: system-bus probe=${'$'}1 detail=${'$'}2"; }
             start_system_bus() {
               rm -f "${'$'}DBUS_RUN_DIR/system_bus_socket" "${'$'}DBUS_RUN_DIR/pid"
               BO=${'$'}(dbus-daemon --system --fork 2>&1); BRC=${'$'}?
@@ -212,10 +226,11 @@ object GuestUbuntu {
                 echo "gnome-launch: system-bus service fallback rc=${'$'}SRC output=${'$'}{SO:-none}"
               fi
               sleep 1
-              if sysbus_live; then
+              R=${'$'}(sysbus_probe); P=${'$'}{R%%|*}; sysbus_probe_log "${'$'}P" "${'$'}{R#*|}"
+              if [ "${'$'}P" = LIVE ]; then
                 echo "gnome-launch: system-bus LIVE after start pid=${'$'}(cat "${'$'}DBUS_RUN_DIR/pid" 2>/dev/null | tr -d '[:space:]')"
               else
-                echo "gnome-launch: system-bus UNAVAILABLE after start attempt - systemd-gated components (gnome-session gsm-systemd, shell LoginManagerSystemd) expected to fail this round; continuing for diagnostics"
+                echo "gnome-launch: system-bus UNAVAILABLE after start attempt (probe=${'$'}P) - systemd-gated components (gnome-session gsm-systemd, shell LoginManagerSystemd) expected to fail this round; continuing for diagnostics"
               fi
             }
             echo "gnome-launch: system-bus state dir=${'$'}DBUS_RUN_DIR ${'$'}(ls -la "${'$'}DBUS_RUN_DIR" 2>&1 | tr '\n' '|')"
@@ -232,37 +247,57 @@ object GuestUbuntu {
             else
               echo "gnome-launch: system-bus pidfile absent"
             fi
-            # Decision tree. A failed/timed-out ListNames probe ALONE is not proof of
-            # a dead listener: a live daemon can be busy. Unlink is grounded only
-            # when the endpoint is proven dead (no live pidfile daemon claiming it).
-            if sysbus_live; then
-              echo "gnome-launch: system-bus LIVE - preserving existing daemon (socket/pidfile untouched)"
-            elif [ -n "${'$'}BP" ] && [ -n "${'$'}BCOMM" ]; then
-              case "${'$'}BCOMM" in
-                dbus-daemon*)
-                  # LIVE daemon, probe failed: possibly a BUSY (transient) daemon.
-                  # Never unlink a live daemon's endpoint out from under it. One
-                  # bounded retry; if it still does not answer, FAIL CLOSED: keep
-                  # the endpoint and run this round without a usable system bus -
-                  # the sampler's per-sample probe records whether it recovers, and
-                  # the next launch re-evaluates from a preserved endpoint.
-                  sleep 2
-                  if sysbus_live; then
-                    echo "gnome-launch: system-bus LIVE after retry (transient probe failure) - preserved pid=${'$'}BP"
-                  else
-                    echo "gnome-launch: system-bus daemon pid=${'$'}BP alive but not answering after retry - FAIL CLOSED: endpoint preserved (no unlink/restart); systemd-gated components expected to fail this round"
-                  fi ;;
-                *)
-                  # Pidfile names a live UNRELATED process: the file is stale (pid
-                  # reused). Probe failed too, so the endpoint is grounded dead;
-                  # the referenced process itself is NOT touched.
-                  echo "gnome-launch: system-bus pidfile stale (pid=${'$'}BP comm=${'$'}BCOMM, not a daemon) and listener unavailable - clearing stale endpoint and starting a fresh daemon"
-                  start_system_bus ;;
-              esac
-            else
-              echo "gnome-launch: system-bus listener unavailable, no live pidfile daemon - clearing stale endpoint and starting a fresh daemon"
-              start_system_bus
-            fi
+            R=${'$'}(sysbus_probe); P=${'$'}{R%%|*}; sysbus_probe_log "${'$'}P" "${'$'}{R#*|}"
+            case "${'$'}P" in
+              LIVE)
+                echo "gnome-launch: system-bus LIVE - preserving existing daemon (socket/pidfile untouched)" ;;
+              REFUSED)
+                if [ -n "${'$'}BP" ] && [ -n "${'$'}BCOMM" ]; then
+                  case "${'$'}BCOMM" in
+                    dbus-daemon*)
+                      # Socket has NO listener yet the pidfile's daemon is ALIVE:
+                      # wedged or mid-restart daemon - never unlink a live daemon's
+                      # endpoint. One bounded retry, then FAIL CLOSED.
+                      sleep 2
+                      R=${'$'}(sysbus_probe); P=${'$'}{R%%|*}; sysbus_probe_log "${'$'}P" "${'$'}{R#*|}"
+                      if [ "${'$'}P" = LIVE ]; then
+                        echo "gnome-launch: system-bus LIVE after retry - preserved pid=${'$'}BP"
+                      else
+                        echo "gnome-launch: system-bus daemon pid=${'$'}BP alive but socket not listening after retry (probe=${'$'}P) - FAIL CLOSED: endpoint preserved (no unlink/restart); systemd-gated components expected to fail this round"
+                      fi ;;
+                    *)
+                      # Pidfile names a live UNRELATED process (stale, pid reused)
+                      # and the socket has no listener: endpoint grounded dead.
+                      # The referenced process itself is NOT touched.
+                      echo "gnome-launch: system-bus pidfile stale (pid=${'$'}BP comm=${'$'}BCOMM, not a daemon) and socket not listening (ECONNREFUSED) - clearing grounded-dead endpoint and starting a fresh daemon"
+                      start_system_bus ;;
+                  esac
+                else
+                  echo "gnome-launch: system-bus socket not listening (ECONNREFUSED), no live pidfile daemon - clearing grounded-dead endpoint and starting a fresh daemon"
+                  start_system_bus
+                fi ;;
+              NOENT)
+                if [ -n "${'$'}BP" ] && [ -n "${'$'}BCOMM" ]; then
+                  # A live daemon but no socket file: do not race it - it may be
+                  # (re)creating its endpoint. FAIL CLOSED.
+                  echo "gnome-launch: system-bus socket missing (ENOENT) but pidfile daemon pid=${'$'}BP alive - FAIL CLOSED: not racing a live daemon (no new daemon started)"
+                else
+                  echo "gnome-launch: system-bus endpoint absent (ENOENT), no live pidfile daemon - starting a fresh daemon"
+                  start_system_bus
+                fi ;;
+              *)
+                # Timeout/auth/handshake/unknown: an endpoint may be LISTENING but
+                # unresponsive. State UNKNOWN - never unlink on unknown. One bounded
+                # retry; if it answers, preserve; otherwise preserve and fail closed.
+                # (Do not call this round bus-less: the bus state is UNKNOWN.)
+                sleep 2
+                R=${'$'}(sysbus_probe); P=${'$'}{R%%|*}; sysbus_probe_log "${'$'}P" "${'$'}{R#*|}"
+                if [ "${'$'}P" = LIVE ]; then
+                  echo "gnome-launch: system-bus LIVE after retry (initial probe was unresponsive) - preserved"
+                else
+                  echo "gnome-launch: system-bus state UNKNOWN after retry (probe=${'$'}P - an unresponsive endpoint may be listening) - FAIL CLOSED: endpoint preserved (no unlink/restart); systemd-gated components may fail this round"
+                fi ;;
+            esac
             echo "gnome-launch: pkg gnome-shell=${'$'}(dpkg-query -W -f='${'$'}{Version}' gnome-shell 2>&1 | head -1) gnome-session=${'$'}(dpkg-query -W -f='${'$'}{Version}' gnome-session 2>&1 | head -1) gjs=${'$'}(dpkg-query -W -f='${'$'}{Version}' gjs 2>&1 | head -1) libmutter-14-0=${'$'}(dpkg-query -W -f='${'$'}{Version}' libmutter-14-0 2>&1 | head -1)"
             # FRESH session bus per launch: a killed session's bus address
             # lingers in the X root window (_DBUS_SESSION_BUS_* properties)

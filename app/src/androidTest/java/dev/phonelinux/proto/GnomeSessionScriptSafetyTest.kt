@@ -27,36 +27,75 @@ class GnomeSessionScriptSafetyTest {
     private val script = GuestUbuntu.gnomeSessionScript()
 
     @Test fun systemBusProbePrecedesAnySocketRemoval() {
-        val probe = script.indexOf("sysbus_live()")
+        val probe = script.indexOf("sysbus_probe() {")
         val removal = script.indexOf("rm -f \"\$DBUS_RUN_DIR/system_bus_socket\"")
-        assertTrue("liveness probe function must exist", probe >= 0)
+        assertTrue("endpoint-classifying probe function must exist", probe >= 0)
         assertTrue("stale-removal must exist (inside start_system_bus)", removal >= 0)
         assertTrue("probe definition must precede removal", probe < removal)
         assertEquals("exactly one socket/pidfile removal site", 1,
             script.split("system_bus_socket\" \"\$DBUS_RUN_DIR/pid").size - 1)
     }
 
-    /** A failed/timed-out ListNames probe is NOT proof of a dead daemon:
-     *  when the pidfile names a LIVE dbus-daemon the endpoint must be
-     *  preserved (bounded retry, then fail closed) - never unlinked. */
-    @Test fun liveDaemonEndpointIsPreservedWhenProbeFails() {
+    /** The probe must classify the ENDPOINT at connect level, not return a
+     *  boolean: a failed/timed-out ListNames is not proof of a dead daemon.
+     *  ECONNREFUSED/ENOENT ground endpoint death; timeout/auth/handshake
+     *  means UNKNOWN and must preserve. */
+    @Test fun probeClassifiesEndpointAtConnectLevel() {
+        val fn = script.indexOf("sysbus_probe() {")
+        val refused = script.indexOf("*\"Connection refused\"*) echo \"REFUSED|")
+        val noent = script.indexOf("*\"No such file or directory\"*) echo \"NOENT|")
+        assertTrue("probe function must exist", fn >= 0)
+        assertTrue("ECONNREFUSED classification must exist", refused > fn)
+        assertTrue("ENOENT classification must exist", noent > fn)
+        assertTrue("probe log must carry class and bounded raw detail",
+            script.contains("sysbus_probe_log() { echo \"gnome-launch: system-bus probe=\$1 detail=\$2\"; }"))
+        assertTrue("a LIVE probe must never log the name list (no detail emitted)",
+            script.contains("\"(\") echo \"LIVE|\"") || script.contains("'('*) echo \"LIVE|\""
+            ) || script.contains("\"(\"*) echo \"LIVE|\""))
+    }
+
+    /** A timeout/auth/handshake probe (OTHER) leaves the state UNKNOWN:
+     *  one bounded retry, then FAIL CLOSED with the endpoint preserved.
+     *  An unresponsive endpoint may still be listening - never unlink. */
+    @Test fun unknownProbeStateFailsClosedWithoutUnlink() {
+        val retryLive = script.indexOf("system-bus LIVE after retry (initial probe was unresponsive) - preserved")
+        val unknown = script.indexOf("system-bus state UNKNOWN after retry (probe=\$P - an unresponsive endpoint may be listening) - FAIL CLOSED: endpoint preserved (no unlink/restart)")
+        assertTrue("unresponsive-recovery verdict must exist", retryLive >= 0)
+        assertTrue("UNKNOWN fail-closed verdict must exist", unknown >= 0)
+        assertTrue("recovery is attempted before failing closed", retryLive < unknown)
+    }
+
+    /** ECONNREFUSED with a LIVE pidfile dbus-daemon: wedged or mid-restart
+     *  daemon. One bounded retry, then fail closed - never unlink a live
+     *  daemon's endpoint. */
+    @Test fun liveDaemonEndpointIsPreservedWhenProbeRefused() {
         val branch = script.indexOf("dbus-daemon*)")
-        val retry = script.indexOf("system-bus LIVE after retry (transient probe failure)")
-        val failClosed = script.indexOf("alive but not answering after retry - FAIL CLOSED: endpoint preserved (no unlink/restart)")
+        val retry = script.indexOf("system-bus LIVE after retry - preserved pid=")
+        val failClosed = script.indexOf("alive but socket not listening after retry (probe=\$P) - FAIL CLOSED: endpoint preserved (no unlink/restart)")
         assertTrue("live-daemon branch must exist", branch >= 0)
         assertTrue("bounded retry verdict must exist", retry >= 0)
         assertTrue("fail-closed verdict must exist", failClosed >= 0)
         assertTrue("retry and fail-closed belong to the live-daemon branch",
             branch < retry && branch < failClosed)
-        assertEquals("start_system_bus: one definition + exactly two call sites (stale-pidfile and no-live-daemon branches only)",
-            3, script.split("start_system_bus").size - 1)
+        assertEquals("start_system_bus: one definition + exactly three call sites (REFUSED+stale, REFUSED+no-daemon, ENOENT+no-daemon)",
+            4, script.split("start_system_bus").size - 1)
     }
 
-    /** A stale pidfile (live UNRELATED process, dead listener) may be
-     *  cleared; the referenced process itself is never killed. */
+    /** A stale pidfile (live UNRELATED process) plus a grounded-dead
+     *  endpoint (ECONNREFUSED) may be cleared; the referenced process
+     *  itself is never killed. */
     @Test fun stalePidfileBranchGroundsEndpointDeath() {
         assertTrue(script.contains("pidfile stale (pid="))
-        assertTrue(script.contains("not a daemon) and listener unavailable"))
+        assertTrue(script.contains("not a daemon) and socket not listening (ECONNREFUSED)"))
+    }
+
+    /** ENOENT with a live pidfile daemon: the daemon may be about to bind.
+     *  Fail closed rather than race it with a second daemon. */
+    @Test fun enoentWithLiveDaemonDoesNotRace() {
+        assertTrue(script.contains("system-bus socket missing (ENOENT) but pidfile daemon pid="))
+        assertTrue(script.contains("FAIL CLOSED: not racing a live daemon (no new daemon started)"))
+        assertTrue("ENOENT with no live daemon starts fresh",
+            script.contains("system-bus endpoint absent (ENOENT), no live pidfile daemon - starting a fresh daemon"))
     }
 
     @Test fun healthySystemBusIsPreservedUntouched() {
