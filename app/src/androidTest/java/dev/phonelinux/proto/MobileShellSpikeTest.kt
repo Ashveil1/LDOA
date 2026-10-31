@@ -637,8 +637,12 @@ class MobileShellSpikeTest {
                 Thread.sleep(1_500)
                 val after = if (xevLog.isFile) xevLog.readText() else ""
                 val chunk = after.removePrefix(before)
-                val p4 = Regex("ButtonPress event[^\\n]*button 4[^0-9]").findAll(chunk).count()
-                val p5 = Regex("ButtonPress event[^\\n]*button 5[^0-9]").findAll(chunk).count()
+                // xev events are THREE lines (header / root / "state ..,
+                // button N,"); a single-line regex sees zero (run
+                // 41226469576: wheel delivered, test counted 0). Parse
+                // press BLOCKS - the proven split shape.
+                val p4 = countXevButton(chunk, 4)
+                val p5 = countXevButton(chunk, 5)
                 delivered += p4 + p5
                 Log.i(TAG, "scroll: xev drag dySign=" + dySign + " button4=" + p4 + " button5=" + p5)
                 if (p4 > 0 && wheelUpDySign == 0) wheelUpDySign = dySign
@@ -816,6 +820,14 @@ class MobileShellSpikeTest {
         }
         return out
     }
+
+    /** ButtonPress blocks in an xev -event button log whose 3-line
+     *  record carries "button N," - delivery counting that matches the
+     *  actual multiline record shape. */
+    private fun countXevButton(chunk: String, button: Int): Int =
+        chunk.split("ButtonPress event").drop(1).count { block ->
+            block.substringBefore("ButtonRelease event").contains("button " + button + ",")
+        }
 
     /** Median gap between strong row-luminance edges = text line height,
      *  measured from the actual frame (never hardcoded). */
