@@ -85,6 +85,13 @@ object XServer {
         sb.append("session_bus=").append(gnomeSessionBus ?: "(none)").append('\n')
         sb.append("session_root_ident=").append(sessionRootIdent?.let { "pid=" + it.pid + " start=" + it.start + " uid=" + it.uid } ?: "(none)").append('\n')
         sb.append("session_bus_ident=").append(sessionBusIdent?.let { "pid=" + it.pid + " start=" + it.start + " uid=" + it.uid } ?: "(none)").append('\n')
+        // GNOME diagnostic sampler file (guest /tmp/ldoa-probes.log on the
+        // ubuntu rootfs): presence/size/freshness only - the file itself is
+        // exported as logs/ldoa-probes.log by Diagnostics.
+        val probes = File(ctx.filesDir, "distros/ubuntu/tmp/ldoa-probes.log")
+        sb.append("ldoa_probes_present=").append(probes.isFile).append('\n')
+        sb.append("ldoa_probes_bytes=").append(if (probes.isFile) probes.length() else 0).append('\n')
+        sb.append("ldoa_probes_mtime=").append(if (probes.isFile) isoTime(probes.lastModified()) else "(none)").append('\n')
         sb.append("-- gate timeline (mono_ms | wall | event) --\n")
         synchronized(gateTimeline) {
             for (e in gateTimeline) sb.append(e.monoMs).append(" | ").append(isoTime(e.wallMs)).append(" | ").append(e.text).append('\n')

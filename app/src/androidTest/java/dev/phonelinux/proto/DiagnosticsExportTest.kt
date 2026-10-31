@@ -145,6 +145,31 @@ class DiagnosticsExportTest {
     }
 
     @Test
+    fun gnomeProbesFileExportedScrubbedAndManifested() {
+        // The GNOME session sampler's output (guest /tmp/ldoa-probes.log on
+        // the ubuntu rootfs) must land in the ZIP as logs/ldoa-probes.log,
+        // pass the same secret scrubber as every other log, and get its own
+        // logs-manifest row. Probe-evidence values (bus owner pid) are kept.
+        val probeDir = File(ctx.filesDir, "distros/ubuntu/tmp").apply { mkdirs() }
+        val probe = File(probeDir, "ldoa-probes.log")
+        val hadOld = probe.isFile
+        val old = if (hadOld) probe.readBytes() else null
+        try {
+            probe.writeText("=== ldoa-probes begin ===\ntool gdbus=available\n" +
+                "bus_owner_pid=(uint32 21041,)\ntoken=probesecret123\n")
+            writeLogs(mapOf("guest-gnome.log" to "x"))
+            val res = Diagnostics.buildZip(ctx)
+            val ent = entries(res.zip)
+            val out = String(ent.getValue("logs/ldoa-probes.log"), Charsets.UTF_8)
+            assertTrue("probe evidence kept", out.contains("bus_owner_pid=(uint32 21041,)"))
+            assertFalse("probes content must pass the scrubber", out.contains("probesecret123"))
+            assertTrue("probes file gets a manifest row", manifestRows(ent).containsKey("ldoa-probes.log"))
+        } finally {
+            if (hadOld) probe.writeBytes(old!!) else probe.delete()
+        }
+    }
+
+    @Test
     fun zipRetentionStaysBounded() {
         val dir = File(ctx.cacheDir, "diagnostics").apply { mkdirs() }
         for (i in 1..5) {

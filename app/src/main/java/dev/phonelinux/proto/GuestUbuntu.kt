@@ -93,6 +93,14 @@ object GuestUbuntu {
             # into glibc (>= 2.35), so no locale-gen or extra package.
             export DISPLAY=:0 HOME=/root XDG_RUNTIME_DIR=/tmp/xdg XDG_CURRENT_DESKTOP=ubuntu:GNOME XDG_SESSION_TYPE=x11 LANG=C.UTF-8 LC_ALL=C.UTF-8
             export PLINUX_SESSION=desktop
+            # Verbose glib/mutter messaging for this diagnostic build (user
+            # 2026-10-31: capture MORE logs). Bounded by the existing 4 MiB
+            # log rotation + the export budget; the OLDEST lines can rotate
+            # out of very chatty sessions - the sampler's per-sample UTC
+            # stamps anchor what survives. Observer effect: extra logging
+            # costs CPU in the measured path, so timings under this flag are
+            # diagnostic-mode timings, not clean-session timings.
+            export G_MESSAGES_DEBUG=all
             LAUNCH_ID=$(date +%s)
             echo "gnome-launch: launch id=${'$'}LAUNCH_ID"
             mkdir -p /tmp/xdg
@@ -171,6 +179,80 @@ object GuestUbuntu {
             eval $(dbus-launch --sh-syntax) 2>&1
             echo "gnome-launch: session bus ${'$'}DBUS_SESSION_BUS_ADDRESS"
             echo ${'$'}DBUS_SESSION_BUS_PID > /root/.gnome-bus.pid 2>/dev/null
+            # LDOA DIAGNOSTIC SAMPLER (bounded, read-only): recurring
+            # session-state samples for the export ZIP, written to
+            # /tmp/ldoa-probes.log (rootfs-local tmp; the app picks it up at
+            # distros/ubuntu/tmp/ldoa-probes.log). The cadence captures the
+            # stall WINDOW over ~12 min, not one export-time point; a sample
+            # can be up to ~15s stale. Per-probe timeouts bound every sample
+            # (worst sample ~8s: two 2s bus queries + window loop). Window
+            # TITLES are excluded AT COLLECTION: ids come from xprop
+            # _NET_CLIENT_LIST (ids only), the xwininfo title header line is
+            # never emitted, and only Map State / geometry / WM_CLASS are
+            # recorded. _NET_CLIENT_LIST holds MANAGED clients only (mutter
+            # guard/composite windows are not listed), so client_windows=0
+            # does not prove no override-redirect window exists. GL module
+            # paths are what the shell process had LOADED (/proc/pid/maps):
+            # evidence, NOT proof of the active renderer (multiple modules
+            # can be loaded while one renders). X identity (pid+starttime)
+            # is recorded at session start AND per sample: identical
+            # starttimes prove the SAME server instance at both points, a
+            # changed starttime proves a restart (pairwise comparison;
+            # single-snapshot reuse is never claimed).
+            ( PF=/tmp/ldoa-probes.log
+              MAXB=131072
+              {
+              echo "=== ldoa-probes begin utc=${'$'}(date -u +%FT%TZ) launch=${'$'}LAUNCH_ID ==="
+              for t in gdbus xwininfo xdpyinfo xrandr glxinfo pgrep pidof xprop; do
+                if command -v "${'$'}t" >/dev/null 2>&1; then echo "tool ${'$'}t=available"; else echo "tool ${'$'}t=UNAVAILABLE"; fi
+              done
+              XP=${'$'}(pgrep -f CmdEntryPoint | head -1)
+              if [ -n "${'$'}XP" ]; then
+                echo "xserver_identity_at_session_start pid=${'$'}XP ${'$'}(awk '{print "comm=" ${'$'}2 " starttime=" ${'$'}22}' /proc/${'$'}XP/stat 2>/dev/null)"
+              else
+                echo "xserver_identity_at_session_start NOT_FOUND"
+              fi
+              i=0
+              while [ "${'$'}i" -lt 40 ]; do
+                SZ=${'$'}(wc -c < "${'$'}PF" 2>/dev/null || echo 0)
+                if [ "${'$'}SZ" -gt "${'$'}MAXB" ]; then echo "=== ldoa-probes stopped: size cap ${'$'}MAXB bytes ==="; break; fi
+                i=${'$'}((i + 1))
+                echo "--- sample ${'$'}i +${'$'}(( ${'$'}(date +%s) - LAUNCH_ID ))s utc=${'$'}(date -u +%FT%TZ) ---"
+                SP=${'$'}(pgrep -x gnome-shell | head -1)
+                echo "shell_pid=${'$'}{SP:-none}"
+                OWN=${'$'}(gdbus call --session --timeout 2 --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.NameHasOwner org.gnome.Shell 2>&1 | head -1)
+                echo "bus_owner_org.gnome.Shell=${'$'}{OWN:-query_failed_or_timeout}"
+                case "${'$'}OWN" in
+                  *true*) echo "bus_owner_pid=${'$'}(gdbus call --session --timeout 2 --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.GetConnectionUnixProcessID org.gnome.Shell 2>&1 | head -1)" ;;
+                esac
+                XP=${'$'}(pgrep -f CmdEntryPoint | head -1)
+                if [ -n "${'$'}XP" ]; then
+                  echo "xserver_now pid=${'$'}XP ${'$'}(awk '{print "comm=" ${'$'}2 " starttime=" ${'$'}22}' /proc/${'$'}XP/stat 2>/dev/null)"
+                else
+                  echo "xserver_now NOT_FOUND"
+                fi
+                V=0; N=0
+                for id in ${'$'}(xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# //' | tr ',' ' '); do
+                  N=${'$'}((N + 1)); [ "${'$'}N" -gt 12 ] && break
+                  INFO=${'$'}(xwininfo -id "${'$'}id" 2>/dev/null | awk '/Map State:/{ms=${'$'}3} /Width:/{w=${'$'}2} /Height:/{h=${'$'}2} END{printf "map=%s geo=%sx%s", ms, w, h}')
+                  case "${'$'}INFO" in *IsViewable*) V=${'$'}((V + 1)) ;; esac
+                  echo "win ${'$'}id ${'$'}INFO class=${'$'}(xprop -id "${'$'}id" WM_CLASS 2>/dev/null | sed 's/.*= //')"
+                done
+                echo "client_windows=${'$'}N viewable=${'$'}V (sample-time map state of managed clients; titles excluded at collection)"
+                if [ "${'$'}i" = "3" ] || [ "${'$'}i" = "8" ]; then
+                  if [ -n "${'$'}SP" ]; then
+                    echo "shell_gl_modules_begin pid=${'$'}SP (loaded modules; evidence, not active-renderer proof)"
+                    grep -oE '/[^ ]*\.so[0-9.]*' "/proc/${'$'}SP/maps" 2>/dev/null | grep -Ei 'dri|libGL|libEGL|llvm|virgl|zink|swrast|vulkan' | sort -u | head -24 | sed 's/^/  /'
+                    echo "shell_gl_modules_end"
+                  else
+                    echo "shell_gl_modules: shell pid not found"
+                  fi
+                fi
+                sleep 15
+              done
+              echo "=== ldoa-probes end: budget 40 samples reached launch=${'$'}LAUNCH_ID ==="
+              } >> "${'$'}PF" 2>&1
+            ) &
             # READINESS evidence for the app-side gate: org.gnome.Shell owned
             # on THIS launch's bus. A stalled shell (run 40864638283 re-enter:
             # fallback shell never registered, black screen) fails this poll.

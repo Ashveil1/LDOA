@@ -84,8 +84,15 @@ object Diagnostics {
             var remaining = maxTotalBytesForTests ?: MAX_TOTAL_BYTES
             val logManifest = StringBuilder()
             logManifest.append("name\toriginal_bytes_pre_redaction\texported_bytes_post_redaction\tdropped_from_start_bytes\tfile_mtime_iso\n")
-            for (name in LOG_NAMES) {
-                val f = File(ctx.filesDir, name)
+            // zip leaf name -> host file. LOG_NAMES live flat in filesDir;
+            // the GNOME session sampler writes guest-side /tmp/ldoa-probes.log
+            // which is the ubuntu rootfs' tmp dir from the host. Absent before
+            // the first GNOME launch and on non-ubuntu distros - expected,
+            // not a failure.
+            val specs = ArrayList<Pair<String, File>>()
+            for (n in LOG_NAMES) specs.add(n to File(ctx.filesDir, n))
+            specs.add("ldoa-probes.log" to File(ctx.filesDir, "distros/ubuntu/tmp/ldoa-probes.log"))
+            for ((name, f) in specs) {
                 if (!f.isFile) continue
                 val len = f.length()
                 val mtime = isoTime(f.lastModified())
@@ -147,6 +154,16 @@ object Diagnostics {
         "  exceeds 24 MiB; a normal session export is complete).\n" +
         "- session-snapshot.txt: session/ownership state + the readiness-gate\n" +
         "  decision timeline (monotonic + wall clock, matched per launch).\n" +
+        "- logs/ldoa-probes.log (GNOME sessions only): bounded session-state\n" +
+        "  samples every ~15s for ~12 min after launch - tool availability,\n" +
+        "  gnome-shell pid, org.gnome.Shell bus owner (2s-timeout queries),\n" +
+        "  X server pid+starttime (the SAME starttime at two points means the\n" +
+        "  same server instance; a changed one means a restart), managed-\n" +
+        "  window ids with map state/geometry/WM_CLASS (window titles are\n" +
+        "  excluded at collection; each sample is that moment's state, not\n" +
+        "  proof a window ever appeared), and the GL/DRI modules the shell\n" +
+        "  process had loaded (evidence, NOT proof of the active renderer).\n" +
+        "  The freshest sample can be ~15s older than the export itself.\n" +
         "- manifest.txt: app build, device model, Android version.\n" +
         "\n" +
         "Deliberately NOT included:\n" +
@@ -160,10 +177,16 @@ object Diagnostics {
         "  model/product/hardware and Android version/security patch)\n" +
         "\n" +
         "Known gaps in this build:\n" +
-        "- frame-presentation and input-event cadence counters are not\n" +
-        "  instrumented yet, so drag smoothness is not numerically captured\n" +
-        "  here; guest font state (fc-match/fc-list) is not probed yet.\n" +
-        "- the export sees app-side state only; a guest process that stopped\n" +
-        "  writing leaves the log silent at that point (that silence is\n" +
-        "  itself the evidence, read with the gate timeline).\n"
+        "- frame-presentation and input-event cadence counters are still NOT\n" +
+        "  instrumented: this bundle does not diagnose drag stutter\n" +
+        "  numerically. Guest font state (fc-match/fc-list) is not probed.\n" +
+        "- verbose session logging (G_MESSAGES_DEBUG=all) is enabled; the\n" +
+        "  4 MiB per-generation rotation plus the 24 MiB export budget still\n" +
+        "  cap size, so the OLDEST verbose lines can rotate out of very\n" +
+        "  chatty sessions. Verbose logging costs some CPU in the measured\n" +
+        "  path - timings in this bundle are diagnostic-mode timings.\n" +
+        "- the export reads app-owned files only; a guest process that\n" +
+        "  stopped writing leaves its log silent at that point (that silence\n" +
+        "  is itself evidence, read with the gate timeline and the sampler's\n" +
+        "  per-sample timestamps).\n"
 }
