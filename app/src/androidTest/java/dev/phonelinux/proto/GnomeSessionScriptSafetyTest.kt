@@ -210,7 +210,7 @@ class GnomeSessionScriptSafetyTest {
             script.contains("seq 1 55"))
         assertFalse("SECONDS is empty in dash - deadline must not use it",
             script.contains("SECONDS"))
-        assertEquals("budget + post-budget + observer + fallback-poll pings must all be doubly bounded (gdbus --timeout 2 inside timeout 4)", 5,
+        assertEquals("budget + post-budget + observer + fallback-poll pings + the shell-mode evidence probe must all be doubly bounded (gdbus --timeout 2 inside timeout 4)", 6,
             script.split("timeout 4 gdbus call --session --timeout 2").size - 1)
     }
 
