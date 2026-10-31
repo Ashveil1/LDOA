@@ -49,7 +49,13 @@ object GuestDesktop {
             "HOME" to "/root",
             "DISPLAY" to ":0",
             "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            "PROOT_TMP_DIR" to Proot.prootTmpDir(ctx).absolutePath
+            "PROOT_TMP_DIR" to Proot.prootTmpDir(ctx).absolutePath,
+            // Session tag: without it this directly-spawned xclock is
+            // invisible to killDesktopClients/desktopClientScan and leaks
+            // past teardown (custom gate 41191922079 trim victim xclock
+            // 6941). The desktop-session script exports the same tag, so a
+            // single environ scan reaps both spawn paths.
+            "PLINUX_SESSION" to "desktop"
         ))
         pb.redirectErrorStream(true)
         pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))

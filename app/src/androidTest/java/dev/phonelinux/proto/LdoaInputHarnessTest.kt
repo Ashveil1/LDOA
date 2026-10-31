@@ -81,6 +81,11 @@ class LdoaInputHarnessTest {
         Log.i(TAG, "harness: session reset exit=${kill.exitCode}")
         XServer.start(ctx)
         val proc = XServer.launchOrReuseGnomeSession(ctx, d, rootfs)
+        // Bounded cleanup adaptation (owner commit 8789987a onto the custom
+        // branch): the whole post-launch body runs under this try so a
+        // failing arm cannot leak the GNOME tree. Body indentation left
+        // unchanged on purpose - keeps this bounded diff reviewable.
+        try {
         val logFile = File(ctx.filesDir, "guest-gnome.log")
         val deadline = System.currentTimeMillis() + 600_000
         var sawLaunchMarker = false
@@ -620,7 +625,12 @@ class LdoaInputHarnessTest {
                 "DISPLAY" to ":0",
                 "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 "PROOT_TMP_DIR" to Proot.prootTmpDir(ctx).absolutePath,
-                "TMPDIR" to "/tmp"))
+                "TMPDIR" to "/tmp",
+                // Session tag: xevProc.destroy() kills only the proot root;
+                // the xev guest process would orphan (custom gate
+                // 41191922079 survivors xev 15179/15186). The tag lets the
+                // teardown sweep reap it with the rest of the tree.
+                "PLINUX_SESSION" to "desktop"))
             pb.redirectErrorStream(true)
             pb.redirectOutput(ProcessBuilder.Redirect.appendTo(xevLog))
             val xevProc = pb.start()
@@ -667,5 +677,37 @@ class LdoaInputHarnessTest {
             "arm4/arm5=drag/hold cancel-safety, arm6=GTK scroll real-content (pixel), " +
             "arm7=text selection (best-effort pixel), arm8=legacy xev DELIVERY-only; " +
             "LDOA-2FTAP-FIRE logcat deltas corroborate injection in arm3/arm8")
+        } finally {
+            // Adapted from owner commit 8789987a for the custom branch.
+            // DELTAS (custom lane lacks the APIs the original used):
+            // - no XServer.stopDesktopMode (arrived with owner-lane ca91b1e,
+            //   lifecycle scope, not ported here) - the custom-branch sweep
+            //   below is an environ-tag scan (PLINUX_SESSION=desktop) that
+            //   needs NO live session root, so the destroy-order hazard the
+            //   owner commit fixed does not apply to this primitive.
+            // - no harness ledger (owner-lane 7ff1c9c, not on this branch).
+            // Order here: sweep tagged guest tree, destroy the proot root,
+            // re-sweep (orphans from the root's death), count residuals,
+            // one retry - killed/residual always logged, never swallowed.
+            // Victims this closes (custom gate 41191922079): this test's
+            // GNOME proot root 13890 + ~20 services + arm8's xev 15186 /
+            // proot 15179, all orphaned at test end.
+            try {
+                Log.i(TAG, "harness: teardown begin (owned-only)")
+                var swept = GuestDesktop.killDesktopClients(ctx, rootfs)
+                try { proc.destroy() } catch (t: Throwable) { Log.i(TAG, "harness: proc.destroy threw " + t) }
+                Thread.sleep(1_000)
+                swept += GuestDesktop.killDesktopClients(ctx, rootfs)
+                var residual = GuestDesktop.desktopClientCount(ctx, rootfs)
+                if (residual > 0) {
+                    Thread.sleep(1_000)
+                    swept += GuestDesktop.killDesktopClients(ctx, rootfs)
+                    residual = GuestDesktop.desktopClientCount(ctx, rootfs)
+                }
+                Log.i(TAG, "harness: teardown sweep killed=" + swept + " residual=" + residual)
+            } catch (t: Throwable) {
+                Log.w(TAG, "harness: teardown threw (survivors possible): " + t)
+            }
+        }
     }
 }
