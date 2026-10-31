@@ -242,7 +242,23 @@ object GuestUbuntu {
             echo "gnome-launch: ice-pkg $(dpkg-query -W -f='${'$'}{Package}=${'$'}{Version} ' libice6 gnome-session 2>&1)"
             export ICEAUTHORITY=/tmp/xdg/ICEauthority
             echo "gnome-launch: trying gnome-session --session=ubuntu (top bar + ubuntu-dock + yaru)"
-            gnome-session --session=ubuntu 2>&1 &
+            # Syscall-level ICE evidence (run 41192498450): the link probe
+            # proved link(2) works from the shell in BOTH candidate dirs,
+            # the dpkg line pinned libice6=2:1.0.10-1build3, yet
+            # IceLockAuthFile still fails ENOSYS inside gnome-session -
+            # so the failure is process-context-specific, not path/fs.
+            # Trace the exact failing syscall + args; the excerpt lands in
+            # this log after the death path below. Install is guarded:
+            # rootfs bootstrap already proved apt works in this guest.
+            if ! command -v strace >/dev/null 2>&1; then
+              apt-get install -y strace >/dev/null 2>&1
+            fi
+            if command -v strace >/dev/null 2>&1; then
+              strace -f -o /tmp/xdg/gs-ice.strace -e trace=link,linkat,unlink,unlinkat,creat,open,openat,stat,newfstatat gnome-session --session=ubuntu 2>&1 &
+            else
+              echo "gnome-launch: strace unavailable - launching untraced"
+              gnome-session --session=ubuntu 2>&1 &
+            fi
             GSPID=${'$'}!
             # Watchdog: an unbounded wait would let a wedged gnome-session
             # (shell never registers, session never exits) block the
@@ -269,6 +285,12 @@ object GuestUbuntu {
             else
               wait ${'$'}GSPID 2>/dev/null
               echo "gnome-launch: gnome-session died exit=${'$'}? - falling back to bare gnome-shell --x11"
+            fi
+            if [ -f /tmp/xdg/gs-ice.strace ]; then
+              echo "gnome-launch: ice-strace ENOSYS lines:"
+              grep -n "ENOSYS" /tmp/xdg/gs-ice.strace | head -6
+              echo "gnome-launch: ice-strace ICEauthority-path lines:"
+              grep -n "ICEauthority" /tmp/xdg/gs-ice.strace | head -10
             fi
             # A LATE gnome-session exit must not end the script. POCO log
             # 2026-10-30 (launch 1793346581): the shell REGISTERED at ~+30s,
