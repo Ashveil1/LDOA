@@ -7,7 +7,7 @@ import org.junit.Test
 
 /**
  * Structural safety invariants for the GNOME session script's system-bus
- * robustness + watchdog managed-tree teardown. Phone evidence 2026-10-31
+ * robustness + the non-destructive observer gate. Phone evidence 2026-10-31
  * (launch 1793454731 and ZIPs 3/4): the system bus died mid-evening;
  * gnome-session hit gsm-systemd.c:382 g_error (exited=133) and the
  * fallback shell's LoginManagerSystemd constructor threw on the dead
@@ -16,7 +16,7 @@ import org.junit.Test
  * (tracees detach and continue), so no fallback ever ran and managed
  * components survived as orphans.
  *
- * Process-level behavior (wrapper+child teardown, stale/healthy/failed/
+ * Process-level behavior (observation without kill, survivor-suppressed fallback,
  * busy bus, fail-closed suppression) is fixture-verified with real
  * processes outside CI; these tests pin the shipped script's structure
  * so the invariants cannot silently regress. They do NOT replace the
@@ -121,43 +121,67 @@ class GnomeSessionScriptSafetyTest {
             Regex("""(^|\s|/)killall(\s|${'$'})""").containsMatchIn(script))
     }
 
-    @Test fun watchdogSnapshotsTreeBeforeKilling() {
-        val snap = script.indexOf("""SNAP=${'$'}(snapshot_tree""")
-        val kill = script.indexOf("""kill_tree_verified "${'$'}SNAP" TERM""")
-        assertTrue("tree snapshot must exist", snap >= 0)
-        assertTrue("verified tree kill must exist", kill >= 0)
-        assertTrue("snapshot must precede any kill", snap < kill)
+    /** The old tree-kill invariants (snapshot-before-kill, identity
+     *  re-verification per member) retired WITH the kill machinery - the
+     *  observer design contains no in-script kill path at all
+     *  (observerNeverKillsTheSession pins that). What must still hold: the
+     *  observer's work is bounded by default, so a never-registering
+     *  session cannot leave an infinite poll behind. */
+    @Test fun observerCapHasBoundedDefault() {
+        assertTrue("observer cap must have a bounded default (no unconditional infinite poll)",
+            script.contains("OBS_CAP=${'$'}{LDOA_WD_OBSERVER_S:-600}"))
+        assertTrue("observer loop must compare against the cap",
+            script.contains("-lt ${'$'}OBS_CAP"))
     }
 
-    @Test fun killsReverifyPidAndStarttime() {
-        assertTrue(script.contains("(identity verified)"))
-        assertTrue("member liveness must compare pid AND starttime",
-            script.contains("""[ "${'$'}(pid_starttime "${'$'}1")" = "${'$'}2" ]"""))
+    /** The old in-script tree teardown is gone (observer design): survivor
+     *  verification on the actual-exit path is a bounded name-READ with one
+     *  re-check, and suppression is the fail-closed outcome - never a kill. */
+    @Test fun exitPathSurvivorCheckIsBoundedAndNonDestructive() {
+        val i = script.indexOf("S=0; SURV=")
+        assertTrue("bounded survivor re-check loop must exist", i >= 0)
+        assertTrue("re-check bound must exist", script.contains("[ ${'$'}S -lt 2 ]"))
+        assertFalse("survivor handling must not kill by name", script.contains("pkill"))
     }
 
-    @Test fun zombiesCountAsDeadInSurvivorChecks() {
-        assertTrue(script.contains("""[ "${'$'}(pid_state "${'$'}1")" = "Z" ] && return 1"""))
-    }
-
-    @Test fun fallbackIsSuppressedWhenTeardownIncomplete() {
-        val verdict = script.indexOf("fallback shell missing after 90s (not attempted: managed teardown incomplete")
-        val check = script.indexOf("[ -f /tmp/xdg/ldoa-teardown-failed ]")
+    @Test fun fallbackIsSuppressedWhenSessionComponentsSurviveExit() {
+        val check = script.indexOf("pgrep -f 'gnome-session-binary|gnome-shell'")
+        val verdict = script.indexOf("fallback suppressed - session components survived")
         val exec = script.indexOf("exec gnome-shell --x11")
-        assertTrue("gate-matched fail-closed verdict must exist", verdict >= 0)
-        assertTrue("suppression check must exist", check >= 0)
+        assertTrue("survivor name-READ (never a name-kill) must exist", check >= 0)
+        assertTrue("survivor-suppression verdict must exist", verdict >= 0)
         assertTrue("fallback exec must exist", exec >= 0)
-        assertTrue("suppression check must precede the fallback exec", check < exec)
+        assertTrue("survivor check must precede the fallback exec", check >= 0 && check < exec && verdict < exec)
+        assertTrue("one bounded re-check absorbs the shutdown ordering race",
+            script.contains("S=0; SURV=") && script.contains("sleep 3; S="))
     }
 
-    @Test fun staleFailClosedFlagClearedAtLaunchStart() {
-        val clear = script.indexOf("rm -f /tmp/xdg/ldoa-teardown-failed")
-        val launch = script.indexOf("gnome-session --session=ubuntu")
-        assertTrue("flag clear must exist", clear >= 0)
-        assertTrue("flag clear must precede the session launch", launch >= 0 && clear < launch)
+    /** The observer (post-deadline) must contain NO kill machinery: a slow
+     *  but healthy startup (phone 2026-10-31: registered +75s warm; the
+     *  user's late-success session) must never be torn down by a script
+     *  heuristic. Stop belongs to the user. */
+    @Test fun observerNeverKillsTheSession() {
+        assertFalse("no managed teardown machine", script.contains("managed_teardown"))
+        assertFalse("no tree-kill helper", script.contains("kill_tree_verified"))
+        assertFalse("no tree snapshot helper", script.contains("snapshot_tree"))
+        assertFalse("no teardown fail-closed flag", script.contains("ldoa-teardown-failed"))
+        assertTrue("still-starting observation must be explicit",
+            script.contains("STILL STARTING (readiness unknown, NOT a failure)"))
+        assertTrue("observer cap ends work without killing",
+            script.contains("observer capped") && script.contains("LDOA_WD_OBSERVER_S") && script.contains("session left running, readiness still unknown, nothing killed"))
+        assertTrue("late readiness is logged as slow-not-failed",
+            script.contains("late readiness - shell registered on the session bus"))
+    }
+
+    @Test fun observerVerifiesSessionDeathByComponentsNotWrapper() {
+        assertTrue("wrapper death alone must not end observation (ptrace detach history)",
+            script.contains("wrapper pid=${'$'}GSPID gone but session components alive"))
+        assertTrue("conservative death-observation line must exist (name-match, ownership not asserted)",
+            script.contains("no gnome-session-binary/gnome-shell processes visible") && script.contains("ownership not proven"))
     }
 
     @Test fun mainFlowWaitsForWatchdogInsteadOfKillingIt() {
-        assertFalse("killing the watchdog subshell can interrupt a mid-flight teardown before the fail-closed marker lands",
+        assertFalse("killing the observer subshell could orphan its marker semantics (fallback registration must never be reported as full success)",
             script.contains("""kill ${'$'}POLL_A_PID ${'$'}WATCHDOG_PID"""))
         assertTrue("main flow must wait for the watchdog before the suppression check",
             script.contains("""wait ${'$'}WATCHDOG_PID"""))
@@ -186,7 +210,7 @@ class GnomeSessionScriptSafetyTest {
             script.contains("seq 1 55"))
         assertFalse("SECONDS is empty in dash - deadline must not use it",
             script.contains("SECONDS"))
-        assertEquals("watchdog + fallback pings must be doubly bounded (gdbus --timeout 2 inside timeout 4)", 4,
+        assertEquals("budget + post-budget + observer + fallback-poll pings must all be doubly bounded (gdbus --timeout 2 inside timeout 4)", 5,
             script.split("timeout 4 gdbus call --session --timeout 2").size - 1)
     }
 
@@ -208,6 +232,20 @@ class GnomeSessionScriptSafetyTest {
         assertFalse("unbounded xprop in the sampler window loop is forbidden",
             script.contains("for id in ${'$'}(xprop -root _NET_CLIENT_LIST"))
     }
+
+    @Test fun exitPathSurvivorCheckSeparatesOwnedIdentityFromNameMatch() {
+        assertTrue("owned-tree snapshot helper must exist", script.contains("snapshot_owned_tree()"))
+        assertTrue("snapshot file must live under the session xdg dir", script.contains("ldoa-owned-tree"))
+        assertTrue("owned-identity verdict wording must exist", script.contains("owned-tree identity verified:"))
+        assertTrue("name-match-only class must be labeled ownership UNKNOWN",
+            script.contains("name-match only, ownership UNKNOWN:"))
+        assertTrue("observer detach case must compare against the launch snapshot",
+            script.contains("identity verified vs launch snapshot:"))
+        assertTrue("member_alive helper must exist", script.contains("member_alive()"))
+        assertTrue("member_alive must treat zombies as dead",
+            script.contains("\"Z\" ] && return 1"))
+    }
+
     @Test fun diagnosticProbesPresent() {
         assertTrue("installed-version probe must exist", script.contains("dpkg-query -W -f="))
         assertTrue("sampler system-bus liveness probe must exist", script.contains("sysbus_live="))

@@ -121,9 +121,12 @@ object GuestUbuntu {
             echo "gnome-launch: launch id=${'$'}LAUNCH_ID"
             mkdir -p /tmp/xdg
             chmod 0700 /tmp/xdg
+            # Owned-tree snapshots are keyed by THIS launch's id; drop
+            # snapshots from launches over an hour old (never a concurrent
+            # launch's file - an in-flight exit check may still read it).
+            find /tmp/xdg -maxdepth 1 -name 'ldoa-owned-tree.*' -mmin +60 -delete 2>/dev/null
             # A stale fail-closed marker from a previous launch must never
             # suppress THIS launch's fallback.
-            rm -f /tmp/xdg/ldoa-teardown-failed
             # EVIDENCE + BOUNDED FIX ATTEMPT: dump session state, then
             # explicitly enable the ubuntu dock (enabled-extensions=@as []
             # in run f81bd1a; wallpaper+top bar already render). Logged so
@@ -510,18 +513,15 @@ object GuestUbuntu {
               gnome-session --session=ubuntu 2>&1 &
             fi
             GSPID=${'$'}!
-            # --- Managed-tree teardown helpers (watchdog use only) ----------------
-            # The wrapper pid (strace, when instrumentation is active) is NOT the
-            # session: killing it only DETACHES the tracees and they keep running
-            # (ptrace semantics; device-proven 2026-10-31 rounds 1-479: managed
-            # shell JS lines continued ~78s after the wrapper kill, and the
-            # fallback never ran). The watchdog must resolve the real gnome-session
-            # child, snapshot the OWNED tree as pid:starttime identities BEFORE any
-            # kill (pid-reuse safe), re-verify identity per member at kill time,
-            # and prove the tree empty before the fallback may exec - a bare shell
-            # over live managed components is two WMs on one display. No
-            # pkill/killall, no name-based sweeps outside this tree. Zombies count
-            # as dead (they hold no session resources).
+            # --- Owned-tree identity (observation/preservation only; NO kill
+            # machinery lives here): the survivor checks below need to know
+            # WHICH processes this launch actually owns. Name-matching alone
+            # cannot say (a sibling session's components look identical), so
+            # the session's process tree is snapshotted as pid:starttime
+            # pairs (pid-reuse safe) at the +20s check and refreshed when the
+            # observer's budget expires (later-spawned components included).
+            # Detached/reparented members still escape enumeration - that
+            # residue is labeled ownership-unknown, never asserted owned. ---
             pid_starttime() { sed 's/^[^)]*) //' "/proc/${'$'}1/stat" 2>/dev/null | awk '{print ${'$'}20}'; }
             pid_state() { sed 's/^[^)]*) //' "/proc/${'$'}1/stat" 2>/dev/null | awk '{print ${'$'}1}'; }
             children_of() {
@@ -531,120 +531,97 @@ object GuestUbuntu {
                 [ "${'$'}PP" = "${'$'}1" ] && echo "${'$'}P"
               done
             }
-            snapshot_tree() {
-              SNAP="${'$'}1:${'$'}(pid_starttime "${'$'}1")"; FRONT="${'$'}1"; CT=1
-              while [ -n "${'$'}FRONT" ] && [ "${'$'}CT" -lt 512 ]; do
+            snapshot_owned_tree() {
+              [ -d "/proc/${'$'}1" ] || return 1
+              FRONT="${'$'}1"; CT=1; : > /tmp/xdg/ldoa-owned-tree.${'$'}LAUNCH_ID.tmp
+              while [ -n "${'$'}FRONT" ] && [ ${'$'}CT -lt 512 ]; do
                 NXT=""
                 for P in ${'$'}FRONT; do
-                  for C in ${'$'}(children_of "${'$'}P"); do
-                    SNAP="${'$'}SNAP ${'$'}C:${'$'}(pid_starttime "${'$'}C")"; NXT="${'$'}NXT ${'$'}C"; CT=${'$'}((CT + 1))
-                  done
+                  echo "${'$'}P:${'$'}(pid_starttime "${'$'}P")" >> /tmp/xdg/ldoa-owned-tree.${'$'}LAUNCH_ID.tmp
+                  for C in ${'$'}(children_of "${'$'}P"); do NXT="${'$'}NXT ${'$'}C"; CT=${'$'}((CT + 1)); done
                 done
                 FRONT="${'$'}NXT"
               done
-              echo "${'$'}SNAP"
+              mv -f /tmp/xdg/ldoa-owned-tree.${'$'}LAUNCH_ID.tmp /tmp/xdg/ldoa-owned-tree.${'$'}LAUNCH_ID
             }
+            # member_alive P ST: pid exists, not a zombie, starttime matches
+            # the snapshot (zombies count as dead - they hold no resources).
             member_alive() {
               [ -d "/proc/${'$'}1" ] || return 1
               [ "${'$'}(pid_state "${'$'}1")" = "Z" ] && return 1
               [ "${'$'}(pid_starttime "${'$'}1")" = "${'$'}2" ]
             }
-            kill_tree_verified() {
-              for M in ${'$'}1; do
-                P=${'$'}{M%%:*}; ST=${'$'}{M##*:}
-                if member_alive "${'$'}P" "${'$'}ST"; then
-                  echo "gnome-launch: watchdog-tree kill ${'$'}2 pid=${'$'}P comm=${'$'}(cat /proc/${'$'}P/comm 2>/dev/null) starttime=${'$'}ST (identity verified)"
-                  [ -z "${'$'}LDOA_FIXTURE_NOKILL" ] && kill -"${'$'}2" "${'$'}P" 2>/dev/null
-                fi
-              done
-              return 0
-            }
-            tree_survivors() {
-              LEFT=""
-              for M in ${'$'}1; do P=${'$'}{M%%:*}; ST=${'$'}{M##*:}; member_alive "${'$'}P" "${'$'}ST" && LEFT="${'$'}LEFT ${'$'}M"; done
-              echo "${'$'}{LEFT# }"
-            }
-            managed_teardown() {
-              if ! kill -0 "${'$'}1" 2>/dev/null; then
-                echo "gnome-launch: watchdog: wrapper pid=${'$'}1 already dead - orphans (if any) have reparented away and cannot be enumerated without a forbidden name sweep; teardown UNRESOLVABLE"
-                return 2
-              fi
-              ROOT=""
-              for C in ${'$'}(children_of "${'$'}1"); do
-                case "${'$'}(cat /proc/${'$'}C/comm 2>/dev/null)" in gnome-session*) ROOT=${'$'}C ;; esac
-              done
-              if [ -z "${'$'}ROOT" ]; then
-                echo "gnome-launch: watchdog: no gnome-session child under wrapper pid=${'$'}1 (children:${'$'}(for C in ${'$'}(children_of "${'$'}1"); do echo -n " ${'$'}C=${'$'}(cat /proc/${'$'}C/comm 2>/dev/null)"; done)) - killing wrapper only"
-                kill "${'$'}1" 2>/dev/null
-                return 0
-              fi
-              SNAP=${'$'}(snapshot_tree "${'$'}ROOT")
-              echo "gnome-launch: watchdog: terminating managed session tree root=${'$'}ROOT members=${'$'}(echo ${'$'}SNAP | wc -w) wrapper=${'$'}1"
-              kill_tree_verified "${'$'}SNAP" TERM
-              kill "${'$'}1" 2>/dev/null
-              i=0
-              while [ "${'$'}i" -lt 6 ]; do
-                LEFT=${'$'}(tree_survivors "${'$'}SNAP"); [ -z "${'$'}LEFT" ] && break
-                sleep 0.5; i=${'$'}((i + 1))
-              done
-              LEFT=${'$'}(tree_survivors "${'$'}SNAP")
-              if [ -n "${'$'}LEFT" ]; then
-                kill_tree_verified "${'$'}SNAP" KILL
-                i=0
-                while [ "${'$'}i" -lt 6 ]; do
-                  LEFT=${'$'}(tree_survivors "${'$'}SNAP"); [ -z "${'$'}LEFT" ] && break
-                  sleep 0.5; i=${'$'}((i + 1))
-                done
-              fi
-              LEFT=${'$'}(tree_survivors "${'$'}SNAP")
-              if [ -n "${'$'}LEFT" ]; then
-                echo "gnome-launch: watchdog: managed tree NOT empty after TERM+KILL survivors=${'$'}LEFT - FAIL CLOSED"
-                return 1
-              fi
-              echo "gnome-launch: watchdog: managed tree empty (pid+starttime verified, zombies excluded)"
-              return 0
-            }
-            # Watchdog: an unbounded wait would let a wedged gnome-session (shell
-            # never registers, session never exits) block the fallback forever
-            # while the app gate burns its budget. If no shell owns the bus by
-            # the +106s DEADLINE, terminate the managed tree so the unified
-            # fallback runs. The budget is a wall-clock deadline, NOT a loop
-            # count: each ping is doubly bounded (gdbus --timeout 2 inside
-            # `timeout 4` - the two mechanisms are not interchangeable: the
-            # gdbus one gives a clean bus-level error, the external one kills
-            # a wedged gdbus process), so bus congestion cannot stretch the
-            # fire point by iterations x call latency (phone evidence
-            # 2026-10-31: watchdog never fired within the 210s gate).
-            # Worst case: 106 + <=6 (last sleep+ping) + <=7 teardown + 90
-            # fallback poll = <=209s, inside the app gate's 210s. On an
-            # incomplete teardown the fallback is SUPPRESSED (fail closed):
-            # the gate-matched definitive verdict is emitted with its reason,
-            # and the main flow exits instead of exec'ing a second WM.
+            # Observer (formerly a killing watchdog): the deadline poll exists
+            # so a shell that never registers is NOTICED, never KILLED. Phone
+            # evidence 2026-10-31: a healthy warm-start session registered at
+            # +75s; a cold start can need longer, and no signal available in
+            # this script (CPU delta, X answers, window churn) distinguishes
+            # "slow but healthy" from "wedged" - heuristics would kill
+            # healthy slow startups (the user's 2026-10-31 late-success
+            # session is the proof shape). So after the budget this loop only
+            # OBSERVES: doubly-bounded pings (gdbus --timeout 2 inside
+            # `timeout 4` - the mechanisms are not interchangeable), a
+            # late-readiness log line if the shell still makes it, and a work
+            # cap that ends the observer WITHOUT touching the session. The
+            # kill/stop decision for a healthy-unknown session belongs to the
+            # user (Stop session in the app), never to a script heuristic.
+            # The unified fallback below still runs on ACTUAL session-process
+            # exit - verified by identity (wrapper AND owned components gone;
+            # tracees outlive a dead wrapper).
             ( WD_START=${'$'}(date +%s); WD_BUDGET=${'$'}{LDOA_WD_BUDGET_S:-106}
+              OBS_CAP=${'$'}{LDOA_WD_OBSERVER_S:-600}
               while [ ${'$'}(( ${'$'}(date +%s) - WD_START )) -lt ${'$'}WD_BUDGET ]; do
                 sleep 2
-                # Session gone on its own? The main flow is already heading
-                # to the fallback; this poll's work is over. (Also bounds
-                # the main flow's "wait WATCHDOG_PID" below to one cycle.)
                 kill -0 ${'$'}GSPID 2>/dev/null || exit 0
                 if timeout 4 gdbus call --session --timeout 2 --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
                   exit 0
                 fi
               done
-              if ! timeout 4 gdbus call --session --timeout 2 --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
-                echo "gnome-launch: no shell on bus by +${'$'}(( ${'$'}(date +%s) - WD_START ))s (deadline-bounded, budget=${'$'}WD_BUDGET) - terminating managed session tree (wrapper pid=${'$'}GSPID) to reach the fallback"
-                managed_teardown "${'$'}GSPID"; TRC=${'$'}?
-                if [ "${'$'}TRC" -eq 1 ]; then
-                  echo "gnome-launch: fallback shell missing after 90s (not attempted: managed teardown incomplete - fail closed, duplicate-WM risk)"
-                  : > /tmp/xdg/ldoa-teardown-failed
-                elif [ "${'$'}TRC" -eq 2 ]; then
-                  echo "gnome-launch: watchdog: teardown unresolvable (wrapper dead) - proceeding as pre-fix behavior (orphan risk logged)"
+              if timeout 4 gdbus call --session --timeout 2 --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
+                exit 0
+              fi
+              snapshot_owned_tree "${'$'}GSPID" 2>/dev/null || true
+              echo "gnome-launch: no shell on bus by +${'$'}(( ${'$'}(date +%s) - WD_START ))s (budget=${'$'}WD_BUDGET) - STILL STARTING (readiness unknown, NOT a failure): observing up to +${'$'}{OBS_CAP}s, session left running, nothing killed; Stop session in the app ends it"
+              while [ ${'$'}(( ${'$'}(date +%s) - WD_START )) -lt ${'$'}OBS_CAP ]; do
+                sleep 10
+                if ! kill -0 ${'$'}GSPID 2>/dev/null; then
+                  # Wrapper death alone is NOT session death (ptrace detach
+                  # history: tracees continue under a dead wrapper). Two
+                  # evidence classes, both preservation-only (never a kill):
+                  #  A) the owned-tree snapshot (pid+starttime verified)
+                  #  B) pgrep name-match (ownership UNKNOWN - a sibling
+                  #     session's components look identical; detached own
+                  #     services may be missed).
+                  OALIVE=""
+                  if [ -f /tmp/xdg/ldoa-owned-tree.${'$'}LAUNCH_ID ]; then
+                    for M in ${'$'}(cat /tmp/xdg/ldoa-owned-tree.${'$'}LAUNCH_ID); do
+                      OP=${'$'}{M%%:*}; OST=${'$'}{M##*:}
+                      [ "${'$'}OP" = "${'$'}GSPID" ] && continue
+                      member_alive "${'$'}OP" "${'$'}OST" && OALIVE="${'$'}OALIVE ${'$'}OP"
+                    done
+                  fi
+                  if [ -n "${'$'}OALIVE" ]; then
+                    echo "gnome-launch: observer: wrapper pid=${'$'}GSPID gone but OWNED session components alive at +${'$'}(( ${'$'}(date +%s) - WD_START ))s (identity verified vs launch snapshot:${'$'}OALIVE) - continuing observation"
+                  elif pgrep -f 'gnome-session-binary|gnome-shell' >/dev/null 2>&1; then
+                    echo "gnome-launch: observer: wrapper pid=${'$'}GSPID gone and snapshot empty/stale, but name-matched GNOME components visible (ownership UNKNOWN) at +${'$'}(( ${'$'}(date +%s) - WD_START ))s - continuing observation conservatively"
+                  else
+                    echo "gnome-launch: observer: no owned (snapshot) or name-matched session processes visible at +${'$'}(( ${'$'}(date +%s) - WD_START ))s - observation ends, nothing killed; the main flow owns the actual-exit fallback"
+                    exit 0
+                  fi
                 fi
-              fi ) &
+                if timeout 4 gdbus call --session --timeout 2 --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
+                  echo "gnome-launch: late readiness - shell registered on the session bus at +${'$'}(( ${'$'}(date +%s) - WD_START ))s (after the initial budget: startup was slow, not failed)"
+                  exit 0
+                fi
+              done
+              echo "gnome-launch: observer capped at +${'$'}(( ${'$'}(date +%s) - WD_START ))s (cap=${'$'}OBS_CAP) - session left running, readiness still unknown, nothing killed"
+              exit 0
+            ) &
             WATCHDOG_PID=${'$'}!
             sleep 20
             if kill -0 ${'$'}GSPID 2>/dev/null; then
               echo "gnome-launch: gnome-session alive pid=${'$'}GSPID"
+              snapshot_owned_tree "${'$'}GSPID" 2>/dev/null || true
               wait ${'$'}GSPID
               echo "gnome-launch: gnome-session exited=${'$'}? after surviving the 20s check - falling back to bare gnome-shell --x11"
             else
@@ -671,23 +648,47 @@ object GuestUbuntu {
             # The phase-1 readiness poll and watchdog belong to the
             # gnome-session phase: left running, the poll could report the
             # FALLBACK shell's registration as a full success (the markers
-            # must stay distinguishable), and the watchdog's kill is moot.
             kill ${'$'}POLL_A_PID 2>/dev/null
-            # The watchdog may be MID-TEARDOWN right now: its wrapper kill
-            # (or the wrapper's natural exit after our TERM to the session)
-            # is what released "wait GSPID" above. Killing the watchdog
-            # subshell here (pre-fix code did) can interrupt the teardown
-            # AFTER some members died but BEFORE the fail-closed marker is
-            # written - the suppression check would then pass over a live
-            # managed tree. Wait for it instead; it always exits (ping
-            # success, GSPID gone, or teardown complete).
+            # The observer never kills: it exits on ping success, session
+            # death, or its cap. Waiting for it here keeps the fallback's
+            # markers distinguishable (a stray poll must not report the
+            # FALLBACK shell's registration as a full session success) and
+            # bounds this wait to one observer cycle (<= 10s + <= 4s ping).
             wait ${'$'}WATCHDOG_PID 2>/dev/null
-            if [ -f /tmp/xdg/ldoa-teardown-failed ]; then
-              echo "gnome-launch: fallback suppressed - managed teardown incomplete (fail closed; duplicate-WM risk)"
+            # Verify the OWNED tree is really gone before bringing up a
+            # second WM: the wrapper's exit does not prove the session's
+            # components exited (ptrace detach history: tracees continue
+            # under a dead wrapper). A name-READ is not a name-kill: any
+            # surviving gnome-session-binary/gnome-shell means a fallback
+            # exec would be a duplicate WM - fail closed. One short re-check
+            # absorbs the normal shutdown ordering race (the session exits,
+            # its managed clients exit a beat later).
+            S=0; SURV=; SURV_OWNED=
+            while [ ${'$'}S -lt 2 ]; do
+              SURV_OWNED=""
+              if [ -f /tmp/xdg/ldoa-owned-tree.${'$'}LAUNCH_ID ]; then
+                for M in ${'$'}(cat /tmp/xdg/ldoa-owned-tree.${'$'}LAUNCH_ID); do
+                  OP=${'$'}{M%%:*}; OST=${'$'}{M##*:}
+                  [ "${'$'}OP" = "${'$'}GSPID" ] && continue
+                  case "${'$'}(cat /proc/${'$'}OP/comm 2>/dev/null)" in
+                    gnome-shell|gnome-session-binary)
+                      member_alive "${'$'}OP" "${'$'}OST" && SURV_OWNED="${'$'}SURV_OWNED ${'$'}OP" ;;
+                  esac
+                done
+              fi
+              SURV=""
+              for P in ${'$'}(pgrep -f 'gnome-session-binary|gnome-shell' 2>/dev/null); do
+                case " ${'$'}SURV_OWNED " in *" ${'$'}P "*) ;; *) SURV="${'$'}SURV ${'$'}P" ;; esac
+              done
+              [ -z "${'$'}SURV${'$'}SURV_OWNED" ] && break
+              sleep 3; S=${'$'}((S + 1))
+            done
+            if [ -n "${'$'}SURV${'$'}SURV_OWNED" ]; then
+              echo "gnome-launch: fallback suppressed - possibly surviving session components after the session exit (owned-tree identity verified:${'$'}{SURV_OWNED:- none} | name-match only, ownership UNKNOWN:${'$'}{SURV:- none} - fail closed, duplicate-WM risk; Stop session in the app cleans up)"
               exit 1
             fi
                         # Fallback-phase readiness poll:
- the first 60s poll can expire
+                        # the first 60s poll can expire
             # before the fallback shell registers. Emit the SAME success
             # marker the app gate matches; this phase's verdict is the
             # definitive failure (the first-phase "shell missing after 60s"

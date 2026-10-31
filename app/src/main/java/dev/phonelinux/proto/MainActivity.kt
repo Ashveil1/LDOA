@@ -298,7 +298,8 @@ class MainActivity : ComponentActivity() {
                                 }) { Text("Stop session") }
                                 TextButton(onClick = { vm.desktopError = null }) { Text("Close") }
                             } },
-                            title = { Text("Ubuntu desktop did not start") },
+                            title = { Text(if (err.startsWith("Ubuntu desktop is STILL STARTING"))
+                                "Ubuntu desktop is still starting" else "Ubuntu desktop did not start") },
                             text = { Text(err, fontSize = 13.sp,
                                 modifier = Modifier.verticalScroll(rememberScrollState())) })
                     }

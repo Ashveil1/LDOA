@@ -93,4 +93,52 @@ class GnomeRetryGateTest {
         assertNull("sessionProcess must be cleared after stop", XServer.sessionProcess)
         Log.i(TAG, "RETRYGATE-STOP-OK retained failed session torn down by identity")
     }
+
+    @Test
+    fun gateNullClassificationDistinguishesStartingFromDefinitive() {
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val log = File(ctx.filesDir, "test-gate-classify.log")
+        val proc = ProcessBuilder("/system/bin/sh", "-c", "sleep 60").start()
+        try {
+            log.writeText("gnome-launch: session bus unix:path=/tmp/bus-AAA,guid=AAA\n")
+            assertEquals("alive process without definitive verdict must be STILL_STARTING",
+                XServer.GateNullClass.STILL_STARTING, XServer.classifyGateNull(proc, log, 0L))
+            log.appendText("gnome-launch: fallback shell missing after 90s - giving up\n")
+            assertEquals("script definitive fallback verdict must be DEFINITIVE_SCRIPT",
+                XServer.GateNullClass.DEFINITIVE_SCRIPT, XServer.classifyGateNull(proc, log, 0L))
+        } finally {
+            proc.destroy()
+            log.delete()
+        }
+        val dead = ProcessBuilder("/system/bin/sh", "-c", "true").start()
+        dead.waitFor()
+        log.writeText("")
+        try {
+            assertEquals("exited process must be DEFINITIVE_EXITED",
+                XServer.GateNullClass.DEFINITIVE_EXITED, XServer.classifyGateNull(dead, log, 0L))
+        } finally { log.delete() }
+        Log.i(TAG, "RETRYGATE-CLASSIFY-OK starting vs definitive distinguished")
+    }
+
+    @Test
+    fun startingSessionIsRetainedForRegateAndStopTearsDown() {
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val proc = ProcessBuilder("/system/bin/sh", "-c", "sleep 60").start()
+        try {
+            XServer.retainStartingSessionOwnership(ctx, proc, 0L)
+            assertTrue("starting session must be marked STARTING",
+                XServer.retainedSessionStarting)
+            assertTrue("retained handle must be the starting session process",
+                XServer.sessionProcess === proc)
+            assertTrue("starting session process not alive pre-stop", proc.isAlive)
+        } finally {
+            XServer.stopDesktopMode(ctx)
+        }
+        var waited = 0
+        while (proc.isAlive && waited < 10) { Thread.sleep(500); waited++ }
+        assertTrue("stopDesktopMode did not kill the retained starting session", !proc.isAlive)
+        assertTrue("retainedSessionStarting must clear after stop", !XServer.retainedSessionStarting)
+        assertNull("sessionProcess must be cleared after stop", XServer.sessionProcess)
+        Log.i(TAG, "RETRYGATE-STARTING-OK starting session retained, Stop tears it down by identity")
+    }
 }

@@ -51,6 +51,36 @@ object XServer {
      *  (gate passed) never sets this and is still reused/brought forward. */
     @Volatile private var retainedSessionFailed = false
 
+    /** True only while a session whose readiness gate TIMED OUT with the
+     *  process still alive and NO definitive failure evidence is retained:
+     *  readiness is UNKNOWN (still starting), not failed. A retry re-gates
+     *  THIS session instead of tearing it down - no relaunch-over-starting
+     *  (phone bundle 2026-10-31: relaunch-kill-relaunch loop, every retry
+     *  reset boot to zero, 3 fresh launches in 5 min incl. a SIGTERM to a
+     *  session that had reached the RUNNING phase). Stop session remains
+     *  the only teardown path for it. */
+    @Volatile internal var retainedSessionStarting = false
+        private set
+
+    /** True once THIS session's shell registered (gate pass or the bounded
+     *  late-readiness watch). A healthy reuse may only BYPASS the gate when
+     *  the gate passed before: identity+bus+X health without a registered
+     *  shell would forward to an empty X display. */
+    @Volatile private var sessionGatePassed = false
+
+    /** guest-gnome.log offset this session's gate scans from. Kept so a
+     *  retry re-gate and the late-readiness watch re-scan the SAME launch
+     *  window - an own-bus marker already written passes instantly. */
+    @Volatile private var sessionGateLogBase = 0L
+
+    /** Session process the bounded late-readiness watch is on; guards
+     *  against stacking a second watch for the same session on retry. */
+    @Volatile private var lateWatchFor: Process? = null
+
+    /** Bounded late-readiness window after a gate timeout on a live
+     *  session (deadline, never an unconditional infinite poll). */
+    private const val LATE_READINESS_BUDGET_MS = 240_000L
+
     /** Readiness/ownership timeline for the diagnostic export: a bounded
      *  ring of gate decisions with monotonic + wall-clock stamps, so a late
      *  failure dialog can be matched to the exact launch it judged.
@@ -81,6 +111,8 @@ object XServer {
         sb.append("gnome_session_alive=").append(gnomeSession?.second?.isAlive).append('\n')
         sb.append("gnome_session_reusable_ubuntu=").append(gnomeSessionActive(Distros.UBUNTU)).append('\n')
         sb.append("retained_session_failed=").append(retainedSessionFailed).append('\n')
+        sb.append("retained_session_starting=").append(retainedSessionStarting).append('\n')
+        sb.append("session_gate_passed=").append(sessionGatePassed).append('\n')
         sb.append("ownership_generation=").append(ownershipGeneration).append('\n')
         sb.append("session_bus=").append(gnomeSessionBus ?: "(none)").append('\n')
         sb.append("session_root_ident=").append(sessionRootIdent?.let { "pid=" + it.pid + " start=" + it.start + " uid=" + it.uid } ?: "(none)").append('\n')
@@ -143,7 +175,10 @@ object XServer {
             return@synchronized current.second
         }
         Log.i(TAG, "launching GNOME session")
-        return@synchronized GuestUbuntu.launchGnomeSession(ctx, rootfs).also { gnomeSession = distro.id to it; gnomeSessionBus = null; ownershipGeneration++ }
+        return@synchronized GuestUbuntu.launchGnomeSession(ctx, rootfs).also {
+            gnomeSession = distro.id to it; gnomeSessionBus = null; ownershipGeneration++
+            retainedSessionStarting = false; sessionGatePassed = false; lateWatchFor = null
+        }
     }
 
     /** True when [p] is the ALREADY-RUNNING tracked session (the reuse
@@ -415,8 +450,13 @@ object XServer {
                                 // younger than the session (a restarted X
                                 // orphaned every guest client).
                                 val reuseReason = if (reused) healthyReuseOrReason(ctx, distro, p) else null
-                                val bypassGate = reused && reuseReason == null
-                                gateLog(if (bypassGate) "reusing HEALTHY session (identity+bus+X verified)"
+                                if (!reused) synchronized(ownershipLock) { sessionGateLogBase = logBase }
+                                // Gate bypass also requires the gate PASSED before:
+                                // identity+bus+X health without a registered shell
+                                // would forward to an empty X display.
+                                val bypassGate = reused && reuseReason == null && sessionGatePassed
+                                gateLog(if (bypassGate) "reusing HEALTHY session (identity+bus+X verified, gate previously passed)"
+                                    else if (reused && reuseReason == null) "reusing STILL-STARTING session (identity+bus+X healthy, gate not yet passed) - re-gating the same launch window"
                                     else if (reused) "reuse UNHEALTHY: " + reuseReason + " - fail closed, session NOT touched"
                                     else "fresh session launch, logBase=" + logBase)
                                 // Readiness gate (P0/P2): only a shell that
@@ -444,13 +484,23 @@ object XServer {
                                 // pass (no new log lines), so fail closed
                                 // NOW with the reason, retain ownership for
                                 // Stop session, and touch nothing.
+                                // A STILL-STARTING reused session is
+                                // RE-GATED over its original launch window
+                                // (never torn down, never force-restarted):
+                                // the own-bus marker written since the
+                                // first attempt passes instantly.
                                 val marker = when {
                                     bypassGate -> "reused healthy session (identity+bus+X verified)"
-                                    reused -> null
+                                    reused && reuseReason != null -> null
+                                    reused -> awaitShellRegistered(p, gnomeLog, sessionGateLogBase, 210_000)
                                     else -> awaitShellRegistered(p, gnomeLog, logBase, 210_000)
                                 }
-                                gateLog(if (marker != null) "gate PASS: " + marker.take(120) else "gate TIMEOUT/fail after budget, process " + (if (p.isAlive) "alive" else "exited"))
-                                if (marker != null) {
+                                // A registration line with an already-DEAD
+                                // session root is never READY: log evidence
+                                // alone does not make a live desktop.
+                                val gatePassed = marker != null && (bypassGate || p.isAlive)
+                                gateLog(if (gatePassed) "gate PASS: " + marker.take(120) else "gate TIMEOUT/fail after budget, process " + (if (p.isAlive) "alive" else "exited"))
+                                if (gatePassed) {
                                     Log.i(TAG, "GNOME session evidence: " + marker)
                                     ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
                                         .edit().putBoolean("ubuntu_desktop_active", true).apply()
@@ -464,6 +514,9 @@ object XServer {
                                     if (degraded) Log.w(TAG, "DEGRADED desktop: bare-shell fallback registered - full GNOME session unavailable this launch")
                                     synchronized(ownershipLock) {
                                         retainedSessionFailed = false
+                                        retainedSessionStarting = false
+                                        sessionGatePassed = true
+                                        lateWatchFor = null
                                         sessionProcess = p
                                         ownershipGeneration++
                                         sessionRootIdent = pidOf(p)?.let { identityOf(it) }
@@ -474,19 +527,39 @@ object XServer {
                                         }
                                     }
                                 } else {
+                                    val gateBase = if (reused) sessionGateLogBase else logBase
                                     if (reused && reuseReason != null) {
                                         failure = "The desktop session on this device is not healthy (" + reuseReason +
                                             "). Nothing was killed - Stop session tears it down cleanly."
+                                        // Retain ownership so Stop session tears it
+                                        // down by identity.
+                                        retainFailedSessionOwnership(ctx, p)
                                     } else {
-                                        val tail = if (gnomeLog.isFile && gnomeLog.length() > logBase)
-                                            gnomeLog.readText().substring(logBase.toInt().coerceAtMost((gnomeLog.length()).toInt())).takeLast(1500)
+                                        val tail = if (gnomeLog.isFile && gnomeLog.length() > gateBase)
+                                            gnomeLog.readText().substring(gateBase.toInt().coerceAtMost((gnomeLog.length()).toInt())).takeLast(1500)
                                             else "(guest-gnome.log has no new output)"
-                                        failure = "GNOME shell did not register on its session bus within 210s incl. fallback window (process " +
-                                            (if (p.isAlive) "still running" else "exited") + "). Log tail:\n" + tail
+                                        when (classifyGateNull(p, gnomeLog, gateBase)) {
+                                            GateNullClass.STILL_STARTING -> {
+                                                // Readiness UNKNOWN, not failed:
+                                                // retain for re-gate + bounded late
+                                                // watch; nothing killed, retry never
+                                                // relaunches over this session.
+                                                retainStartingSessionOwnership(ctx, p, gateBase)
+                                                startLateReadinessWatch(ctx, p, gnomeLog, gateBase)
+                                                failure = "Ubuntu desktop is STILL STARTING: no shell on the session bus after 210s, " +
+                                                    "but the session process is alive and readiness is unknown (NOT a failure). Nothing was killed. " +
+                                                    "The app keeps watching for up to 4 more minutes and marks the session ready if the shell registers late. " +
+                                                    "'Try again' keeps waiting on THIS session (no restart); 'Stop session' ends it. Log tail:\n" + tail
+                                            }
+                                            else -> {
+                                                failure = "GNOME shell did not register on its session bus within 210s incl. fallback window (process " +
+                                                    (if (p.isAlive) "still running" else "exited") + "). Log tail:\n" + tail
+                                                // Retain ownership of the still-running session so
+                                                // Stop session can tear it down by identity.
+                                                retainFailedSessionOwnership(ctx, p)
+                                            }
+                                        }
                                     }
-                                    // Retain ownership of the still-running session so
-                                    // Stop session can tear it down by identity.
-                                    retainFailedSessionOwnership(ctx, p)
                                 }
                             } else if (failure == null) {
                                 failure = "GNOME unavailable after package install; desktop would be empty"
@@ -537,6 +610,15 @@ object XServer {
         var rootProc: Process? = null
         synchronized(ownershipLock) {
             genAtEntry = ownershipGeneration
+            // An explicit user Stop cancels the late-readiness watch AT
+            // ENTRY: the watch must never promote (bumping the generation
+            // and making this Stop bail) while a Stop of its session is in
+            // flight. Stop always ends its owned generation; only a NEWER
+            // user launch supersedes a Stop (the epoch guard below).
+            if (lateWatchFor != null && (sessionProcess === lateWatchFor || gnomeSession?.second === lateWatchFor)) {
+                retainedSessionStarting = false
+                lateWatchFor = null
+            }
             rootIdent = sessionRootIdent
             busIdent = sessionBusIdent
             rootProc = sessionProcess
@@ -577,6 +659,9 @@ object XServer {
             gnomeSession = null
             gnomeSessionBus = null
             retainedSessionFailed = false
+            retainedSessionStarting = false
+            sessionGatePassed = false
+            lateWatchFor = null
             val xs = process
             if (xs != null) { try { xs.destroy() } catch (t: Throwable) { }; process = null }
             ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
@@ -617,6 +702,98 @@ object XServer {
                 ownershipGeneration++
                 sessionRootIdent = pidOf(p)?.let { identityOf(it) }
                 sessionBusIdent = sessionBusPid(ctx)?.let { bp -> identityOf(bp) }
+            }
+        }
+    }
+
+    /** Gate-null classification: a null gate result is STILL_STARTING only
+     *  while the session process lives AND the session script has not
+     *  reported its definitive fallback verdict. Readiness unknown is
+     *  never reported as failure. */
+    internal enum class GateNullClass { DEFINITIVE_EXITED, DEFINITIVE_SCRIPT, STILL_STARTING }
+    internal fun classifyGateNull(p: Process, log: File, logBase: Long): GateNullClass {
+        if (!p.isAlive) return GateNullClass.DEFINITIVE_EXITED
+        val fresh = if (log.isFile && log.length() > logBase)
+            log.readText().substring(logBase.toInt().coerceAtMost(log.length().toInt())) else ""
+        if (fresh.contains("gnome-launch: fallback shell missing after 90s")) return GateNullClass.DEFINITIVE_SCRIPT
+        return GateNullClass.STILL_STARTING
+    }
+
+    /** STILL-STARTING ownership retention: same identity-capture rule as
+     *  retainFailedSessionOwnership, but the session is retained for
+     *  RE-GATE (retry attaches to it), never for teardown-on-retry. */
+    internal fun retainStartingSessionOwnership(ctx: Context, p: Process, logBase: Long) {
+        if (p.isAlive) {
+            gateLog("retained STILL-STARTING session ownership (retry re-gates it; Stop session tears it down)")
+            synchronized(ownershipLock) {
+                retainedSessionStarting = true
+                sessionProcess = p
+                sessionGateLogBase = logBase
+                ownershipGeneration++
+                sessionRootIdent = pidOf(p)?.let { identityOf(it) }
+                sessionBusIdent = sessionBusPid(ctx)?.let { bp -> identityOf(bp) }
+            }
+        }
+    }
+
+    /** Bounded late-readiness watch after a STILL-STARTING gate timeout:
+     *  keeps polling THIS launch's log window for up to
+     *  LATE_READINESS_BUDGET_MS; when the shell registers late the session
+     *  is promoted to READY (next open brings it forward instantly).
+     *  Deadline-bounded, daemon, exits early when the process dies - never
+     *  an unconditional infinite poll. One watch per session process. */
+    private fun startLateReadinessWatch(ctx: Context, p: Process, log: File, logBase: Long) {
+        synchronized(ownershipLock) {
+            if (lateWatchFor === p) return
+            lateWatchFor = p
+        }
+        thread(name = "gnome-late-readiness", isDaemon = true) {
+            // Chunked poll: between chunks the watch checks its own
+            // cancellation marker so a user Stop / re-gate pass / fresh
+            // launch (all clear lateWatchFor under the lock) ends it
+            // promptly instead of polling the full 240s.
+            var hit: String? = null
+            var remaining = LATE_READINESS_BUDGET_MS
+            var cancelled = false
+            while (remaining > 0 && p.isAlive) {
+                val chunk = if (remaining < 10_000L) remaining else 10_000L
+                hit = awaitShellRegistered(p, log, logBase, chunk)
+                if (hit != null) break
+                remaining -= chunk
+                if (synchronized(ownershipLock) { lateWatchFor !== p }) { cancelled = true; break }
+            }
+            synchronized(ownershipLock) { if (lateWatchFor === p) lateWatchFor = null }
+            if (cancelled) {
+                gateLog("late-readiness watch cancelled (session stopped or superseded)")
+            } else if (hit != null && p.isAlive) {
+                var promoted = false
+                synchronized(ownershipLock) {
+                    // Only promote when the watched process is still the
+                    // tracked STILL-STARTING session (a Stop or fresh
+                    // launch in between moves ownership; generation bumps
+                    // make a concurrent stopDesktopMode bail, preserving
+                    // the now-healthy session - fail closed).
+                    if ((sessionProcess === p || gnomeSession?.second === p) && retainedSessionStarting) {
+                        retainedSessionStarting = false
+                        sessionGatePassed = true
+                        sessionProcess = p
+                        ownershipGeneration++
+                        sessionRootIdent = pidOf(p)?.let { identityOf(it) }
+                        sessionBusIdent = sessionBusPid(ctx)?.let { bp -> identityOf(bp) }
+                        promoted = true
+                    }
+                }
+                if (promoted) {
+                    val degraded = hit.contains("fallback shell registered")
+                    ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
+                        .edit().putBoolean("ubuntu_desktop_active", true)
+                        .putBoolean("ubuntu_desktop_degraded", degraded).apply()
+                    gateLog("late readiness: shell registered after the gate budget - session READY" +
+                        (if (degraded) " (DEGRADED fallback shell)" else "") + "; next open brings it forward")
+                }
+            } else {
+                gateLog("late-readiness watch ended without registration (process " +
+                    (if (p.isAlive) "alive" else "exited") + ") - nothing killed; Stop session remains available")
             }
         }
     }
