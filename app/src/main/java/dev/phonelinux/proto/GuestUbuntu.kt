@@ -468,9 +468,14 @@ object GuestUbuntu {
               # compositor; correlate with mutter-side evidence before any
               # active-renderer claim. Existing binary preferred; mesa-utils
               # install only when LDOA_GLX_PROBE_INSTALL=1, time-boxed so a
-              # slow network can never delay the session (this subshell is
-              # already asynchronous to the launch and ends with the ~65s
-              # viewable-window poll - bounded lifetime).
+              # slow network can never delay the session. Accurate lifetime:
+              # this subshell runs the ~65s viewable-window poll FIRST, then
+              # this probe - worst case ~65s poll + <=60s install + <=30s
+              # probe + ~12s roster/mode/extension reads ~= 170s. There is no
+              # outer deadline; the bound comes from every long child being
+              # individually time-boxed, except xwininfo/xdpyinfo in the poll
+              # which carry no timeout (X-server responsiveness dependent). Asynchronous to the session launch
+              # throughout, so launch is never blocked.
               if ! command -v glxinfo >/dev/null 2>&1 && [ "${'$'}LDOA_GLX_PROBE_INSTALL" = 1 ]; then
                 timeout 60 apt-get install -y mesa-utils >/dev/null 2>&1
               fi
@@ -489,12 +494,6 @@ object GuestUbuntu {
               echo "gnome-launch: gsd-roster launch=${'$'}LAUNCH_ID ${'$'}(ps -A -o comm= 2>/dev/null | grep '^gsd-' | sort | tr '\n' ' ')"
               echo "gnome-launch: shell-mode launch=${'$'}LAUNCH_ID ${'$'}(timeout 4 gdbus call --session --timeout 2 --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Properties.Get org.gnome.Shell Mode 2>&1 | head -1)"
               echo "gnome-launch: shell-extensions launch=${'$'}LAUNCH_ID ${'$'}(timeout 4 gsettings get org.gnome.shell enabled-extensions 2>&1 | head -1)"
-              if command -v glxinfo >/dev/null 2>&1; then
-                echo "gnome-launch: renderer-probe-glx BEGIN (probe-client GLX context, not mutter EGL - correlate before renderer claim)"
-                timeout 30 glxinfo -B 2>&1 | grep -E "Accelerated|Device:|OpenGL renderer string|OpenGL version string" | head -6 | while read -r L; do echo "gnome-launch: renderer-probe-glx ${'$'}L"; done
-              else
-                echo "gnome-launch: renderer-probe-glx SKIPPED (no glxinfo; opt-in install via LDOA_GLX_PROBE_INSTALL=1) - renderer identity unverified this launch"
-              fi
             ) &
             # Diag (exit=1 root-cause): gnome-session's g_debug output names the
             # phase/app transitions and the acceleration-check verdicts; the
