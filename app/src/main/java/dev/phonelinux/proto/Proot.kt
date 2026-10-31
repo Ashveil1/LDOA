@@ -90,7 +90,17 @@ object Proot {
             // optional progress sink for the provisioning UI.
             val errSb = StringBuilder()
             val errThread = kotlin.concurrent.thread {
-                proc.errorStream.bufferedReader().forEachLine { errSb.append(it).append('\n') }
+                try {
+                    proc.errorStream.bufferedReader().forEachLine { errSb.append(it).append('\n') }
+                } catch (t: Throwable) {
+                    // Drain teardown is normal on the bounded path (the caller
+                    // closes the stream after a timeout) and on process-level
+                    // signals (EINTR from SIGQUIT/GC suspension). A drain must
+                    // NEVER die with an uncaught exception: run 41179905458
+                    // crashed the whole instrumentation process mid-arm when
+                    // both drains threw InterruptedIOException unhandled.
+                    Log.w(TAG, "proot stderr drain ended: " + t.javaClass.simpleName + ": " + t.message)
+                }
             }
             val outSb = StringBuilder()
             // timeoutMs > 0: drain stdout on its own thread so the caller can
@@ -100,9 +110,16 @@ object Proot {
             // then blocks the caller for the whole JUnit timeout (nautilus
             // pid 13954 ran 06:43:17-06:57:36, the full blocked window).
             val outThread: Thread? = if (timeoutMs > 0) kotlin.concurrent.thread {
-                proc.inputStream.bufferedReader().forEachLine {
-                    outSb.append(it).append('\n')
-                    onLine?.invoke(it)
+                try {
+                    proc.inputStream.bufferedReader().forEachLine {
+                        outSb.append(it).append('\n')
+                        onLine?.invoke(it)
+                    }
+                } catch (t: Throwable) {
+                    // See the stderr drain above: bounded-wait teardown closes
+                    // this stream and signals interrupt blocking reads; an
+                    // uncaught drain exception kills the caller's process.
+                    Log.w(TAG, "proot stdout drain ended: " + t.javaClass.simpleName + ": " + t.message)
                 }
             } else null
             val code: Int
@@ -123,6 +140,13 @@ object Proot {
                     errSb.append("TIMED_OUT after ").append(timeoutMs).append(" ms; proot killed, backgrounded tracees orphaned\n")
                 }
                 outThread!!.join(10_000)
+                if (outThread.isAlive) {
+                    // An unredirected backgrounded child inherited the pipe,
+                    // so SIGKILL-ing proot did not EOF stdout: close our end
+                    // to unblock the drain thread instead of leaking it.
+                    try { proc.inputStream.close() } catch (_: Exception) {}
+                    outThread.join(2_000)
+                }
             } else {
                 proc.inputStream.bufferedReader().forEachLine {
                     outSb.append(it).append('\n')
@@ -131,6 +155,10 @@ object Proot {
                 code = proc.waitFor()
             }
             errThread.join(10_000)
+            if (errThread.isAlive) {
+                try { proc.errorStream.close() } catch (_: Exception) {}
+                errThread.join(2_000)
+            }
             val out = outSb.toString()
             val err = errSb.toString()
             val ms = (System.nanoTime() - start) / 1_000_000
