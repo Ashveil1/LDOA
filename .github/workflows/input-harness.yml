@@ -101,10 +101,29 @@ jobs:
         if: always()
         run: |
           # The emulator step cannot stop logcat itself (per-line sh -c makes
-          # traps/variables no-ops), so capture is stopped here explicitly via
-          # the persisted pidfile. Kill is a no-op when the emulator kill
-          # already disconnected logcat; either way the file is final after.
-          if [ -f logcat-run.pid ]; then kill "$(cat logcat-run.pid)" 2>/dev/null || true; sleep 2; fi
+          # traps/variables no-ops), so capture is stopped here via the
+          # persisted pidfile - but ONLY after the pid is VERIFIED to still be
+          # our capture (PID-reuse guard: the runner's killEmulator usually
+          # disconnects adb logcat first, and a dead pid can be reused by an
+          # unrelated process; never signal an unverified pid). Bounded wait,
+          # then KILL only the same verified pid. The host-side file is
+          # written continuously by the local adb client: run 41331931845's
+          # logcat-run.txt uploaded complete (62,310 lines) after the emulator
+          # kill disconnected the writer, so once the writer is gone the file
+          # is final. NOTE: a GitHub job CANCELLATION (e.g. the 90min job
+          # timeout) can skip even if:always() steps - that case leaves the
+          # runner's own orphan cleanup to stop the capture (observed: run
+          # 41331931845 "Cleaning up orphan processes" at job end, capture
+          # complete).
+          if [ -f logcat-run.pid ]; then
+            p="$(cat logcat-run.pid)"
+            case "$p" in ''|*[!0-9]*) p="" ;; esac
+            if [ -n "$p" ] && [ -d "/proc/$p" ] && tr '\0' ' ' < "/proc/$p/cmdline" | grep -q 'adb.*logcat -b main -b system -b crash'; then
+              kill "$p" 2>/dev/null || true
+              for i in 1 2 3 4 5; do [ -d "/proc/$p" ] || break; sleep 1; done
+              if [ -d "/proc/$p" ]; then kill -9 "$p" 2>/dev/null || true; sleep 1; fi
+            fi
+          fi
           if [ -s logcat-run.txt ]; then echo "logcat-run.txt lines: $(wc -l < logcat-run.txt)"; else echo "LOGCAT-RUN-MISSING-OR-EMPTY"; fi
       - uses: actions/upload-artifact@v4
         if: always()
