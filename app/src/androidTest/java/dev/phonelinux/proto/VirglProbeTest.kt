@@ -216,9 +216,24 @@ class VirglProbeTest {
                     // probe join below (run 41320469908: a worker-dead
                     // assertion here fired before the join and destroyed
                     // the collected probe evidence) - evidence first.
+                    val stopT0 = System.nanoTime()
                     XServer.stopVirglServerForTest("probe-stop-with-client")
+                    // Stop-RETURN worker state (diag only; the assertions
+                    // stay post-join so a leak can never destroy probe
+                    // evidence). This separates "worker dead at
+                    // stop-return" from "worker died during the probe
+                    // window" - run 41322332425's post-join disappearance
+                    // alone could not distinguish prompt cleanup from the
+                    // guest's natural exit.
                     diag.append("stop-path: WITH observed worker(s) ")
                         .append(liveWorkers.map { it.pid }).append('\n')
+                    diag.append("stop-return-wallMs: ")
+                        .append((System.nanoTime() - stopT0) / 1_000_000)
+                        .append(" worker-state-at-stop-return: ")
+                        .append(liveWorkers.map { w ->
+                            val o = VirglTestCommon.obsOf(w.pid)
+                            w.pid.toString() + "/" + (o?.state ?: "gone") })
+                        .append('\n')
                 } else {
                     diag.append("stop-path: WITHOUT observed worker (deferred until after probe join)\n")
                 }
@@ -233,7 +248,12 @@ class VirglProbeTest {
                 diag.append("probe-thread-alive-after-join: ").append(t.isAlive)
                     .append(" thread-err: ").append(virglErr?.toString() ?: "none").append('\n')
                 if (liveWorkers.isEmpty()) {
+                    val stopT0 = System.nanoTime()
                     XServer.stopVirglServerForTest("probe-stop-no-observed-worker")
+                    diag.append("stop-return-wallMs(no-worker): ")
+                        .append((System.nanoTime() - stopT0) / 1_000_000)
+                        .append(" parent-alive-at-stop-return: ")
+                        .append(VirglTestCommon.aliveAs(ident)).append('\n')
                 }
                 // Stop-outcome assertions run only AFTER the probe evidence
                 // is collected: a leaked worker still fails the arm loudly,
