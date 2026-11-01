@@ -423,8 +423,11 @@ class VirglProbeTest {
         val benchRe = Regex("EGLPROBE-BENCH frames=(\\d+) wallMs=(\\d+)")
         val hashRe = Regex("EGLPROBE-FRAME-FNV64: ([0-9a-f]+)")
         val out = StringBuilder()
-        var completed = false
-        scratch.delete() // never mix stale output into this run's evidence
+        var executed = false   // every arm ran and PPMs validated
+        var qualified = false  // every region-set assertion also passed
+        // Clear ALL stale artifacts from prior runs before producing anything:
+        // an unreached arm must never leave old pixels looking current.
+        scratch.delete(); report.delete(); ppmLlvm.delete(); ppmVirgl.delete()
         try {
             stageProbe()
             val wall = LinkedHashMap<String, MutableList<Long>>()
@@ -514,18 +517,34 @@ class VirglProbeTest {
             out.append("== bench classification: emulator methodology-only - GPU-completed offscreen FBO throughput; ")
                 .append("NOT display-path FPS, NOT GNOME smoothness, NOT Adreno, NOT a smoothness verdict\n")
             out.append("emulator result - NOT Adreno; transport/visual qualification only\n")
-            completed = true
+            executed = true // all arms ran; region assertions below decide qualification
             assertTrue("llvmpipe visual regions failed (baseline scene broken - see report + PPM)",
                 visualOk["llvmpipe"] == true)
             assertTrue("virgl visual regions failed - first FUNCTIONAL virgl defect signal (see report + PPM)",
                 visualOk["virgl"] == true)
+            qualified = true // reached only when every assertion above passed
         } finally {
-            XServer.stopVirglServerForTest("visual-bench-cleanup")
-            // Accumulated evidence is persisted on EVERY exit path -
-            // partial results survive a mid-arm failure.
-            report.writeText(if (completed) out.toString()
-                             else "== visual/bench compare ABORTED - partial results below ==\n" + out.toString())
-            if (savedFlag != null) flag.writeText(savedFlag) else flag.delete()
+            // Cleanup, report persistence and flag restore are INDEPENDENTLY
+            // attempted: a failing server stop must not lose the report, and
+            // neither may lose the flag restore. Original failure vs cleanup
+            // errors stay distinguishable in the report.
+            try {
+                XServer.stopVirglServerForTest("visual-bench-cleanup")
+            } catch (ce: Throwable) {
+                out.append("== CLEANUP-ERROR server-stop: ").append(ce.message).append('\n')
+            } finally {
+                try {
+                    out.append(if (executed) "== EXECUTION: complete\n"
+                               else "== EXECUTION: ABORTED - partial results above ==\n")
+                    out.append(if (qualified) "== QUALIFICATION: passed\n"
+                               else "== QUALIFICATION: FAILED or incomplete ==\n")
+                    report.writeText(out.toString())
+                } catch (we: Throwable) {
+                    System.err.println("visual-bench report write failed: " + we.message)
+                } finally {
+                    if (savedFlag != null) flag.writeText(savedFlag) else flag.delete()
+                }
+            }
         }
     }
 }
