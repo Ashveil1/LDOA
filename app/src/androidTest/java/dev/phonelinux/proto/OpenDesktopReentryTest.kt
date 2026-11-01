@@ -151,7 +151,13 @@ class OpenDesktopReentryTest {
             val t = Thread { XServer.stopDesktopMode(ctx) }
             t.start(); t.join(30_000)
             // A fresh attempt starts after the Stop.
-            scenario.onActivity { seqNew = XServer.beginAttemptForTest() }
+            // The newer attempt's visible caller re-attaches, as production
+            // does (beginAttemptForTest installs no routing on its own).
+            scenario.onActivity { a ->
+                seqNew = XServer.beginAttemptForTest()
+                XServer.openDesktop(a, Distros.UBUNTU,
+                    onStage = { }, onError = { errors.add(it) })
+            }
             // The OLD worker's completion lands now: must not clear the
             // newer attempt's preparing or deliver anything.
             XServer.finishAttempt(ctx, true, null, seqOld)
@@ -248,7 +254,7 @@ class OpenDesktopReentryTest {
             hide!!.click()
             assertNotNull("hide returns to the first-run screen",
                 device.wait(Until.hasObject(By.desc("show-picker")), 10_000))
-            assertNull("overlay dismissed after hide",
+            assertFalse("overlay dismissed after hide",
                 device.wait(Until.hasObject(By.desc("preparing-stop-session")), 2_000))
 
             // Stop: ends the (empty) session world and clears the overlay.
