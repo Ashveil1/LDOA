@@ -1,0 +1,272 @@
+#!/bin/sh
+# emulator-lane.sh - ALL emulator-step orchestration for input-harness.yml,
+# invoked as ONE runner line: `sh ci/emulator-lane.sh`.
+#
+# WHY THIS FILE EXISTS: reactivecircus/android-emulator-runner@v2 does NOT
+# run its `script:` input as a shell script. parseScript (src/script-parser.ts
+# on the v2 tag) splits the input on newlines, trims each line, drops
+# comment/blank lines, and executes EACH PHYSICAL LINE as a separate
+# `sh -c <line>` (src/main.ts:221-224), awaited in order, first nonzero exit
+# aborting the rest. Consequences proven by run 41331931845 (job.log:1090-1091,
+# "/usr/bin/sh: 1: Syntax error: end of file unexpected (expecting \"done\")"):
+#   - multi-line constructs (for/if/function with body on later lines) are
+#     syntax errors;
+#   - variables, functions and traps NEVER persist across lines (each line is
+#     a fresh process);
+#   - cwd DOES persist (single process.chdir); env DOES persist from the
+#     step/job env only (src/main.ts:224: process.env + EMULATOR_PORT +
+#     ANDROID_SERIAL).
+# Keeping orchestration in ONE checked-in file makes it reviewable,
+# shellcheckable, and fixture-testable; the runner block stays one line.
+#
+# Failure model (unchanged from the per-line era): no set -e; every arm is
+# individually bounded and guarded; per-arm failures touch marker files under
+# /tmp; the marker evaluation at the end exits nonzero. A harvest that fails
+# REMOVES its target: a harvested file is intact device content or ABSENT,
+# never a masquerading partial/error payload.
+#
+# Env in: LANE (job env: full|native-only|koe-only|virgl-only),
+# ANDROID_SERIAL (provided by the runner; default emulator-5554).
+
+SERIAL="${ANDROID_SERIAL:-emulator-5554}"
+
+# Bounded logcat capture for THIS run's instrument window: started here,
+# pid persisted to logcat-run.pid, stopped+flushed by the EXPLICIT
+# if:always() cleanup step in the workflow (no traps: the old per-line model
+# made them no-ops, and an in-script trap would be invisible to review).
+# Uploaded via the if:always() artifact step.
+adb -s "$SERIAL" logcat -G 16M || true
+adb -s "$SERIAL" logcat -c || true
+adb -s "$SERIAL" logcat -b main -b system -b crash -v threadtime > logcat-run.txt 2>&1 &
+echo $! > logcat-run.pid
+
+adb -s "$SERIAL" shell settings put global anr_show_background 0 || true
+if [ "$(cat ci/launcher-suppression.conf 2>/dev/null || echo on)" = "on" ]; then
+  adb -s "$SERIAL" shell pm disable-user --user 0 com.google.android.apps.nexuslauncher || true
+  echo "launcher suppression: ON"
+else
+  echo "launcher suppression: OFF"
+fi
+mkdir -p screenshots
+./gradlew assembleDebug assembleDebugAndroidTest 2>&1 | tee /tmp/gradle-build.log | tail -40
+adb -s "$SERIAL" install -r -g app/build/outputs/apk/debug/app-debug.apk
+adb -s "$SERIAL" install -r -g app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+
+# SETUP: cold-first-launch + auto-enter/consent path coverage.
+# The test ends with an OWNED identity teardown (test-owned ordered
+# setup/teardown). am instrument force-stops the app per invocation (AOSP 14
+# AMS startInstrumentation, logcat reason "start inst"/"finished inst"; run
+# 41244200992 21:41:00.885/21:47:53.893), so nothing tracked crosses to the
+# harness - the harness does its OWN tracked in-invocation warmup
+# (SessionReset.trackedWarmup). The cold-first-launch path stays a separate
+# open qualification blocker (run 40840614400: shell maps no UI cold);
+# coverage NOT dropped.
+date -u +"SETUP auto-enter start %H:%M:%S (lane=$LANE)"
+if [ "$LANE" = full ]; then
+  adb -s "$SERIAL" shell am instrument -w -e class dev.phonelinux.proto.UbuntuDesktopAutoEnterTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr0.log | tail -8
+else
+  echo "autoenter SKIPPED (lane=$LANE)" > /tmp/instr0.log
+fi
+if [ "$LANE" = full ]; then grep -q "OK (" /tmp/instr0.log || touch /tmp/PHONELINUX_SETUP_FAILED; fi
+date -u +"SETUP auto-enter end %H:%M:%S"
+if [ -f /tmp/PHONELINUX_SETUP_FAILED ]; then echo "AUTOENTER-SETUP-FAILED - arms not run"; exit 1; fi
+
+# EVIDENCE-ONLY harness: asserts bootstrap facts, logs/attaches all
+# gesture-attribution outcomes. A green job means "harness executed", never
+# "gesture qualified".
+# Native-terminal discriminator FIRST, independently bounded: it has never
+# completed in any run (blocked behind the harness stall); a later harness
+# wedge must not leave it unmeasured again.
+date -u +"NATIVE-FAKEROOT start %H:%M:%S"
+if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then
+  timeout -s KILL 1500 adb -s "$SERIAL" shell am instrument -w -e class dev.phonelinux.proto.NativeTerminalFakeRootTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-native.log | tail -15 || echo "NATIVE-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"
+else
+  echo "native SKIPPED (lane=$LANE)" > /tmp/instr-native.log
+fi
+if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then grep -q "OK (" /tmp/instr-native.log || touch /tmp/PHONELINUX_NATIVE_FAILED; fi
+if [ -f /tmp/PHONELINUX_NATIVE_FAILED ]; then
+  echo "NATIVE-DIAG survivors at bound:"
+  adb -s "$SERIAL" shell "ps -A -o PID,PPID,ARGS" | grep -E "phonelinux|proot|bash|Xlorie" || true
+  adb -s "$SERIAL" shell am force-stop dev.phonelinux.proto || true
+fi
+
+# GNOME session lifecycle regression (retry-implies-stop, clobber window,
+# concurrent stops): cheap (sleep-process fakes, no rootfs), always on,
+# independently bounded.
+date -u +"LIFECYCLE start %H:%M:%S"
+# Bound 300->1500 covers the real-GNOME-session fixtures in this arm (lifecycle + reentry); not a product-hang mask.
+if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then
+  timeout -s KILL 1500 adb -s "$SERIAL" shell am instrument -w -e class dev.phonelinux.proto.GnomeSessionLifecycleTest,dev.phonelinux.proto.OpenDesktopReentryTest,dev.phonelinux.proto.GnomeFallbackRecoveryTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-lifecycle.log | tail -8 || echo "LIFECYCLE-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"
+else
+  echo "lifecycle SKIPPED (lane=$LANE)" > /tmp/instr-lifecycle.log
+fi
+if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then grep -q "OK (" /tmp/instr-lifecycle.log || touch /tmp/PHONELINUX_LIFECYCLE_FAILED; fi
+
+# Bounded VirGL transport proof (dispatch-only lane). MINIMAL setup:
+# ubuntu-base + mesa runtime only - NO GNOME install or launch anywhere in
+# this lane. Stage 0 = rootfs provision; stage 1 = host vtest server
+# lifecycle + hostprobe host-EGL renderer + stop/start overlap; stage 2 =
+# guest eglprobe renderer proof on EGL surfaceless (baseline arm, then
+# opt-in virpipe arm with a holding client so Stop runs with an owned forked
+# worker). glxinfo was rejected as the probe: on the emulator GLX has no
+# usable direct-rendering device, so it reports the X SERVER's renderer,
+# never the guest mesa driver - and run 41307671476 lost even that output to
+# tail -10 + a discarded Proot.Result. Full reports are pulled and gated
+# below: a missing/empty report FAILS the lane, never masks.
+if [ "$LANE" = virgl-only ]; then
+  adb -s "$SERIAL" shell mkdir -p /sdcard/Android/data/dev.phonelinux.proto/files && adb -s "$SERIAL" push ci/virgl/eglprobe-x86_64 ci/virgl/eglprobe-aarch64 /sdcard/Android/data/dev.phonelinux.proto/files/ || { echo "VIRGL-PROBE-PUSH-FAILED - instruments NOT run"; exit 1; }
+fi
+if [ "$LANE" = virgl-only ]; then
+  timeout -s KILL 900 adb -s "$SERIAL" shell am instrument -w -e class dev.phonelinux.proto.VirglRootfsProvisionTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl-provision.log | tail -20 || echo "VIRGL-PROVISION-INSTR-TIMEOUT: outer 900s bound hit - instrument never returned"
+else
+  echo "virgl-provision SKIPPED (lane=$LANE)" > /tmp/instr-virgl-provision.log
+fi
+if [ "$LANE" = virgl-only ]; then grep -q "OK (" /tmp/instr-virgl-provision.log || touch /tmp/PHONELINUX_VIRGL_FAILED; fi
+if [ "$LANE" = virgl-only ] && [ ! -f /tmp/PHONELINUX_VIRGL_FAILED ]; then
+  timeout -s KILL 900 adb -s "$SERIAL" shell am instrument -w -e class dev.phonelinux.proto.VirglServerSmokeTest,dev.phonelinux.proto.VirglProbeTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl.log | tail -40 || echo "VIRGL-INSTR-TIMEOUT: outer 900s bound hit - instrument never returned"
+else
+  echo "virgl SKIPPED (lane=$LANE)" > /tmp/instr-virgl.log
+fi
+if [ "$LANE" = virgl-only ]; then grep -q "OK (" /tmp/instr-virgl.log || touch /tmp/PHONELINUX_VIRGL_FAILED; fi
+if [ "$LANE" = virgl-only ]; then
+  for f in virgl-provision.txt virgl-smoke.txt virgl-probe-default.txt virgl-probe-virpipe.txt virgl-probe-nofork.txt virgl-server.log virgl-visual-bench.txt virgl-visual-scratch.txt virgl-frame-llvmpipe.ppm virgl-frame-virgl.ppm; do
+    timeout 60 adb -s "$SERIAL" exec-out run-as dev.phonelinux.proto cat "files/$f" > "$f" || echo "VIRGL-PULL-FAILED $f rc=$?"
+  done
+fi
+# Evidence contract: every expected report must exist NON-EMPTY (the tests
+# write stub reports for unreached arms, so absence means capture broke, not
+# that the arm was skipped).
+if [ "$LANE" = virgl-only ]; then
+  for f in virgl-provision.txt virgl-smoke.txt virgl-probe-default.txt virgl-probe-virpipe.txt virgl-probe-nofork.txt virgl-visual-bench.txt; do
+    if [ ! -s "$f" ] || head -c 40 "$f" | grep -q "^cat: files/"; then
+      echo "VIRGL-EVIDENCE-MISSING $f (absent, empty, or remote cat error captured)"
+      touch /tmp/PHONELINUX_VIRGL_FAILED
+    fi
+  done
+fi
+
+# Diagnostics export + reuse-gate health (cheap, rootfs-free, gates the
+# user-facing ZIP export). Full output printed and archived - no tail-only
+# retention for gate classes.
+date -u +"EXPORT/REUSEGATE start %H:%M:%S"
+if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then
+  timeout -s KILL 300 adb -s "$SERIAL" shell am instrument -w -e class dev.phonelinux.proto.DiagnosticsExportTest,dev.phonelinux.proto.ReuseGateHealthTest,dev.phonelinux.proto.GnomeSessionScriptSafetyTest,dev.phonelinux.proto.GnomeRetryGateTest,dev.phonelinux.proto.GnomeSessionPerfConfigTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-export.log || echo "EXPORT-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"
+else
+  echo "export SKIPPED (lane=$LANE)" > /tmp/instr-export.log
+fi
+if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then grep -q "OK (" /tmp/instr-export.log || touch /tmp/PHONELINUX_EXPORT_FAILED; fi
+
+date -u +"HARNESS arms start %H:%M:%S (lane=$LANE)"
+if [ "$LANE" = full ]; then
+  timeout -s KILL 1500 adb -s "$SERIAL" shell am instrument -w -e class dev.phonelinux.proto.LdoaInputHarnessTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr.log | tail -15 || echo "HARNESS-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"
+else
+  echo "harness SKIPPED (lane=$LANE)" > /tmp/instr.log
+fi
+if [ "$LANE" = full ]; then grep -q "OK (" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED; fi
+if [ -f /tmp/PHONELINUX_TESTS_FAILED ]; then
+  echo "HARNESS-DIAG survivors at bound:"
+  adb -s "$SERIAL" shell "ps -A -o PID,PPID,ARGS" | grep -E "phonelinux|proot|nautilus|Xlorie|soffice" || true
+  adb -s "$SERIAL" exec-out run-as dev.phonelinux.proto cat files/harness-owned-ledger.txt > harness-owned-ledger.txt 2>/dev/null || echo "LEDGER-PULL-FAILED rc=$? (ledger needs the test-side spawn-ledger patch)"
+  adb -s "$SERIAL" shell am force-stop dev.phonelinux.proto || true
+fi
+
+# P3 real-session virgl qualification (full lane only: needs the provisioned
+# GNOME from autoenter setup; starts its OWN opted-in session and tears it
+# down itself, so KOE still sees a clean world). Placement after the harness
+# arms, before KOE.
+date -u +"VIRGL-SESSION start %H:%M:%S (lane=$LANE)"
+if [ "$LANE" = full ]; then
+  timeout -s KILL 1500 adb -s "$SERIAL" shell am instrument -w -e class dev.phonelinux.proto.VirglGnomeSessionTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl-session.log | tail -15 || echo "VIRGL-SESSION-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"
+else
+  echo "virgl-session SKIPPED (lane=$LANE)" > /tmp/instr-virgl-session.log
+fi
+if [ "$LANE" = full ]; then grep -q "OK (" /tmp/instr-virgl-session.log || touch /tmp/PHONELINUX_VIRGL_SESSION_FAILED; fi
+# Pull + VALIDATE: adb exec-out can return rc=0 while the remote cat fails
+# (its error text lands in the redirect target), and a nonzero pull can
+# still leave partial bytes behind. ANY nonzero exit, empty result, or error
+# payload REMOVES the target: a harvested file is intact device content or
+# ABSENT, never a masquerading partial/error payload.
+if [ "$LANE" = full ]; then
+  for f in virgl-session.txt virgl-session-root.xwd; do
+    rc=0
+    timeout 60 adb -s "$SERIAL" exec-out run-as dev.phonelinux.proto cat "files/$f" > "$f" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      rm -f "$f"
+      echo "VIRGL-SESSION-HARVEST: $f pull FAILED rc=$rc - target removed (partial bytes are not evidence); classified ABSENT"
+    elif [ ! -s "$f" ] || head -c 40 "$f" | grep -q "^cat: files/"; then
+      rm -f "$f"
+      echo "VIRGL-SESSION-HARVEST: $f ABSENT on device (or error payload) - removed; classified as NO-CAPTURE, never evidence"
+    fi
+  done
+fi
+# Report must exist NON-EMPTY; the xwd is required only when the test
+# captured via xwd (shot-pipeline fallback lands in screenshots/ instead),
+# so it is pulled but not gated.
+if [ "$LANE" = full ]; then
+  if [ ! -s virgl-session.txt ] || head -c 40 virgl-session.txt | grep -q "^cat: files/"; then
+    echo "VIRGL-SESSION-EVIDENCE-MISSING virgl-session.txt (absent, empty, or remote cat error captured)"
+    touch /tmp/PHONELINUX_VIRGL_SESSION_FAILED
+  fi
+fi
+# Capture-artifact validity: when the report selected the xwd path, the
+# artifact must exist AND carry a valid XWD header (big-endian file_version
+# == 7 at offset 4); an absent or invalid artifact is CAPTURE-UNVERIFIED and
+# fails the arm - it never passes as a captured desktop.
+if [ "$LANE" = full ] && [ -s virgl-session.txt ] && grep -q "via xwd -root" virgl-session.txt; then
+  xwd_ok=0
+  if [ -s virgl-session-root.xwd ] && [ "$(od -An -tx1 -j 4 -N 4 virgl-session-root.xwd 2>/dev/null | tr -d ' \n')" = "00000007" ]; then xwd_ok=1; fi
+  if [ "$xwd_ok" -ne 1 ]; then
+    echo "VIRGL-SESSION-CAPTURE-INVALID: report selected xwd -root but the artifact is absent or fails the XWD header check (file_version@4 != 7) - CAPTURE UNVERIFIED"
+    touch /tmp/PHONELINUX_VIRGL_SESSION_FAILED
+  fi
+fi
+
+# kill-on-exit + identity-reset + bus-capture fixtures (cheap:
+# toybox-symlink shaped fakes + the REAL vendored libproot.so, no rootfs),
+# always on, independently bounded. Exact count pinned: the class has 13
+# tests; a drift fails loudly here, never silently passes.
+# PLACEMENT: after the harness arms. am instrument force-stops the app per
+# invocation (AOSP 14 AMS startInstrumentation), so no state crosses into
+# the fixture class either way; running last simply keeps fixture 5's
+# untracked-world scan on a world the harness already tore down by owned
+# identity.
+date -u +"KOE-FIXTURES start %H:%M:%S"
+timeout -s KILL 300 adb -s "$SERIAL" shell am instrument -w -e class dev.phonelinux.proto.ProotKillOnExitTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-koe.log | tail -10 || echo "KOE-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"
+grep -q "OK (13 tests)" /tmp/instr-koe.log || touch /tmp/PHONELINUX_KOE_FAILED
+
+timeout 60 adb -s "$SERIAL" exec-out run-as dev.phonelinux.proto cat files/guest-gnome.log > guest-gnome.log || echo "GNOME-LOG-PULL-FAILED rc=$?"
+rc=0
+timeout 60 adb -s "$SERIAL" exec-out run-as dev.phonelinux.proto cat files/gnome-recovery-evidence.txt > gnome-recovery-evidence.txt || rc=$?
+if [ "$rc" -ne 0 ]; then
+  rm -f gnome-recovery-evidence.txt
+  echo "RECOVERY-EVIDENCE-HARVEST: pull FAILED rc=$rc - partial removed; ABSENT = no evidence recovered (harvest failed; NOT proof recovery never failed)"
+elif [ ! -s gnome-recovery-evidence.txt ] || head -c 40 gnome-recovery-evidence.txt | grep -q "^cat: files/"; then
+  rm -f gnome-recovery-evidence.txt
+  echo "RECOVERY-EVIDENCE-HARVEST: ABSENT on device - the test wrote no recovery-failure evidence (NOT proof recovery never failed)"
+fi
+timeout 60 adb -s "$SERIAL" exec-out run-as dev.phonelinux.proto cat files/phantom-snapshots.log > phantom-snapshots.log || echo "PHANTOM-SNAPSHOTS-PULL-FAILED rc=$?"
+timeout 120 adb -s "$SERIAL" exec-out run-as dev.phonelinux.proto cat files/phantom-dumpsys-raw.log > phantom-dumpsys-raw.log || echo "PHANTOM-RAW-PULL-FAILED rc=$?"
+
+timeout 60 adb -s "$SERIAL" logcat -d > /tmp/shotlog.txt || true
+python3 .github/scripts/extract_shots.py /tmp/shotlog.txt screenshots || true
+python3 .github/scripts/extract_shots.py /tmp/instr.log screenshots || true
+find screenshots -type f | sort || true
+# Presentation honesty: if the virgl session test used the shot-pipeline
+# fallback, the screenshot must ACTUALLY land in the artifact - CAPTURED is
+# never taken on the call alone.
+if [ "$LANE" = full ] && [ -s virgl-session.txt ] && grep -q "shot pipeline" virgl-session.txt; then
+  ls screenshots/ 2>/dev/null | grep -q "virgl-session-desktop" || { echo "VIRGL-SESSION-SHOT-MISSING: shot-pipeline fallback claimed but no screenshot landed"; touch /tmp/PHONELINUX_VIRGL_SESSION_FAILED; }
+fi
+
+if [ -f /tmp/PHONELINUX_LIFECYCLE_FAILED ]; then echo "LIFECYCLE-FAILED-OR-TIMEOUT"; fi
+if [ -f /tmp/PHONELINUX_KOE_FAILED ]; then echo "KOE-FIXTURES-FAILED-OR-TIMEOUT"; fi
+if [ -f /tmp/PHONELINUX_NATIVE_FAILED ]; then echo "NATIVE-FAKEROOT-FAILED-OR-TIMEOUT"; fi
+if [ -f /tmp/PHONELINUX_EXPORT_FAILED ]; then echo "EXPORT-REUSEGATE-FAILED-OR-TIMEOUT"; fi
+if [ -f /tmp/PHONELINUX_TESTS_FAILED ]; then exit 1; fi
+if [ -f /tmp/PHONELINUX_LIFECYCLE_FAILED ]; then exit 1; fi
+if [ -f /tmp/PHONELINUX_KOE_FAILED ]; then exit 1; fi
+if [ -f /tmp/PHONELINUX_NATIVE_FAILED ]; then exit 1; fi
+if [ -f /tmp/PHONELINUX_EXPORT_FAILED ]; then exit 1; fi
+if [ -f /tmp/PHONELINUX_VIRGL_SESSION_FAILED ]; then echo "VIRGL-SESSION-FAILED-OR-TIMEOUT"; fi
+if [ -f /tmp/PHONELINUX_VIRGL_FAILED ]; then exit 1; fi
+if [ -f /tmp/PHONELINUX_VIRGL_SESSION_FAILED ]; then exit 1; fi
