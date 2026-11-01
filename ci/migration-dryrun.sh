@@ -28,15 +28,21 @@ log "- new APK sha256: $(sha256sum "$NEW_APK" | cut -d' ' -f1)"
   adb version | head -1
   echo '--- adb help exec-* lines:'
   adb help 2>&1 | grep -iE 'exec-in|exec-out' || echo '(adb help lists no exec-*; functional probes decide)'
-  echo '--- exec-out probe:'; timeout 15 $ADB exec-out echo probe-out 2>&1 | od -An -c | head -1; echo "exec-out rc=$?"
+  PO=$(timeout 15 $ADB exec-out echo probe-out 2>&1); PORC=$?
+  echo "--- exec-out probe: actual-rc=$PORC bytes=$(printf '%s' "$PO" | wc -c)"; printf '%s' "$PO" | od -An -c | head -1
   echo '--- exec-in probe (15s cap; hang expected on raw service without stdin EOF):'
-  echo probe-in | timeout 15 $ADB exec-in cat 2>&1 | od -An -c | head -1; echo "exec-in rc=$? (124=timeout/hang)"
+  PI=$(echo probe-in | timeout 15 $ADB exec-in cat 2>&1); PIRC=$?
+  echo "--- exec-in probe: actual-rc=$PIRC bytes=$(printf '%s' "$PI" | wc -c) (124=timeout/hang)"; printf '%s' "$PI" | od -An -c | head -1
   for t in tar find sha256sum stat readlink du df getfattr; do
     echo "--- toybox $t --help (head -2):"
     timeout 15 $ADB shell "toybox $t --help 2>&1 | head -2"
   done
   echo '--- toybox tar create/list smoke in /data/local/tmp:'
   timeout 15 $ADB shell 'cd /data/local/tmp && echo smoke > s.txt && toybox tar -cf s.tar s.txt && toybox tar -tf s.tar && rm -f s.txt s.tar'
+  echo '--- toybox stat -c format smoke:'
+  timeout 15 $ADB shell 'toybox stat -c "%a|%s|%i|%u" /data/local/tmp'
+  echo '--- toybox sha256sum smoke:'
+  timeout 15 $ADB shell 'echo abc > /data/local/tmp/s2.txt && toybox sha256sum /data/local/tmp/s2.txt; rm -f /data/local/tmp/s2.txt'
   echo '--- toybox find -prune smoke:'
   timeout 15 $ADB shell 'cd /data/local/tmp && mkdir -p p/sub && touch p/sub/x p/y && toybox find p -path p/sub -prune -o -print; rm -rf p'
 } >> "$R" 2>&1
@@ -55,23 +61,23 @@ find . \( -path ./cache -o -path ./code_cache -o -path ./files/dl -o -path ./lib
 done
 MANI
 cat > /tmp/ldoa-seed.sh <<'SEED'
-set -e
-cd /data/data/dev.phonelinux.proto/files || exit 1
-mkdir -p distros/ubuntu/tmp distros/ubuntu/home/user distros/ubuntu/usr/bin distros/ubuntu/etc
-echo install-marker-v1 > distros/ubuntu/.install-complete
-echo hello-rootfs > distros/ubuntu/etc/motd
-printf 'line1\nline2\n' > distros/ubuntu/home/user/notes.txt
-dd if=/dev/zero of=distros/ubuntu/usr/bin/blob.bin bs=1024 count=37 2>/dev/null
-echo hardlink-content > distros/ubuntu/etc/hardlink-a
-ln distros/ubuntu/etc/hardlink-a distros/ubuntu/etc/hardlink-b
-ln -s ../etc/motd distros/ubuntu/home/user/motd-link
-{ echo '#!/system/bin/sh'; echo 'exit 0'; } > distros/ubuntu/usr/bin/suidtest
-chmod 4755 distros/ubuntu/usr/bin/suidtest
-echo secret-mode > distros/ubuntu/etc/shadowtest
-chmod 600 distros/ubuntu/etc/shadowtest
-mkfifo distros/ubuntu/tmp/testfifo
-mkdir -p dl
-echo partial-download-positive-control > dl/ubuntu.tar.gz.tmp
+cd /data/data/dev.phonelinux.proto/files || { echo SEED-CORE-FAIL-cd; exit 1; }
+mkdir -p distros/ubuntu/tmp distros/ubuntu/home/user distros/ubuntu/usr/bin distros/ubuntu/etc || { echo SEED-CORE-FAIL-mkdir; exit 1; }
+echo install-marker-v1 > distros/ubuntu/.install-complete || { echo SEED-CORE-FAIL-marker; exit 1; }
+echo hello-rootfs > distros/ubuntu/etc/motd || { echo SEED-CORE-FAIL-motd; exit 1; }
+printf 'line1\nline2\n' > distros/ubuntu/home/user/notes.txt || { echo SEED-CORE-FAIL-notes; exit 1; }
+dd if=/dev/zero of=distros/ubuntu/usr/bin/blob.bin bs=1024 count=37 2>/dev/null || { echo SEED-CORE-FAIL-blob; exit 1; }
+echo hardlink-content > distros/ubuntu/etc/hardlink-a || { echo SEED-CORE-FAIL-hardlinka; exit 1; }
+ln -s ../etc/motd distros/ubuntu/home/user/motd-link || { echo SEED-CORE-FAIL-symlink; exit 1; }
+{ echo '#!/system/bin/sh'; echo 'exit 0'; } > distros/ubuntu/usr/bin/suidtest || { echo SEED-CORE-FAIL-suidfile; exit 1; }
+echo secret-mode > distros/ubuntu/etc/shadowtest || { echo SEED-CORE-FAIL-shadow; exit 1; }
+chmod 600 distros/ubuntu/etc/shadowtest || { echo SEED-CORE-FAIL-chmod600; exit 1; }
+mkdir -p dl || { echo SEED-CORE-FAIL-dl; exit 1; }
+echo partial-download-positive-control > dl/ubuntu.tar.gz.tmp || { echo SEED-CORE-FAIL-dlfile; exit 1; }
+# Optional capability seeds: expected-denial is RECORDED, never aborts.
+if ln distros/ubuntu/etc/hardlink-a distros/ubuntu/etc/hardlink-b 2>/dev/null; then echo SEED-OPT-hardlink=CREATED; else echo SEED-OPT-hardlink=DENIED; fi
+if chmod 4755 distros/ubuntu/usr/bin/suidtest 2>/dev/null; then echo SEED-OPT-suid=SET; else echo SEED-OPT-suid=DENIED; fi
+if mkfifo distros/ubuntu/tmp/testfifo 2>/dev/null; then echo SEED-OPT-fifo=CREATED; else echo SEED-OPT-fifo=DENIED; fi
 echo SEED-OK
 SEED
 timeout 30 $ADB push /tmp/ldoa-manifest.sh /data/local/tmp/ldoa-manifest.sh >>"$R" 2>&1
@@ -103,9 +109,13 @@ timeout 30 $ADB exec-out run-as $PKG ls -la "$DEV" > "$OUT/top-level-old.txt" 2>
 } >> "$R"
 
 ## 3. Seed representative runtime state (fixture-only, app uid via run-as)
-timeout 60 $ADB exec-out run-as $PKG sh /data/local/tmp/ldoa-seed.sh >> "$R" 2>&1 || abort 'seeding failed'
-grep -q SEED-OK "$R" || abort 'seed did not complete'
-log '## 3. Seeded fixture: marker, plain files, 37KiB blob, hardlink pair, symlink, 4755 file, 600 file, fifo, dl/ exclusion positive-control'
+timeout 60 $ADB exec-out run-as $PKG sh /data/local/tmp/ldoa-seed.sh > "$OUT/seed.txt" 2>&1
+SEEDRC=$?
+cat "$OUT/seed.txt" >> "$R"
+[ "$SEEDRC" = 0 ] || abort "core seeding failed rc=$SEEDRC"
+grep -q SEED-OK "$OUT/seed.txt" || abort 'seed did not complete'
+log '## 3. Seed outcomes (core seeds mandatory; optional capability seeds recorded):'
+grep 'SEED-OPT' "$OUT/seed.txt" | sed 's/^/    /' >> "$R"
 
 ## 4. Measure before streaming (device data size + host free)
 {
@@ -184,7 +194,7 @@ timeout 60 $ADB push "$OUT/backup.tar.gz" /data/local/tmp/ldoa-mig.tgz >>"$R" 2>
   echo '- /data/local/tmp df before extract:'; timeout 15 $ADB shell df -m /data/local/tmp
   echo '- target df:'; timeout 15 $ADB shell df -m "$DEV"
 } >> "$R" 2>&1
-timeout 600 $ADB shell run-as $PKG tar -xzf /data/local/tmp/ldoa-mig.tgz -C "$DEV" 2> "$OUT/restore-stderr.txt"
+timeout 600 $ADB shell run-as $PKG tar -xpzf /data/local/tmp/ldoa-mig.tgz -C "$DEV" 2> "$OUT/restore-stderr.txt"
 RRC=$?
 timeout 15 $ADB shell rm -f /data/local/tmp/ldoa-mig.tgz
 log "- restore rc=$RRC stderr bytes: $(wc -c < "$OUT/restore-stderr.txt")"
@@ -193,7 +203,7 @@ log "- restore rc=$RRC stderr bytes: $(wc -c < "$OUT/restore-stderr.txt")"
 ## 10. Manifest B + per-item diff (uid change expected, not a failure)
 timeout 300 $ADB exec-out run-as $PKG sh /data/local/tmp/ldoa-manifest.sh > "$OUT/manifestB.txt" 2> "$OUT/manifestB.err"
 cat > /tmp/diff.py <<'PYEOF'
-import sys
+import sys, os
 def load(p):
     m = {}
     for line in open(p):
@@ -210,15 +220,27 @@ def load(p):
     return m
 out = sys.argv[1]
 A = load(out + '/manifestA.txt'); B = load(out + '/manifestB.txt')
+seed = ''
+sp = out + '/seed.txt'
+if os.path.exists(sp):
+    seed = open(sp).read()
 only_a = sorted(set(A) - set(B)); only_b = sorted(set(B) - set(A))
-content_bad = mode_bad = link_bad = ok = 0
+content_bad = mode_bad = link_bad = special_stripped = ok = 0
 for p in sorted(set(A) & set(B)):
     a, b = A[p], B[p]
     if a[0] != b[0]:
         print('TYPE-CHANGE', p, a[0], '->', b[0]); content_bad += 1; continue
     if a[0] == 'F':
         if a[5] != b[5]: print('SHA-MISMATCH', p); content_bad += 1; continue
-        if a[1] != b[1]: print('MODE-CHANGE', p, a[1], '->', b[1]); mode_bad += 1; continue
+        if a[1] != b[1]:
+            try:
+                am, bm = int(a[1], 8), int(b[1], 8)
+                if (am & 0o777) == (bm & 0o777):
+                    print(f'SPECIAL-BITS-STRIPPED {p} {a[1]} -> {b[1]} (unprivileged restore cannot always set suid/sgid/sticky; reported, not forced)')
+                    special_stripped += 1; ok += 1; continue
+            except ValueError:
+                pass
+            print('MODE-CHANGE', p, a[1], '->', b[1]); mode_bad += 1; continue
         ok += 1
     elif a[0] == 'L':
         if a[1] != b[1]: print('LINK-CHANGE', p, a[1], '->', b[1]); link_bad += 1; continue
@@ -230,19 +252,24 @@ for p in sorted(set(A) & set(B)):
         ok += 1
 ha = [p for p in A if A[p][0] == 'F' and p.endswith('hardlink-a')]
 hb = [p for p in A if A[p][0] == 'F' and p.endswith('hardlink-b')]
-if ha and hb and ha[0] in B and hb[0] in B:
-    a_same = A[ha[0]][3] == A[hb[0]][3]
-    b_same = B[ha[0]][3] == B[hb[0]][3]
-    print(f'HARDLINK-PAIR inode-shared: pre={a_same} post={b_same}')
+if ha and hb:
+    if ha[0] in B and hb[0] in B:
+        a_same = A[ha[0]][3] == A[hb[0]][3]
+        b_same = B[ha[0]][3] == B[hb[0]][3]
+        print(f'HARDLINK-PAIR inode-shared: pre={a_same} post={b_same}' + ('' if b_same else '  <-- FIDELITY FAILURE (pair split)'))
+    else:
+        print('HARDLINK-PAIR: seeded but MISSING after restore <-- FIDELITY FAILURE')
+elif 'SEED-OPT-hardlink=DENIED' in seed:
+    print('HARDLINK-PAIR: UNTESTED - seed denied (Permission denied under runas_app SELinux domain). NOT proven moot: runas_app domain != app/proot domain; same uid != same SELinux rights. Live-phone hardlink risk PRESERVED as a phone check.')
 else:
-    print('HARDLINK-PAIR not found in both manifests')
+    print('HARDLINK-PAIR: seed state unclear - inspect seed.txt')
 uids_a = sorted({A[p][4] for p in A if A[p][0] == 'F'})
 uids_b = sorted({B[p][4] for p in B if B[p][0] == 'F'})
 print(f'UIDS pre={uids_a} post={uids_b} (change expected: new app uid)')
 print(f'ENTRIES pre={len(A)} post={len(B)} onlyPre={len(only_a)} onlyPost={len(only_b)}')
 for p in only_a[:50]: print('ONLY-PRE', p)
 for p in only_b[:50]: print('ONLY-POST', p)
-print(f'RESULT ok={ok} content_bad={content_bad} mode_bad={mode_bad} link_bad={link_bad}')
+print(f'RESULT ok={ok} content_bad={content_bad} mode_bad={mode_bad} link_bad={link_bad} special_bits_stripped={special_stripped}')
 PYEOF
 python3 /tmp/diff.py "$OUT" > "$OUT/diff.txt" 2>&1
 log '## 10. Fidelity diff (A=pre-backup device, B=post-restore device)'
