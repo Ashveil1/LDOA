@@ -1,0 +1,11 @@
+--- a/src/vrend/vrend_winsys_egl.c	2026-11-01 21:50:32.526130734 +0700
++++ b/src/vrend/vrend_winsys_egl.c	2026-11-01 21:50:32.534130824 +0700
+@@ -440,6 +440,8 @@
+       egl->egl_surf = eglCreatePbufferSurface(egl->egl_display, egl->egl_conf, surf_att);
+       if (!egl->egl_surf) {
+          virgl_error("Failed to create the 1x1 pbuffer fallback surface\n");
++         eglDestroyContext(egl->egl_display, egl->egl_ctx);
++         eglTerminate(egl->egl_display);
+          goto fail;
+       }
+       init_surf = egl->egl_surf;

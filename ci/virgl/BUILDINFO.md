@@ -18,8 +18,14 @@
   0002-egl-pbuffer-fallback.patch - own: when EGL_KHR_surfaceless_context is
   missing in surfaceless mode (Android emulator), create a 1x1 pbuffer and
   make the context current on it instead of failing; extension gates
-  unchanged otherwise.
-- Rebuilt 2026-11-01 with the above patches; compile-level validation on the
+  unchanged otherwise. (Config compatibility is upstream: surfaceless mode
+  already selects an EGL_PBUFFER_BIT config with the matching renderable
+  bit - GLES2 here - and EGL_CONTEXT_CLIENT_VERSION 2.)
+  0003-egl-pbuffer-fail-cleanup.patch - own: on pbuffer creation failure,
+  destroy the context and terminate the display before returning NULL
+  (upstream's shared fail label only frees the struct); error is preserved,
+  no success mislabel.
+- Rebuilt 2026-11-01 with the above patches (twice: 0003 added in the second pass); compile-level validation on the
   build tree: config.h has HAVE_EPOXY_EGL_H defined and ENABLE_GBM undefined;
   libvirglrenderer.a exports virgl_egl_init / virgl_egl_make_context_current;
   vrend_winsys.c.o calls virgl_egl_init (PLT32 relocation) and contains no
