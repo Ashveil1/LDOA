@@ -331,7 +331,10 @@ object XServer {
             if (close < 0) { unreadable++; continue }
             val rest = try { st.substring(close + 1).trim().split(Regex("\\s+")) } catch (t: Throwable) { unreadable++; continue }
             if (rest.size < 20) { unreadable++; continue }
-            if (rest[1].toIntOrNull() != pid) continue
+            val ppid = rest[1].toIntOrNull()
+            if (ppid == null) { unreadable++; continue } // malformed ppid: parse failure counts, never silently skipped
+            if (ppid != pid) continue // foreign ancestry is normal churn, not a failure
+            if (rest[0].isBlank() || rest[19].toLongOrNull() == null) { unreadable++; continue } // malformed state/start: identity not acceptable
             val cpid = f.name.toInt()
             val uid = try { Os.stat("/proc/" + cpid).st_uid } catch (t: Throwable) { unreadable++; continue }
             if (uid != android.os.Process.myUid()) continue
