@@ -1290,28 +1290,42 @@ object GuestUbuntu {
             # ptrace can be partial, so an empty ENOSYS section never
             # proves the failing call sits outside the filter. Install is
             # guarded: rootfs bootstrap already proved apt works here.
-            if ! command -v strace >/dev/null 2>&1; then
-              timeout 60 apt-get install -y strace >/dev/null 2>&1
-            fi
-            # strace 6.8 source (src/strace.c test_ptrace_seize): a failed
-            # PTRACE_SEIZE self-test is error_func_msg_and_die - strace
-            # EXITS 1 BEFORE tracing anything (run 41236388769: "unexpected
-            # wait status 0" under proot, zero session output). So a dead
-            # strace WRAPPER's exit code is not a gnome-session exit.
-            # Self-test first; a blind strace must never masquerade as a
-            # session death - fall back to an untraced launch whose exit
-            # status IS the real session's, and label the branch.
+            # ICE ENOSYS syscall tracing is an explicit DEBUG OPT-IN
+            # (LDOA_TRACE_ICE=1 in the launch environment; nothing in
+            # production sets it). Default launches are UNTRACED: the
+            # untraced exit IS the real session exit, readiness/identity
+            # handling is unchanged, and no apt/strace wrapper cost is
+            # paid per launch. The wrapper path makes the session exit
+            # status unknowable (wrapper exit != session exit), and on
+            # kernels where the self-test passes but the real multi-
+            # process trace dies (run 41298355366: 4/4 launches,
+            # "unexpected wait status 0") it degrades every session to
+            # the bare-shell fallback. Opt-in keeps the diagnostic for
+            # the ICE investigation without taxing production launches.
             TRACED=untraced
-            if command -v strace >/dev/null 2>&1; then
-              timeout 30 strace -f -o /tmp/xdg/.strace-selftest -e trace=none /bin/true >/dev/null 2>&1
-              STRC=${'$'}?
-              if [ "${'$'}STRC" = 0 ]; then
-                TRACED=traced
-              else
-                echo "gnome-launch: strace self-test FAILED rc=${'$'}STRC (nonzero/timeout=124: ptrace blind here, run 41236388769: unexpected wait status 0) - launching UNTRACED"
+            if [ "${'$'}LDOA_TRACE_ICE" = "1" ]; then
+              if ! command -v strace >/dev/null 2>&1; then
+                timeout 60 apt-get install -y strace >/dev/null 2>&1
               fi
-            else
-              echo "gnome-launch: strace unavailable - launching untraced"
+              # strace 6.8 source (src/strace.c test_ptrace_seize): a failed
+              # PTRACE_SEIZE self-test is error_func_msg_and_die - strace
+              # EXITS 1 BEFORE tracing anything (run 41236388769: "unexpected
+              # wait status 0" under proot, zero session output). So a dead
+              # strace WRAPPER's exit code is not a gnome-session exit.
+              # Self-test first; a blind strace must never masquerade as a
+              # session death - fall back to an untraced launch whose exit
+              # status IS the real session's, and label the branch.
+              if command -v strace >/dev/null 2>&1; then
+                timeout 30 strace -f -o /tmp/xdg/.strace-selftest -e trace=none /bin/true >/dev/null 2>&1
+                STRC=${'$'}?
+                if [ "${'$'}STRC" = 0 ]; then
+                  TRACED=traced
+                else
+                  echo "gnome-launch: strace self-test FAILED rc=${'$'}STRC (nonzero/timeout=124: ptrace blind here, run 41236388769: unexpected wait status 0) - launching UNTRACED"
+                fi
+              else
+                echo "gnome-launch: LDOA_TRACE_ICE=1 but strace unavailable (apt install failed) - launching untraced"
+              fi
             fi
             if [ "${'$'}TRACED" = traced ]; then
               WNOTE="strace WRAPPER exit - session status UNKNOWN (a self-test pass does not prove this traced run; wrapper death never proves session death)"

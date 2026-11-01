@@ -317,4 +317,25 @@ class GnomeSessionScriptSafetyTest {
         assertTrue("rootpid exact-field compare against the frozen identity",
             script.contains("[ \"\$IP\" = \"\$ROOT_PID\" ] && [ \"\$IS\" = \"\$ROOT_START\" ]"))
     }
+    /** ICE strace tracing is a debug OPT-IN (LDOA_TRACE_ICE=1), never the
+     *  default launch path: default launches are untraced so the session
+     *  exit status stays real and no apt/strace wrapper cost is paid per
+     *  launch (run 41298355366: the self-test passed 4/4 while the real
+     *  multi-process trace died 4/4, degrading every launch to the
+     *  bare-shell fallback). */
+    @Test fun iceTracingIsExplicitDebugOptIn() {
+        val gate = script.indexOf("if [ \"\$LDOA_TRACE_ICE\" = \"1\" ]; then")
+        assertTrue("LDOA_TRACE_ICE opt-in gate must exist", gate >= 0)
+        val untracedDefault = script.indexOf("TRACED=untraced")
+        assertTrue("default must be untraced, set before the gate",
+            untracedDefault >= 0 && untracedDefault < gate)
+        val install = script.indexOf("apt-get install -y strace")
+        val branch = script.indexOf("if [ \"\$TRACED\" = traced ]; then")
+        assertTrue("on-demand strace install must exist only inside the opt-in",
+            install > gate && install < branch)
+        assertEquals("exactly one strace self-test site (inside the opt-in)", 1,
+            script.split(".strace-selftest").size - 1)
+        assertTrue("opt-in unavailable path must still launch untraced",
+            script.contains("LDOA_TRACE_ICE=1 but strace unavailable"))
+    }
 }
