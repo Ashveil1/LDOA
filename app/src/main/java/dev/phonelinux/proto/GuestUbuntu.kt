@@ -1333,13 +1333,27 @@ object GuestUbuntu {
             # instrumentation arg ldoaE1=1 -> host flag file
             # .ldoa-session-diet-e1 -> LDOA_SESSION_DIET_E1=1 env).
             # Subset: Wwan + Smartcard ONLY - the two daemons the M3
-            # census observed SPAWNING via /etc/xdg/autostart while ABSENT
-            # from the candidate RequiredComponents (activation hypothesis
-            # from definitions+spawn correlation, not runtime causality
-            # proof). Mechanism: the same Hidden=true user-autostart mask
-            # as the UsbProtection precedent - stock /etc/xdg files
-            # untouched, no session-file change (the pair is not in the
-            # candidate required list). LIFETIME: this block runs at
+            # census observed SPAWNING in the session (activation
+            # hypothesis from definitions+spawn correlation, not runtime
+            # causality proof). REQUIRED-LIST TRUTH (run 41348620342
+            # census verbatim): Wwan is ABSENT from the candidate-
+            # effective managed ubuntu.session RequiredComponents, but
+            # Smartcard IS a listed RequiredComponent there - so E1
+            # removes a REQUIRED component, not merely an autostart one.
+            # The observed classic GsmManager path still honors the
+            # user-autostart shadow for that required lookup (gen3:
+            # the mask file was read and gsd-smartcard never spawned),
+            # but that is OBSERVED behavior of one build, not a contract.
+            # Product evaluation is OPEN: masking Smartcard drops
+            # smartcard/pkcs11 integration from the guest session, and
+            # dropping a required component may have unmeasured startup
+            # effects - absence from one roster is NOT promotion
+            # evidence. The candidate-effective session file is also not
+            # proven effective: a higher-priority unreadable directory
+            # could shadow it. Mechanism: the same Hidden=true
+            # user-autostart mask as the UsbProtection precedent - stock
+            # /etc/xdg files untouched, no session-file change.
+            # LIFETIME: this block runs at
             # session LAUNCH, so flag-off takes effect on the NEXT launch;
             # a mask written earlier stays active for an already-running
             # session (never retroactively removed mid-session).

@@ -29,9 +29,12 @@ class GnomeSessionScriptSafetyTest {
     /** E1 diet experiment is OPT-IN: masks gated behind
      *  LDOA_SESSION_DIET_E1 (default 0); flag-off branch rolls back ONLY
      *  manifest-verified ldoa-managed files; the subset is EXACTLY
-     *  Wwan + Smartcard (census-observed autostart spawns absent from the
-     *  effective RequiredComponents) - NO broad accessibility/power/
-     *  input/audio suppression for a green test. */
+     *  Wwan + Smartcard. REQUIRED-LIST TRUTH (run 41348620342 census):
+     *  Wwan is absent from the candidate-effective RequiredComponents;
+     *  Smartcard IS listed there - E1 removes a REQUIRED component
+     *  (product impact unevaluated; observed shadowing on the classic
+     *  path, not a contract) - NO broad accessibility/power/input/audio
+     *  suppression for a green test. */
     @Test fun e1DietIsOptInBoundedSubsetWithVerifiedRollback() {
         val gate = script.indexOf("\${LDOA_SESSION_DIET_E1:-0}")
         assertTrue("E1 gate must read LDOA_SESSION_DIET_E1 with default 0", gate >= 0)
