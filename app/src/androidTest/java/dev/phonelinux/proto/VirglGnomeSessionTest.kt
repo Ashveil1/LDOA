@@ -427,8 +427,7 @@ class VirglGnomeSessionTest {
         // The mode is reported in the verdict file; flags are restored
         // in finally with INDEPENDENT attempts. Run 41343293710 (E1 off)
         // is the stock baseline for the count/roster/trim comparison.
-        val e1Requested = InstrumentationRegistry.getInstrumentation()
-            .arguments.getString("ldoaE1") == "1"
+        val e1Requested = InstrumentationRegistry.getArguments().getString("ldoaE1") == "1"
         val e1Flag = File(ctx.filesDir, ".ldoa-session-diet-e1")
         val savedE1Flag = if (e1Flag.isFile) e1Flag.readText() else null
         var executed = false

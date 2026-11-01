@@ -79,7 +79,7 @@ object Shot {
                 ?: device.wait(androidx.test.uiautomator.Until.findObject(
                     androidx.test.uiautomator.By.textContains("isn't responding")), 200)
         } catch (e: androidx.test.uiautomator.StaleObjectException) { null } ?: return null
-        val titlePkg = try { title.packageName } catch (e: androidx.test.uiautomator.StaleObjectException) { null }
+        val titlePkg = try { title.applicationPackage } catch (e: androidx.test.uiautomator.StaleObjectException) { null }
         val titleText = try { title.text ?: "" } catch (e: androidx.test.uiautomator.StaleObjectException) { "" }
         if (titlePkg != "android" || !OBSERVED_SYSTEM_ANRS.any { titleText.contains(it) }) {
             android.util.Log.i("PHONEDIAG", "narrow-dismiss: REFUSAL - not a verified android-system" +
@@ -93,7 +93,7 @@ object Shot {
             val rn = try { node.resourceName } catch (e: androidx.test.uiautomator.StaleObjectException) { null }
             if (rn != null && rn == "android:id/parentPanel") { container = node; break }
             val parent = try { node.parent } catch (e: androidx.test.uiautomator.StaleObjectException) { null } ?: break
-            val pp = try { parent.packageName } catch (e: androidx.test.uiautomator.StaleObjectException) { null }
+            val pp = try { parent.applicationPackage } catch (e: androidx.test.uiautomator.StaleObjectException) { null }
             if (pp != "android") break
             node = parent
             hops++
