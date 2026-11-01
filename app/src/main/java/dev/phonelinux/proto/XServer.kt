@@ -249,7 +249,12 @@ object XServer {
         }
         val dir = File(tmpDir(ctx), "virgl")
         dir.mkdirs()
-        val sock = File(dir, "virgl_test.sock")
+        // GENERATION-UNIQUE socket name (nanoTime: monotonic + unique): a
+        // stop clears shared state BEFORE its signals finish, so a new
+        // start can overlap the old stop; a shared fixed path would let
+        // the old stop's trailing sock.delete() unlink the NEW server's
+        // live socket. Each generation owns its exact File end-to-end.
+        val sock = File(dir, "virgl_test_" + System.nanoTime() + ".sock")
         try { sock.delete() } catch (t: Throwable) { } // clean ONLY our own socket path
         val log = File(ctx.filesDir, "virgl-server.log")
         val proc = try {
@@ -261,8 +266,8 @@ object XServer {
             pb.start()
         } catch (t: Throwable) { Log.w(TAG, "virgl server failed to exec - SOFTWARE launch (NOT GPU)", t); return null }
         val pid = pidOf(proc) ?: -1
-        val deadline = System.currentTimeMillis() + 5_000
-        while (System.currentTimeMillis() < deadline) {
+        val deadline = System.nanoTime() + 5_000_000_000L
+        while (System.nanoTime() < deadline) {
             if (!proc.isAlive) { Log.w(TAG, "virgl server died before creating its socket (see virgl-server.log) - SOFTWARE launch (NOT GPU)"); return null }
             if (sock.exists()) {
                 synchronized(ownershipLock) {
@@ -343,16 +348,16 @@ object XServer {
             }
         }
         fun waitDead(ms: Long) {
-            val deadline = System.currentTimeMillis() + ms
-            while (srv.isAlive && System.currentTimeMillis() < deadline) Thread.sleep(100)
+            val deadline = System.nanoTime() + ms * 1_000_000L
+            while (srv.isAlive && System.nanoTime() < deadline) Thread.sleep(100)
         }
         try {
             send(ident, OsConstants.SIGSTOP)
             // send() accepted is NOT proof the parent is stopped: confirm
             // T/t with the same identity, bounded.
             var stopped = false
-            val sDeadline = System.currentTimeMillis() + 2_000
-            while (System.currentTimeMillis() < sDeadline) {
+            val sDeadline = System.nanoTime() + 2_000_000_000L
+            while (System.nanoTime() < sDeadline) {
                 if (!stillOurs(ident)) break
                 val st = stateOf(ident)
                 if (st == "T" || st == "t") { stopped = true; break }
@@ -374,9 +379,9 @@ object XServer {
                 val surviving = targets.values.filter { it.pid != ident.pid && stillOurs(it) }
                 if (surviving.isNotEmpty()) {
                     for (t in surviving) send(t, OsConstants.SIGKILL)
-                    val end2 = System.currentTimeMillis() + 2_000
+                    val end2 = System.nanoTime() + 2_000_000_000L
                     var left = surviving.filter { stillOurs(it) }
-                    while (left.isNotEmpty() && System.currentTimeMillis() < end2) { Thread.sleep(100); left = surviving.filter { stillOurs(it) } }
+                    while (left.isNotEmpty() && System.nanoTime() < end2) { Thread.sleep(100); left = surviving.filter { stillOurs(it) } }
                     if (left.isNotEmpty()) Log.w(TAG, "virgl workers still alive after KILL " + left.map { it.pid } + " (" + reason + ")")
                 }
             } else if (stillOurs(ident)) {
@@ -491,7 +496,10 @@ object XServer {
      *  no duplicate logic in tests. */
     internal fun startVirglServerForTest(ctx: Context): File? = startVirglServerOptIn(ctx)
     internal fun stopVirglServerForTest(reason: String) = stopVirglServer(reason)
-    internal fun virglSocketPathForTest(ctx: Context): File = File(tmpDir(ctx), "virgl/virgl_test.sock")
+    /** The CURRENT generation's socket (null when no server is up). Never
+     *  reconstruct a path: socket names are generation-unique, so a stale
+     *  guessed path could alias another generation's server. */
+    internal fun virglCurrentSocketForTest(): File? = synchronized(ownershipLock) { virglSocketFile }
 
     internal class BusIdentRecord(val pid: Int, val startTicks: String, val uid: Int, val nonce: String)
 

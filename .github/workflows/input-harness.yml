@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       lane:
-        description: 'full = autoenter setup + native + lifecycle + export + harness + KOE; native-only = full minus GNOME autoenter setup and harness (native + lifecycle + export + KOE, unchanged from before); koe-only = ProotKillOnExitTest fixtures alone (focused KOE qualification, no 48-test rerun); virgl-only = autoenter setup + VirglServerSmokeTest + VirglProbeTest (bounded VirGL transport proof: host vtest server smoke + guest EGL-surfaceless eglprobe renderer proof, NO GNOME launches; glxinfo cannot prove the guest driver on lorie - run 41307671476; emulator = NOT Adreno)'
+        description: 'full = autoenter setup + native + lifecycle + export + harness + KOE; native-only = full minus GNOME autoenter setup and harness (native + lifecycle + export + KOE, unchanged from before); koe-only = ProotKillOnExitTest fixtures alone (focused KOE qualification, no 48-test rerun); virgl-only = MINIMAL setup (VirglRootfsProvisionTest: ubuntu-base + mesa runtime ONLY, NO GNOME install/launch) + VirglServerSmokeTest (host server lifecycle + hostprobe host-EGL renderer) + VirglProbeTest (guest EGL-surfaceless eglprobe renderer proof, arch-selected from the rootfs ELF header; emulator = NOT Adreno)'
         default: 'full'
         type: choice
         options: [full, native-only, koe-only, virgl-only]
@@ -42,13 +42,28 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq bison
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;29.0.14206865" "platforms;android-35" >/dev/null
-      - name: Build guest eglprobe (virgl lane only)
-        if: env.LANE == 'virgl-only'
+      - name: Build guest eglprobe + host hostprobe (virgl lane only)
+        if: github.event.inputs.lane == 'virgl-only'
         run: |
+          set -e
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
-          aarch64-linux-gnu-gcc -O2 -Wall -o ci/virgl/eglprobe ci/virgl/eglprobe.c -ldl
-          sha256sum ci/virgl/eglprobe
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu binutils
+          # Guest probes (run INSIDE proot against the rootfs' glibc): the
+          # rootfs arch follows the device ABI (Distros.UBUNTU: amd64 on
+          # the x86_64 CI emulator, arm64 on phone) - build BOTH; the test
+          # selects from the provisioned rootfs' ELF header.
+          gcc -O2 -Wall -o ci/virgl/eglprobe-x86_64 ci/virgl/eglprobe.c -ldl
+          aarch64-linux-gnu-gcc -O2 -Wall -o ci/virgl/eglprobe-aarch64 ci/virgl/eglprobe.c -ldl
+          # Host probes (run OUTSIDE proot in the app's process env,
+          # Android bionic): one per app ABI (arm64-v8a + x86_64).
+          NDK_TC="$ANDROID_HOME/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          "$NDK_TC/x86_64-linux-android26-clang" -O2 -o ci/virgl/hostprobe-x86_64 ci/virgl/hostprobe.c -lEGL -lGLESv2
+          "$NDK_TC/aarch64-linux-android26-clang" -O2 -o ci/virgl/hostprobe-arm64 ci/virgl/hostprobe.c -lEGL -lGLESv2
+          for f in ci/virgl/eglprobe-x86_64 ci/virgl/eglprobe-aarch64 ci/virgl/hostprobe-x86_64 ci/virgl/hostprobe-arm64; do
+            readelf -h "$f" | grep -E "Class|Machine|Type" || { echo "READELF-FAILED $f"; exit 1; }
+            readelf -l "$f" | grep -A1 INTERP | tail -1 || true
+          done
+          sha256sum ci/virgl/eglprobe-x86_64 ci/virgl/eglprobe-aarch64 ci/virgl/hostprobe-x86_64 ci/virgl/hostprobe-arm64
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -81,8 +96,8 @@ jobs:
             # path stays a separate open qualification blocker (run
             # 40840614400: shell maps no UI cold); coverage NOT dropped.
             date -u +"SETUP auto-enter start %H:%M:%S (lane=$LANE)"
-            if [ "$LANE" = full ] || [ "$LANE" = virgl-only ]; then adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.UbuntuDesktopAutoEnterTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr0.log | tail -8; else echo "autoenter SKIPPED (lane=$LANE)" > /tmp/instr0.log; fi
-            if [ "$LANE" = full ] || [ "$LANE" = virgl-only ]; then grep -q "OK (" /tmp/instr0.log || touch /tmp/PHONELINUX_SETUP_FAILED; fi
+            if [ "$LANE" = full ]; then adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.UbuntuDesktopAutoEnterTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr0.log | tail -8; else echo "autoenter SKIPPED (lane=$LANE)" > /tmp/instr0.log; fi
+            if [ "$LANE" = full ]; then grep -q "OK (" /tmp/instr0.log || touch /tmp/PHONELINUX_SETUP_FAILED; fi
             date -u +"SETUP auto-enter end %H:%M:%S"
             if [ -f /tmp/PHONELINUX_SETUP_FAILED ]; then echo "AUTOENTER-SETUP-FAILED - arms not run"; exit 1; fi
             # EVIDENCE-ONLY harness: asserts bootstrap facts, logs/attaches
@@ -102,20 +117,29 @@ jobs:
             # Bound 300->1500 covers the real-GNOME-session fixtures in this arm (lifecycle + reentry); not a product-hang mask.
             if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then timeout -s KILL 1500 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.GnomeSessionLifecycleTest,dev.phonelinux.proto.OpenDesktopReentryTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-lifecycle.log | tail -8 || echo "LIFECYCLE-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"; else echo "lifecycle SKIPPED (lane=$LANE)" > /tmp/instr-lifecycle.log; fi
             if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then grep -q "OK (" /tmp/instr-lifecycle.log || touch /tmp/PHONELINUX_LIFECYCLE_FAILED; fi
-            # Bounded VirGL transport proof (dispatch-only lane), NO GNOME
-            # launches: stage 1 = host vtest server smoke (owned start /
-            # identity / stop); stage 2 = guest eglprobe renderer proof on
-            # EGL surfaceless (baseline arm then opt-in virpipe arm with a
-            # holding client so Stop runs with an owned forked worker).
-            # glxinfo was rejected as the probe: lorie GLX is indirect-only
-            # on the emulator (no usable DRI3 device), so it reports the X
-            # SERVER's renderer, never the guest mesa driver - and run
-            # 41307671476 lost even that output to tail -10 + a discarded
-            # Proot.Result. Full reports are pulled below and archived.
-            if [ "$LANE" = virgl-only ]; then adb -s emulator-5554 shell mkdir -p /sdcard/Android/data/dev.phonelinux.proto/files && adb -s emulator-5554 push ci/virgl/eglprobe /sdcard/Android/data/dev.phonelinux.proto/files/eglprobe || touch /tmp/PHONELINUX_VIRGL_FAILED; fi
-            if [ "$LANE" = virgl-only ]; then timeout -s KILL 900 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.VirglServerSmokeTest,dev.phonelinux.proto.VirglProbeTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl.log | tail -40 || echo "VIRGL-INSTR-TIMEOUT: outer 900s bound hit - instrument never returned"; else echo "virgl SKIPPED (lane=$LANE)" > /tmp/instr-virgl.log; fi
+            # Bounded VirGL transport proof (dispatch-only lane). MINIMAL
+            # setup: ubuntu-base + mesa runtime only - NO GNOME install or
+            # launch anywhere in this lane. Stage 0 = rootfs provision;
+            # stage 1 = host vtest server lifecycle + hostprobe host-EGL
+            # renderer + stop/start overlap; stage 2 = guest eglprobe
+            # renderer proof on EGL surfaceless (baseline arm, then opt-in
+            # virpipe arm with a holding client so Stop runs with an owned
+            # forked worker). glxinfo was rejected as the probe: on the
+            # emulator GLX has no usable direct-rendering device, so it
+            # reports the X SERVER's renderer, never the guest mesa driver
+            # - and run 41307671476 lost even that output to tail -10 + a
+            # discarded Proot.Result. Full reports are pulled and gated
+            # below: a missing/empty report FAILS the lane, never masks.
+            if [ "$LANE" = virgl-only ]; then adb -s emulator-5554 shell mkdir -p /sdcard/Android/data/dev.phonelinux.proto/files && adb -s emulator-5554 push ci/virgl/eglprobe-x86_64 ci/virgl/eglprobe-aarch64 ci/virgl/hostprobe-x86_64 ci/virgl/hostprobe-arm64 /sdcard/Android/data/dev.phonelinux.proto/files/ || { echo "VIRGL-PROBE-PUSH-FAILED - instruments NOT run"; exit 1; }; fi
+            if [ "$LANE" = virgl-only ]; then timeout -s KILL 900 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.VirglRootfsProvisionTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl-provision.log | tail -20 || echo "VIRGL-PROVISION-INSTR-TIMEOUT: outer 900s bound hit - instrument never returned"; else echo "virgl-provision SKIPPED (lane=$LANE)" > /tmp/instr-virgl-provision.log; fi
+            if [ "$LANE" = virgl-only ]; then grep -q "OK (" /tmp/instr-virgl-provision.log || touch /tmp/PHONELINUX_VIRGL_FAILED; fi
+            if [ "$LANE" = virgl-only ] && [ ! -f /tmp/PHONELINUX_VIRGL_FAILED ]; then timeout -s KILL 900 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.VirglServerSmokeTest,dev.phonelinux.proto.VirglProbeTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl.log | tail -40 || echo "VIRGL-INSTR-TIMEOUT: outer 900s bound hit - instrument never returned"; else echo "virgl SKIPPED (lane=$LANE)" > /tmp/instr-virgl.log; fi
             if [ "$LANE" = virgl-only ]; then grep -q "OK (" /tmp/instr-virgl.log || touch /tmp/PHONELINUX_VIRGL_FAILED; fi
-            if [ "$LANE" = virgl-only ]; then for f in virgl-smoke.txt virgl-probe-default.txt virgl-probe-virpipe.txt virgl-server.log; do timeout 60 adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/$f > $f || echo "VIRGL-PULL-FAILED $f rc=$?"; done; fi
+            if [ "$LANE" = virgl-only ]; then for f in virgl-provision.txt virgl-smoke.txt virgl-probe-default.txt virgl-probe-virpipe.txt virgl-server.log; do timeout 60 adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/$f > $f || echo "VIRGL-PULL-FAILED $f rc=$?"; done; fi
+            # Evidence contract: every expected report must exist NON-EMPTY
+            # (the tests write stub reports for unreached arms, so absence
+            # means capture broke, not that the arm was skipped).
+            if [ "$LANE" = virgl-only ]; then for f in virgl-provision.txt virgl-smoke.txt virgl-probe-default.txt virgl-probe-virpipe.txt; do if [ ! -s "$f" ]; then echo "VIRGL-EVIDENCE-MISSING $f"; touch /tmp/PHONELINUX_VIRGL_FAILED; fi; done; fi
             # Diagnostics export + reuse-gate health (cheap, rootfs-free,
             # gates the user-facing ZIP export). Full output printed and
             # archived - no tail-only retention for gate classes.
@@ -171,10 +195,12 @@ jobs:
             /tmp/instr-native.log
             /tmp/instr-lifecycle.log
             /tmp/instr-virgl.log
+            /tmp/instr-virgl-provision.log
             /tmp/instr-koe.log
             /tmp/instr-export.log
             /tmp/gradle-build.log
             /tmp/instr.log
+            virgl-provision.txt
             virgl-smoke.txt
             virgl-probe-default.txt
             virgl-probe-virpipe.txt

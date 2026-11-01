@@ -19,7 +19,7 @@
  *   for SECONDS after printing (lets the host observe the vtest worker
  *   forked for this client). Exit codes: 0 ok, 2 dlopen libEGL, 3
  *   eglGetPlatformDisplay, 4 eglInitialize, 5 eglBindAPI, 6 no config,
- *   7 context, 8 makeCurrent, 9 dlopen libGLESv2. */
+ *   7 context, 8 makeCurrent, 9 dlopen libGLESv2, 10 no surfaceless platform. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,6 +42,7 @@ typedef void *EGLSurface;
 #define EGL_OPENGL_ES2_BIT 0x0004
 #define EGL_OPENGL_ES_API 0x30A0
 #define EGL_CONTEXT_CLIENT_VERSION 0x3098
+#define EGL_EXTENSIONS 0x3055
 #define EGL_VENDOR 0x3053
 #define EGL_VERSION 0x3054
 
@@ -90,6 +91,17 @@ int main(int argc, char **argv) {
         return 2;
     }
 
+    /* Capability check BEFORE relying on the platform: the surfaceless
+     *  platform is a Mesa extension (EGL_MESA_platform_surfaceless), not
+     *  core EGL - verify it in the client extension string instead of
+     *  assuming. */
+    const char *clientExts = queryString(NULL, EGL_EXTENSIONS);
+    printf("EGL-CLIENT-EXTENSIONS: %s\n", clientExts ? clientExts : "(null)");
+    fflush(stdout);
+    if (!clientExts || !strstr(clientExts, "EGL_MESA_platform_surfaceless")) {
+        fprintf(stderr, "EGLPROBE-ERROR stage=10 EGL_MESA_platform_surfaceless NOT in client extensions\n");
+        return 10;
+    }
     EGLDisplay dpy = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, NULL, NULL);
     if (!dpy) return fail(3, "eglGetPlatformDisplay(SURFACELESS)", getError);
     EGLint maj = 0, min = 0;
