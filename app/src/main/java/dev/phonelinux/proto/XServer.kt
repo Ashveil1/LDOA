@@ -253,6 +253,12 @@ object XServer {
      *  walk the tree. Read-only test seam for qualified teardown waits. */
     internal fun hasSessionRootIdentity(): Boolean = synchronized(ownershipLock) { sessionRootIdent != null }
 
+    /** Test-only: the exact launch id THIS app generated for the current
+     *  launch (the script echoes it as "gnome-launch: launch id=<id>").
+     *  Null when no launch identity exists - callers must fail clearly,
+     *  never bind readiness to the latest id line found in a log window. */
+    internal fun currentLaunchIdForTest(): String? = synchronized(ownershipLock) { currentLaunchId }
+
     internal class BusIdentRecord(val pid: Int, val startTicks: String, val uid: Int, val nonce: String)
 
     /** The creation-time identity record the session script wrote right
@@ -314,12 +320,9 @@ object XServer {
      *  record or tail is latest. Null when this launch's bus line is not
      *  visible: the launch's bus is then unknown and must be preserved. */
     private fun ownLaunchBusNonce(ctx: Context, logBase: Long): String? {
-        val f = File(ctx.filesDir, "guest-gnome.log")
-        val tail = try {
-            if (!f.isFile) return null
-            val base = if (f.length() >= logBase) logBase else 0L
-            f.readText().substring(base.toInt().coerceAtMost(f.length().toInt()))
-        } catch (t: Throwable) { return null }
+        // Char window from one snapshot; rotation/truncation -> EMPTY
+        // (fail closed: no stale pre-rotation id/nonce can match).
+        val tail = logWindow(File(ctx.filesDir, "guest-gnome.log"), logBase)
         val pos = tail.lastIndexOf("gnome-launch: launch id=")
         if (pos < 0) return null
         return tail.substring(pos).lineSequence()
@@ -592,6 +595,22 @@ object XServer {
         Log.i(TAG, "X server spawned; log=$log")
     }
 
+    /** Char-offset window into a log from ONE snapshot. [logBase] is a
+     *  CHAR offset captured from a readText() snapshot at launch time.
+     *  Rotation or truncation (snapshot shorter than the base) yields
+     *  EMPTY - never the whole file, so a stale pre-rotation launch id,
+     *  bus nonce or verdict line can never match. All clamps are against
+     *  THIS snapshot's char length: a File.length() check plus a separate
+     *  readText() races truncation, and byte-vs-char unit drift appears
+     *  once the log holds multi-byte UTF-8 (mutter warnings carry curly
+     *  quotes; crash class run 41283803508). */
+    internal fun logWindow(log: File, logBase: Long): String {
+        if (!log.isFile) return ""
+        val snap = try { log.readText() } catch (t: Throwable) { return "" }
+        if (snap.length <= logBase) return ""
+        return snap.substring(logBase.toInt())
+    }
+
     /** Poll until the session script's alive/fallback marker appears in the
      *  NEW portion of the session log (past logBase), the process dies, or
      *  the budget runs out. Returns the matched marker line, or null. */
@@ -599,8 +618,8 @@ object XServer {
         val deadline = System.currentTimeMillis() + budgetMs
         while (System.currentTimeMillis() < deadline) {
             if (!p.isAlive) return null
-            if (log.isFile && log.length() > logBase) {
-                val fresh = log.readText().substring(logBase.toInt().coerceAtMost(log.length().toInt()))
+            val fresh = logWindow(log, logBase)
+            if (fresh.isNotEmpty()) {
                 val hit = fresh.lineSequence().firstOrNull { line -> markers.any { line.contains(it) } }
                 if (hit != null) return hit.trim()
             }
@@ -618,8 +637,8 @@ object XServer {
         val deadline = System.currentTimeMillis() + budgetMs
         while (System.currentTimeMillis() < deadline) {
             if (!p.isAlive) return null
-            if (log.isFile && log.length() > logBase) {
-                val fresh = log.readText().substring(logBase.toInt().coerceAtMost(log.length().toInt()))
+            val fresh = logWindow(log, logBase)
+            if (fresh.isNotEmpty()) {
                 // The launcher appends " nonce=<per-launch>" to the bus line
                 // for identity binding (be11508); the registration marker's
                 // bus= never carries it. Compare the ADDRESS only, or every
@@ -754,7 +773,13 @@ object XServer {
                                 // after THIS launch count (the log is
                                 // append-only across retries).
                                 val gnomeLog = File(ctx.filesDir, "guest-gnome.log")
-                                val logBase = if (gnomeLog.isFile) gnomeLog.length() else 0L
+                                // CHAR base from ONE snapshot (never File.length()
+                                // BYTES): every consumer slices readText() snapshots
+                                // in char units (logWindow). A byte base mis-slices
+                                // or crashes once the log holds multi-byte UTF-8
+                                // (mutter warnings carry curly quotes; crash class
+                                // run 41283803508).
+                                val logBase = if (gnomeLog.isFile) gnomeLog.readText().length.toLong() else 0L
                                 val wasAlive = gnomeSessionActive(distro)
                                 val p = launchOrReuseGnomeSession(ctx, distro, rootfs)
                                 val reused = isReusedSession(distro, p, wasAlive)
@@ -853,8 +878,9 @@ object XServer {
                                         // down by identity.
                                         retainFailedSessionOwnership(ctx, p, gateBase)
                                     } else {
-                                        val tail = if (gnomeLog.isFile && gnomeLog.length() > gateBase)
-                                            gnomeLog.readText().substring(gateBase.toInt().coerceAtMost((gnomeLog.length()).toInt())).takeLast(1500)
+                                        val gateSnap = if (gnomeLog.isFile) gnomeLog.readText() else ""
+                                        val tail = if (gateSnap.length > gateBase)
+                                            gateSnap.substring(gateBase.toInt()).takeLast(1500)
                                             else "(guest-gnome.log has no new output)"
                                         when (classifyGateNull(p, gnomeLog, gateBase)) {
                                             GateNullClass.STILL_STARTING -> {
@@ -1143,8 +1169,7 @@ object XServer {
     internal enum class GateNullClass { DEFINITIVE_EXITED, DEFINITIVE_SCRIPT, STILL_STARTING }
     internal fun classifyGateNull(p: Process, log: File, logBase: Long): GateNullClass {
         if (!p.isAlive) return GateNullClass.DEFINITIVE_EXITED
-        val fresh = if (log.isFile && log.length() > logBase)
-            log.readText().substring(logBase.toInt().coerceAtMost(log.length().toInt())) else ""
+        val fresh = logWindow(log, logBase)
         if (fresh.contains("gnome-launch: fallback shell missing after 90s")) return GateNullClass.DEFINITIVE_SCRIPT
         return GateNullClass.STILL_STARTING
     }
