@@ -119,6 +119,11 @@ typedef void (*PFN_glEnableVertexAttribArray)(unsigned int);
 typedef void (*PFN_glDrawArrays)(EGLenum, int, int);
 typedef void (*PFN_glReadPixels)(int, int, int, int, EGLenum, EGLenum, void *);
 typedef void (*PFN_glFinish)(void);
+typedef void (*PFN_glDeleteFramebuffers)(int, const unsigned int *);
+typedef void (*PFN_glDeleteRenderbuffers)(int, const unsigned int *);
+typedef void (*PFN_glDeleteBuffers)(int, const unsigned int *);
+typedef void (*PFN_glDeleteProgram)(unsigned int);
+typedef void (*PFN_glDeleteShader)(unsigned int);
 typedef int (*PFN_glGetAttribLocation)(unsigned int, const char *);
 typedef EGLenum (*PFN_glGetError)(void);
 
@@ -292,6 +297,11 @@ typedef struct {
     PFN_glReadPixels ReadPixels;
     PFN_glFinish Finish;
     PFN_glGetError GetError;
+    PFN_glDeleteFramebuffers DeleteFramebuffers;
+    PFN_glDeleteRenderbuffers DeleteRenderbuffers;
+    PFN_glDeleteBuffers DeleteBuffers;
+    PFN_glDeleteProgram DeleteProgram;
+    PFN_glDeleteShader DeleteShader;
 } GlFns;
 
 static void *glsym(void *gl, const char *name) {
@@ -331,6 +341,11 @@ static int load_gl_fns(void *gl, GlFns *G) {
     G->ReadPixels = (PFN_glReadPixels) glsym(gl, "glReadPixels");
     G->Finish = (PFN_glFinish) glsym(gl, "glFinish");
     G->GetError = (PFN_glGetError) glsym(gl, "glGetError");
+    G->DeleteFramebuffers = (PFN_glDeleteFramebuffers) glsym(gl, "glDeleteFramebuffers");
+    G->DeleteRenderbuffers = (PFN_glDeleteRenderbuffers) glsym(gl, "glDeleteRenderbuffers");
+    G->DeleteBuffers = (PFN_glDeleteBuffers) glsym(gl, "glDeleteBuffers");
+    G->DeleteProgram = (PFN_glDeleteProgram) glsym(gl, "glDeleteProgram");
+    G->DeleteShader = (PFN_glDeleteShader) glsym(gl, "glDeleteShader");
     return !G->GenFramebuffers || !G->BindFramebuffer || !G->GenRenderbuffers ||
            !G->BindRenderbuffer || !G->RenderbufferStorage || !G->FramebufferRenderbuffer ||
            !G->CheckFramebufferStatus || !G->Viewport || !G->ClearColor || !G->Clear ||
@@ -339,7 +354,8 @@ static int load_gl_fns(void *gl, GlFns *G) {
            !G->GetProgramiv || !G->GetProgramInfoLog || !G->UseProgram || !G->GenBuffers ||
            !G->BindBuffer || !G->BufferData || !G->VertexAttribPointer ||
            !G->EnableVertexAttribArray || !G->DrawArrays || !G->ReadPixels || !G->Finish ||
-           !G->GetError;
+           !G->GetError || !G->DeleteFramebuffers || !G->DeleteRenderbuffers ||
+           !G->DeleteBuffers || !G->DeleteProgram || !G->DeleteShader;
 }
 
 static const char *VS_SRC =
@@ -394,15 +410,18 @@ static unsigned int build_program(GlFns *G) {
     unsigned int prog;
     G->ShaderSource(vs, 1, &VS_SRC, NULL); G->CompileShader(vs);
     G->GetShaderiv(vs, GL_COMPILE_STATUS, &ok);
-    if (!ok) { G->GetShaderInfoLog(vs, sizeof(log), &len, log); fprintf(stderr, "EGLPROBE-ERROR vs compile: %s\n", log); return 0; }
+    if (!ok) { G->GetShaderInfoLog(vs, sizeof(log), &len, log); fprintf(stderr, "EGLPROBE-ERROR vs compile: %s\n", log); G->DeleteShader(vs); G->DeleteShader(fs); return 0; }
     G->ShaderSource(fs, 1, &FS_SRC, NULL); G->CompileShader(fs);
     G->GetShaderiv(fs, GL_COMPILE_STATUS, &ok);
-    if (!ok) { G->GetShaderInfoLog(fs, sizeof(log), &len, log); fprintf(stderr, "EGLPROBE-ERROR fs compile: %s\n", log); return 0; }
+    if (!ok) { G->GetShaderInfoLog(fs, sizeof(log), &len, log); fprintf(stderr, "EGLPROBE-ERROR fs compile: %s\n", log); G->DeleteShader(vs); G->DeleteShader(fs); return 0; }
     prog = G->CreateProgram();
     G->AttachShader(prog, vs); G->AttachShader(prog, fs);
     G->LinkProgram(prog);
     G->GetProgramiv(prog, GL_LINK_STATUS, &ok);
-    if (!ok) { G->GetProgramInfoLog(prog, sizeof(log), &len, log); fprintf(stderr, "EGLPROBE-ERROR link: %s\n", log); return 0; }
+    if (!ok) { G->GetProgramInfoLog(prog, sizeof(log), &len, log); fprintf(stderr, "EGLPROBE-ERROR link: %s\n", log); G->DeleteProgram(prog); G->DeleteShader(vs); G->DeleteShader(fs); return 0; }
+    /* Linked into prog: flag the shaders for deletion now; they are
+     * freed when prog is deleted by the explicit teardown in main. */
+    G->DeleteShader(vs); G->DeleteShader(fs);
     return prog;
 }
 
@@ -469,14 +488,19 @@ int main(int argc, char **argv) {
     EGLContext ctx = createContext(dpy, cfg, NULL, ctxAttrs);
     if (!ctx) return fail(7, "eglCreateContext", getError);
     STAGE("context-ok");
-    if (!makeCurrent(dpy, NULL, NULL, ctx)) return fail(8, "eglMakeCurrent(surfaceless)", getError);
+    /* Teardown state hoisted and initialized BEFORE any goto below:
+     * every exit after context creation routes through teardown:. */
+    int rc = 0, glFnsLoaded = 0;
+    unsigned int fbo = 0, rbo = 0, prog = 0, vbo = 0;
+    GlFns G;
+    if (!makeCurrent(dpy, NULL, NULL, ctx)) { rc = fail(8, "eglMakeCurrent(surfaceless)", getError); goto teardown; }
     STAGE("current-ok");
 
     void *gl = dlopen("libGLESv2.so.2", RTLD_NOW);
     if (!gl) gl = dlopen("libGLESv2.so", RTLD_NOW);
-    if (!gl) { fprintf(stderr, "EGLPROBE-ERROR stage=9 dlopen(libGLESv2): %s\n", dlerror()); return 9; }
+    if (!gl) { fprintf(stderr, "EGLPROBE-ERROR stage=9 dlopen(libGLESv2): %s\n", dlerror()); rc = 9; goto teardown; }
     PFN_glGetString glGetString = (PFN_glGetString) dlsym(gl, "glGetString");
-    if (!glGetString) { fprintf(stderr, "EGLPROBE-ERROR stage=9 missing glGetString\n"); return 9; }
+    if (!glGetString) { fprintf(stderr, "EGLPROBE-ERROR stage=9 missing glGetString\n"); rc = 9; goto teardown; }
     STAGE("libGLES-ready");
     const unsigned char *vendor = glGetString(GL_VENDOR);
     const unsigned char *renderer = glGetString(GL_RENDERER);
@@ -503,18 +527,17 @@ int main(int argc, char **argv) {
          * (or, with --bench-latency, per-frame round-trip latency) for
          * one fixed workload - NOT display-path FPS, NOT GNOME
          * smoothness, NOT a user-visible performance verdict. */
-        GlFns G;
-        unsigned int fbo = 0, rbo = 0, prog = 0, vbo = 0;
         float *vtx = NULL;
         unsigned char *px = NULL;
         int vtxCount = 0, nchecks = 0, fails = 0, frame;
         struct timespec t0, t1;
-        if (load_gl_fns(gl, &G)) { fprintf(stderr, "EGLPROBE-ERROR stage=13 GL function load\n"); return 13; }
+        if (load_gl_fns(gl, &G)) { fprintf(stderr, "EGLPROBE-ERROR stage=13 GL function load\n"); rc = 13; goto teardown; }
+        glFnsLoaded = 1;
         vtx = malloc(sizeof(float) * 6 * 5 * 128);
         px = malloc((size_t) SCN_W * SCN_H * 4);
-        if (!vtx || !px) { fprintf(stderr, "EGLPROBE-ERROR stage=13 alloc\n"); return 13; }
+        if (!vtx || !px) { fprintf(stderr, "EGLPROBE-ERROR stage=13 alloc\n"); rc = 13; goto teardown; }
         vtxCount = build_scene_vbo(vtx);
-        if (vtxCount <= 0) { fprintf(stderr, "EGLPROBE-ERROR stage=13 scene build\n"); return 13; }
+        if (vtxCount <= 0) { fprintf(stderr, "EGLPROBE-ERROR stage=13 scene build\n"); rc = 13; goto teardown; }
 
         G.GenFramebuffers(1, &fbo);
         G.BindFramebuffer(GL_FRAMEBUFFER, fbo);
@@ -524,10 +547,10 @@ int main(int argc, char **argv) {
         G.FramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rbo);
         if (G.CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
             fprintf(stderr, "EGLPROBE-ERROR stage=13 FBO incomplete (0x%x)\n", G.GetError());
-            return 13;
+            rc = 13; goto teardown;
         }
         prog = build_program(&G);
-        if (!prog) return 13;
+        if (!prog) { rc = 13; goto teardown; }
         G.UseProgram(prog);
         G.GenBuffers(1, &vbo);
         G.BindBuffer(GL_ARRAY_BUFFER, vbo);
@@ -539,10 +562,10 @@ int main(int argc, char **argv) {
             int locPos = -1, locColor = -1;
             PFN_glGetAttribLocation getLoc =
                 (PFN_glGetAttribLocation) dlsym(gl, "glGetAttribLocation");
-            if (!getLoc) { fprintf(stderr, "EGLPROBE-ERROR stage=13 no glGetAttribLocation\n"); return 13; }
+            if (!getLoc) { fprintf(stderr, "EGLPROBE-ERROR stage=13 no glGetAttribLocation\n"); rc = 13; goto teardown; }
             locPos = getLoc(prog, "aPos");
             locColor = getLoc(prog, "aColor");
-            if (locPos < 0 || locColor < 0) { fprintf(stderr, "EGLPROBE-ERROR stage=13 attrib lookup\n"); return 13; }
+            if (locPos < 0 || locColor < 0) { fprintf(stderr, "EGLPROBE-ERROR stage=13 attrib lookup\n"); rc = 13; goto teardown; }
             G.VertexAttribPointer((unsigned int) locPos, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (const void *) 0);
             G.EnableVertexAttribArray((unsigned int) locPos);
             G.VertexAttribPointer((unsigned int) locColor, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (const void *) (2 * sizeof(float)));
@@ -555,7 +578,7 @@ int main(int argc, char **argv) {
             draw_scene(&G, vtxCount);
             G.Finish(); /* GPU completion BEFORE readback and timing */
             G.ReadPixels(0, 0, SCN_W, SCN_H, GL_RGBA, GL_UNSIGNED_BYTE, px);
-            if (G.GetError() != 0) { fprintf(stderr, "EGLPROBE-ERROR stage=13 readPixels\n"); return 13; }
+            if (G.GetError() != 0) { fprintf(stderr, "EGLPROBE-ERROR stage=13 readPixels\n"); rc = 13; goto teardown; }
             /* readPixels is bottom-up; flip to top-down for PPM/checks */
             for (y = 0; y < SCN_H / 2; y++) {
                 unsigned char *a = px + (long) y * SCN_W * 4;
@@ -570,11 +593,11 @@ int main(int argc, char **argv) {
             fflush(stdout);
             if (write_ppm(visualPath, px, SCN_W, SCN_H) != 0) {
                 fprintf(stderr, "EGLPROBE-ERROR stage=12 PPM write failed\n");
-                return 12; /* evidence capture break - distinct from a render failure */
+                rc = 12; goto teardown; /* evidence capture break - distinct from a render failure */
             }
             printf("EGLPROBE-VISUAL-PPM: written\n");
             fflush(stdout);
-            if (fails) return 11;
+            if (fails) { rc = 11; goto teardown; }
         }
 
         if (benchFrames > 0) {
@@ -603,10 +626,23 @@ int main(int argc, char **argv) {
 
     if (holdSecs > 0) { STAGE("hold-entered"); sleep((unsigned int) holdSecs); STAGE("hold-exited"); }
 
+teardown:
+    /* Explicit GL object cleanup while the context is still current, on
+     * EVERY exit path (success and stages 8/9/11/12/13 alike): previously
+     * mesa finalized these objects during eglTerminate, AFTER the context
+     * destroy had already been sent - the concrete lifetime/error-path
+     * defect fixed here (any causal link to the host teardown errors
+     * remains a hypothesis until isolated by a run). */
+    if (glFnsLoaded) {
+        G.BindFramebuffer(GL_FRAMEBUFFER, 0);
+        if (vbo) G.DeleteBuffers(1, &vbo);
+        if (prog) G.DeleteProgram(prog);
+        if (fbo) G.DeleteFramebuffers(1, &fbo);
+        if (rbo) G.DeleteRenderbuffers(1, &rbo);
+    }
     makeCurrent(dpy, NULL, NULL, NULL);
     destroyContext(dpy, ctx);
     terminate(dpy);
-    printf("EGLPROBE-OK\n");
-    fflush(stdout);
-    return 0;
+    if (rc == 0) { printf("EGLPROBE-OK\n"); fflush(stdout); }
+    return rc;
 }
