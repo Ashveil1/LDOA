@@ -99,8 +99,13 @@ object SessionReset {
             if (logFile.isFile) {
                 // A rotation (>4MB) restarts the file: then ALL of it is
                 // this launch. Otherwise only bytes past the base count.
-                val base = if (logFile.length() >= logBase) logBase else 0L
-                val tail = logFile.readText().substring(base.toInt().coerceAtMost(logFile.length().toInt()))
+                // Snapshot the content ONCE: the launcher truncates this
+                // log at spawn, so a length() check followed by a separate
+                // readText() races the truncation and can substring past
+                // the end (run 41283803508: length=123692 index=123703).
+                val content = logFile.readText()
+                val base = if (content.length >= logBase) logBase.toInt() else 0
+                val tail = content.substring(base.coerceAtMost(content.length))
                 if (tail.contains("gnome-launch: launch id=")) {
                     val m = tail.lineSequence().lastOrNull {
                         it.contains("gnome-launch: gnome-session alive") ||
@@ -121,8 +126,9 @@ object SessionReset {
         // nonce mismatch is NOT captured (bus preserved, never killed).
         val expectedNonce = run {
             val tail = if (logFile.isFile) {
-                val base = if (logFile.length() >= logBase) logBase else 0L
-                logFile.readText().substring(base.toInt().coerceAtMost(logFile.length().toInt()))
+                val content = logFile.readText()
+                val base = if (content.length >= logBase) logBase.toInt() else 0
+                content.substring(base.coerceAtMost(content.length))
             } else ""
             val launchPos = tail.lastIndexOf("gnome-launch: launch id=")
             if (launchPos < 0) "" else tail.substring(launchPos).lineSequence()
