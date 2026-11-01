@@ -1394,6 +1394,12 @@ object GuestUbuntu {
                 fi
                 if timeout 4 gdbus call --session --timeout 2 --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
                   echo "gnome-launch: late readiness - shell registered on the session bus at +${'$'}(( ${'$'}(date +%s) - WD_START ))s (after the initial budget: startup was slow, not failed)"
+                  # Machine gate marker (same shape the app gate matches; late=1
+                  # sits BEFORE bus= so the address comparison stays exact).
+                  # Without it a shell slower than the first-phase budget never
+                  # satisfies the gate even after registration (POCO 2026-11-01:
+                  # shell registered at +143s, gate saw nothing).
+                  echo "gnome-launch: shell registered late=1 launch=${'$'}LAUNCH_ID bus=${'$'}DBUS_SESSION_BUS_ADDRESS"
                   exit 0
                 fi
               done

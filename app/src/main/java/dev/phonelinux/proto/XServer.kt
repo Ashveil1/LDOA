@@ -556,9 +556,19 @@ object XServer {
             if (!p.isAlive) return null
             if (log.isFile && log.length() > logBase) {
                 val fresh = log.readText().substring(logBase.toInt().coerceAtMost(log.length().toInt()))
+                // The launcher appends " nonce=<per-launch>" to the bus line
+                // for identity binding (be11508); the registration marker's
+                // bus= never carries it. Compare the ADDRESS only, or every
+                // fresh launch mismatches and gates out with GNOME running
+                // (POCO phone 2026-11-01, bf6798d: marker present at ~+56s,
+                // gate still timed out at 210s, desktop never shown).
                 val bus = fresh.lineSequence().firstOrNull { it.contains("gnome-launch: session bus ") }
                     ?.substringAfter("gnome-launch: session bus ")?.trim()
-                if (bus != null) { gnomeSessionBus = bus; gateLog("session bus captured") }
+                    ?.substringBefore(" nonce=")
+                // Log only on change: re-logging every 2s poll flooded the
+                // 128-entry gate ring and evicted real events (phone export).
+                if (bus != null && bus != gnomeSessionBus) gateLog("session bus captured")
+                if (bus != null) gnomeSessionBus = bus
                 // Reused session: no fresh bus line - fall back to the
                 // tracked address of THIS process's own launch. A marker
                 // naming any other bus (stale or foreign session) still

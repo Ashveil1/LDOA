@@ -76,6 +76,44 @@ class GnomeSessionLifecycleTest {
         assertTrue(hit!!.contains("shell registered"))
     }
 
+    /** Regression 2026-11-01 (POCO phone, bf6798d): the launcher's real
+     *  session-bus line carries a per-launch " nonce=" suffix for identity
+     *  binding; the registration marker's bus= never carries it. The gate
+     *  must compare the bus ADDRESS only - before the fix, every fresh
+     *  launch timed out at 210s with GNOME running and the desktop never
+     *  opened (marker present at ~+56s). All older fixtures omitted the
+     *  nonce, which is exactly why CI stayed green while the phone broke. */
+    @Test fun gateSucceedsWhenBusLineCarriesIdentityNonce() {
+        val log = File.createTempFile("gate", ".log", ctx.cacheDir)
+        log.writeText(
+            // Verbatim lines from the POCO bf6798d guest-gnome.log session 2.
+            "gnome-launch: session bus unix:path=/tmp/dbus-NkfCSGq72B,guid=1a346113ca85b8b9214f9b636ae6b252 nonce=d8d4a79d-38a7-497a-8888-1bf6cc47c97e\n" +
+            "gnome-launch: shell registered launch=1793503809 bus=unix:path=/tmp/dbus-NkfCSGq72B,guid=1a346113ca85b8b9214f9b636ae6b252\n")
+        val p = sleeper()
+        val hit = XServer.awaitShellRegistered(p, log, 0L, 10_000)
+        assertNotNull("gate must match the marker despite the nonce on the bus line", hit)
+        assertTrue(hit!!.contains("shell registered"))
+    }
+
+    /** Late registration (shell slower than the script's first-phase
+     *  budget, phone 2026-11-01: +143s) emits the human late-readiness line
+     *  AND the standard machine marker tagged late=1 BEFORE bus=, so the
+     *  gate and the late-readiness watch still recognize registration. */
+    @Test fun gateSucceedsOnLateRegistrationMachineMarker() {
+        val log = File.createTempFile("gate", ".log", ctx.cacheDir)
+        log.writeText(
+            // Verbatim bus + human late lines from the POCO bf6798d session 1
+            // (shell registered at +143s); the third line is the machine marker
+            // the fixed late branch emits for that same launch.
+            "gnome-launch: session bus unix:path=/tmp/dbus-I9nC7FLKCf,guid=bb137cb709298dc3ab632e796ae6ab8d nonce=0cd09ffe-3c85-422d-9ead-6b09df64b699\n" +
+            "gnome-launch: late readiness - shell registered on the session bus at +143s (after the initial budget: startup was slow, not failed)\n" +
+            "gnome-launch: shell registered late=1 launch=1793502078 bus=unix:path=/tmp/dbus-I9nC7FLKCf,guid=bb137cb709298dc3ab632e796ae6ab8d\n")
+        val p = sleeper()
+        val hit = XServer.awaitShellRegistered(p, log, 0L, 10_000)
+        assertNotNull("the script's late-branch machine marker must satisfy the gate", hit)
+        assertTrue(hit!!.contains("late=1"))
+    }
+
     /** The fallback-phase marker is DISTINCT and satisfies the gate as a
      *  degraded success the caller identifies by marker text: a bare-shell
      *  desktop is never indistinguishable from a full GNOME session. */
