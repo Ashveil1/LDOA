@@ -162,9 +162,11 @@ class VirglGnomeSessionTest {
             val anc = ancestryContains(pid, gsPid)
             if (anc == true) { owned.add(VirglTestCommon.ProcObs(pid, rest[0], rest[19], uid)); continue }
             if (anc == null) { ancUnknown++; continue }
-            // tck <= 0: freshness unverifiable - counts as stale, and the
-            // recorded clk_tck value in the report shows why.
-            val fresh = tck > 0 && startTicks / tck.toDouble() >= minStartSec - 1.0
+            // tck <= 0 or minStartSec < 0: freshness unverifiable -
+            // counts as stale, and the recorded clk_tck/uptime values
+            // in the report show why.
+            val fresh = tck > 0 && minStartSec >= 0.0 &&
+                startTicks / tck.toDouble() >= minStartSec - 1.0
             if (fresh) timeOnly.add(VirglTestCommon.ProcObs(pid, rest[0], rest[19], uid)) else stale++
         }
         return ShellScan(owned, timeOnly, ancUnknown, stale, unreadable, foreign, cmdUnreadable)
@@ -207,10 +209,20 @@ class VirglGnomeSessionTest {
             // File.length() bytes) + the launch-moment uptime for the
             // freshness candidate check (runtime clk_tck, no USER_HZ).
             val base = (if (logFile.isFile) logFile.readText() else "").length.toLong()
-            val launchUptimeSec = File("/proc/uptime").readText().split(' ')[0].toDouble()
+            // Boot-relative uptime from the Android runtime - NEVER
+            // /proc/uptime (EACCES for apps at targetSdk 34; that read
+            // aborted this test's first CI execution before launch).
+            // Units: SECONDS since boot, the same clock domain as the
+            // /proc stat starttime the freshness check divides by the
+            // runtime clk_tck. -1.0 = unavailable: freshness becomes
+            // unverifiable and candidates degrade to stale (recorded).
+            val launchUptimeSec = try {
+                android.os.SystemClock.elapsedRealtime() / 1000.0
+            } catch (t: Throwable) { -1.0 }
             val tck = clkTck()
-            out.append("clk_tck=").append(tck).append(" (runtime sysconf) launchUptimeSec=")
-                .append(launchUptimeSec.toLong()).append('\n')
+            out.append("clk_tck=").append(tck).append(" ticks/sec (runtime sysconf); uptimeSec=")
+                .append(launchUptimeSec.toLong())
+                .append(" (SystemClock.elapsedRealtime, seconds since boot; -1 = unavailable)\n")
             XServer.launchOrReuseGnomeSession(ctx, d, rootfs)
             val launchId = XServer.currentLaunchIdForTest()
             assertNotNull("current launch identity unavailable - cannot bind evidence to THIS launch " +
