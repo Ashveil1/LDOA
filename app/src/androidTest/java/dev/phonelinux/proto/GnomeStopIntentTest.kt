@@ -29,22 +29,28 @@ import java.io.File
  * 10s); both orders are safe, so the test asserts both honor lines and
  * the retained file, not the order.
  *
- * T2 keeps crash recovery intact: with NO owned stop, an unexpected
- * session death (session + shell killed by verified identity, script
- * left alive) must still reach the fallback decision - and a planted
- * STALE intent (old id/key/foreign root) must be ignored and never
- * deleted by a non-owner. The P2 race probe then kills the tracer
- * (identity-verified) and lands Stop right after the fallback decision
- * line: with the root dead the teardown skips the tree walk fail-closed
- * (nothing else can kill the script first), the intent is still written
- * from the in-memory launch identity, and the surviving script is
+ * T2a proves ACTUAL unexpected-death recovery end to end: with NO
+ * owned stop and a planted STALE intent (old id/key/foreign root -
+ * ignored, never deleted by a non-owner), an unexpected session death
+ * (session + owned shells killed by verified identity, script left
+ * alive) must not only decide but EXEC the fallback and REGISTER the
+ * new shell on the bus. Owned cleanup then removes it (live root:
+ * identity-verified teardown). Fail-closed survivor semantics are
+ * preserved: all owned shells are dead before the fallback, nothing is
+ * forced past the survivor check.
+ *
+ * T2b is the P2 race probe: it kills the tracer (identity-verified)
+ * and lands Stop right after the fallback decision line: with the root
+ * dead the teardown skips the tree walk fail-closed (nothing else can
+ * kill the script first), the intent is still written from the
+ * in-memory launch identity, and the surviving script is
  * deterministically inside the survivor-window/2s pre-exec span (the
  * survivor window is ~0s once all owned shells are dead). One of the
  * two post-decision gates must honor the intent and NO second
- * gnome-shell may exec. Coverage label: the probe exercises the
- * fallback-gate/pre-exec-gate span; the decision checkpoint is
- * exercised by T1; a live-root Stop needs no gate (the identity-
- * verified teardown kills the whole tree, script included).
+ * gnome-shell may exec. Coverage label: the decision checkpoint is
+ * exercised by T1; the post-decision gates by T2b; actual recovery
+ * exec/registration by T2a; a live-root Stop needs no gate (the
+ * identity-verified teardown kills the whole tree, script included).
  */
 @RunWith(AndroidJUnit4::class)
 class GnomeStopIntentTest {
@@ -112,8 +118,30 @@ class GnomeStopIntentTest {
         return out
     }
 
+    /** Owned GNOME components from ANY prior session (comm is truncated
+     *  to 15 chars, so match exact comm for gnome-shell and cmdline for
+     *  the session launcher/script names). Baseline hygiene: three real
+     *  sessions in one run must not contaminate each other (leftovers
+     *  also inflate the next app's phantom roster). */
+    private fun ourGnomeComponentPids(): List<Int> {
+        val out = ArrayList<Int>()
+        for (f in File("/proc").listFiles { x -> x.name.matches(Regex("[0-9]+")) } ?: return out) {
+            val uid = try { android.system.Os.stat(f.absolutePath).st_uid } catch (t: Throwable) { continue }
+            if (uid != android.os.Process.myUid()) continue
+            val comm = try { File(f, "comm").readText().trim() } catch (t: Throwable) { "" }
+            val cmd = try { File(f, "cmdline").readText() } catch (t: Throwable) { "" }
+            if (comm == "gnome-shell" || cmd.contains("gnome-session-binary") || cmd.contains("gnome-session.sh")) {
+                out.add(f.name.toInt())
+            }
+        }
+        return out
+    }
+
     private fun freshLaunch(): Pair<Process, Long> {
         SessionReset.resetForFreshLaunch(ctx, d) { Log.i(TAG, it) }
+        val leftovers = ourGnomeComponentPids()
+        assertTrue("baseline contaminated: owned GNOME components from a prior session survive reset: " + leftovers,
+            leftovers.isEmpty())
         XServer.start(ctx)
         val base = if (logFile.isFile) logFile.length() else 0L
         val proc = XServer.launchOrReuseGnomeSession(ctx, d, rootfs)
@@ -198,7 +226,43 @@ class GnomeStopIntentTest {
         }
     }
 
-    @Test fun unexpectedDeathStillRecoversAndIgnoresStaleIntent() {
+    @Test fun unexpectedDeathRecoversToRegisteredFallback() {
+        val (proc, base) = freshLaunch()
+        val aliveLine = awaitLine(base, "gnome-launch: gnome-session alive pid=", 10_000)!!
+        val gsPid = aliveLine.substringAfter("gnome-session alive pid=").takeWhile { it.isDigit() }.toInt()
+        val gsTicks = startTicksOf(gsPid)!!
+
+        // Stale intent from an old world: old id, wrong key, foreign root.
+        val stale = File(rootfs, "tmp/xdg/ldoa-stop-intent.9999999999-deadbeef")
+        stale.writeText("stopkey=deadbeefcafe rootpid=1 rootstart=1 rootuid=0\n")
+
+        // Unexpected death: session + owned shells gone, script alive,
+        // NO owned stop. The fallback must EXEC and REGISTER, ignoring
+        // the stale intent.
+        assertTrue(killVerified(gsPid, gsTicks, android.system.OsConstants.SIGKILL))
+        for (sp in ourGnomeShellPids()) {
+            val t = startTicksOf(sp); if (t != null) killVerified(sp, t, android.system.OsConstants.SIGKILL)
+        }
+        val fellBack = awaitLine(base, "falling back to bare gnome-shell", 120_000)
+        assertTrue("crash recovery must reach the fallback decision without an owned stop: " +
+            window(base).takeLast(400), fellBack != null)
+        assertTrue("stale intent must survive (never deleted by a non-owner)", stale.isFile)
+        val registered = awaitLine(base, "fallback shell registered", 150_000)
+        assertTrue("ACTUAL recovery: the fallback shell must exec and register on the bus: " +
+            window(base).takeLast(400), registered != null)
+        assertTrue("the registered fallback shell must be an owned process",
+            ourGnomeShellPids().isNotEmpty())
+
+        // Owned cleanup (live root: identity-verified teardown).
+        XServer.stopDesktopMode(ctx)
+        Thread.sleep(15_000)
+        assertTrue("owned cleanup must remove the recovered shell",
+            ourGnomeShellPids().isEmpty())
+        // Test-side hygiene only: the product never deletes intent files.
+        stale.delete()
+    }
+
+    @Test fun stopDuringFallbackHitsPostDecisionGate() {
         val (proc, base) = freshLaunch()
         val aliveLine = awaitLine(base, "gnome-launch: gnome-session alive pid=", 10_000)!!
         val gsPid = aliveLine.substringAfter("gnome-session alive pid=").takeWhile { it.isDigit() }.toInt()

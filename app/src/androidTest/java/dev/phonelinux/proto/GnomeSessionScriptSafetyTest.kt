@@ -298,6 +298,10 @@ class GnomeSessionScriptSafetyTest {
             script.contains("rm -f \"/tmp/xdg/ldoa-stop-intent"))
         assertTrue("retained-intent rationale must be documented in the script",
             script.contains("NO reader ever deletes the intent file"))
+        assertFalse("the observer join must be bounded - a bare wait could sit up to the 600s observer cap",
+            script.contains("wait \$WATCHDOG_PID"))
+        assertTrue("bounded observer join must exist",
+            script.contains("Bounded observer join"))
     }
 
     /** The control nonce is compared, never logged, and the check binds
@@ -310,6 +314,6 @@ class GnomeSessionScriptSafetyTest {
         assertTrue("stopkey exact-field extract",
             script.contains("stopkey=[A-Za-z0-9._-]+"))
         assertTrue("rootpid exact-field compare against the frozen identity",
-            script.contains("[ "\$IP" = "\$ROOT_PID" ] && [ "\$IS" = "\$ROOT_START" ]"))
+            script.contains("[ \"\$IP\" = \"\$ROOT_PID\" ] && [ \"\$IS\" = \"\$ROOT_START\" ]"))
     }
 }

@@ -1404,7 +1404,20 @@ object GuestUbuntu {
               echo "gnome-launch: owned stop intent honored (${'$'}1) launch=${'$'}LAUNCH_ID (planned stop of THIS launch: stopkey + frozen root identity verified) - NO fallback, exiting; unexpected-death recovery is unchanged when no intent matches"
               kill ${'$'}POLL_A_PID 2>/dev/null
               [ -n "${'$'}{FP_POLL_PID:-}" ] && kill ${'$'}FP_POLL_PID 2>/dev/null
-              wait ${'$'}WATCHDOG_PID 2>/dev/null
+              # Bounded observer join: a bare wait could sit up to the
+              # 600s observer cap. 30s is ample - on every honor path the
+              # session is already dead, so the observer's next 10s poll
+              # sees it and honors the same retained intent. A zombie
+              # child reads alive to kill -0, so check the state field.
+              HW=0
+              while [ ${'$'}HW -lt 30 ]; do
+                # Robust parse (comm is NOT a fixed name: prctl can set
+                # any value, with spaces or parens): strip through the
+                # LAST ')' - always comm's closer - then field 1 = state.
+                HST=${'$'}(sed 's/^.*) //' "/proc/${'$'}WATCHDOG_PID/stat" 2>/dev/null | awk '{print ${'$'}1}')
+                [ -z "${'$'}HST" ] || [ "${'$'}HST" = "Z" ] && break
+                sleep 2; HW=${'$'}((HW + 2))
+              done
               exit 0
             }
             # Observer (formerly a killing watchdog): the deadline poll exists
