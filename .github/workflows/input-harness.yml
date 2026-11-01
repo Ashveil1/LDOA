@@ -22,6 +22,11 @@ on:
         default: 'full'
         type: choice
         options: [full, native-only, koe-only, virgl-only, session]
+      e1:
+        description: 'E1 session-diet EXPERIMENT: on = pass -e ldoaE1 1 to VirglGnomeSessionTest only (Wwan+Smartcard managed autostart masks for THAT launch; flags restored after); off (DEFAULT) = every lane stays stock. Regression/full runs must keep this off.'
+        default: 'off'
+        type: choice
+        options: [off, on]
 
 jobs:
   lorie-mouse-attribution:
@@ -29,6 +34,7 @@ jobs:
     timeout-minutes: 90
     env:
       LANE: ${{ github.event.inputs.lane || 'full' }}
+      E1: ${{ github.event.inputs.e1 || 'off' }}
     steps:
       - uses: actions/checkout@v4
         with:

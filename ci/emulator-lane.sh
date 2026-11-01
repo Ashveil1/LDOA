@@ -26,6 +26,8 @@
 # never a masquerading partial/error payload.
 #
 # Env in: LANE (job env: full|native-only|koe-only|virgl-only|session),
+# E1 (job env: off|on - the E1 session-diet EXPERIMENT; on = -e ldoaE1 1
+# is passed to the VirglGnomeSessionTest instrument ONLY; default off),
 # ANDROID_SERIAL (provided by the runner; default emulator-5554).
 
 SERIAL="${ANDROID_SERIAL:-emulator-5554}"
@@ -213,10 +215,15 @@ fi
 # export/harness coverage; session never substitutes for it.
 # GNOME from autoenter setup; starts its OWN opted-in session and tears it
 # down itself, so KOE still sees a clean world). Placement after the harness
-# arms, before KOE.
-date -u +"VIRGL-SESSION start %H:%M:%S (lane=$LANE)"
+# arms, before KOE. The script-safety string tests ride the SAME instrument
+# invocation (comma class list) so they actually execute in this lane.
+# E1 experiment arg: EXPLICIT opt-in only (dispatch input e1=on). The
+# default is OFF everywhere - regression/full/session runs stay stock.
+E1ARG=""
+if [ "$E1" = "on" ]; then E1ARG="-e ldoaE1 1"; fi
+date -u +"VIRGL-SESSION start %H:%M:%S (lane=$LANE e1=$E1)"
 if [ "$LANE" = full ] || [ "$LANE" = session ]; then
-  timeout -s KILL 1500 adb -s "$SERIAL" shell am instrument -w -e class dev.phonelinux.proto.VirglGnomeSessionTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl-session.log | tail -15 || echo "VIRGL-SESSION-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"
+  timeout -s KILL 1500 adb -s "$SERIAL" shell am instrument -w $E1ARG -e class dev.phonelinux.proto.VirglGnomeSessionTest,dev.phonelinux.proto.GnomeSessionScriptSafetyTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl-session.log | tail -15 || echo "VIRGL-SESSION-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"
 else
   echo "virgl-session SKIPPED (lane=$LANE)" > /tmp/instr-virgl-session.log
 fi
