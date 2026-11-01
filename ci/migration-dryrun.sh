@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Emulator-only migration backup/restore dry run. Fixture state only.
-# Old held debug APK -> run-as tar backup -> uninstall -> different-key install -> restore -> fidelity/boot checks.
+# Old held debug APK -> run-as tar stream-out -> host verify (abort gate)
+# -> uninstall -> different-key debug install -> restore -> fidelity/boot checks.
+# Mechanics: exec-out for all device->host streams (probe-verified);
+# helper scripts pushed to /data/local/tmp (no stdin-forwarding dependency);
+# restore = push to /data/local/tmp + extract (exec-in hangs on this adbd -
+# stdin EOF never reaches the command - so it is probe-only evidence here).
+# Every adb call is timeout-wrapped: fail fast, never hang.
 set -uo pipefail
 ADB="adb -s emulator-5554"
 PKG="dev.phonelinux.proto"
@@ -16,32 +22,29 @@ log "# Migration dry-run (emulator API34 x86_64, fixture-only state)"
 log "- old APK sha256: $(sha256sum "$OLD_APK" | cut -d' ' -f1)"
 log "- new APK sha256: $(sha256sum "$NEW_APK" | cut -d' ' -f1)"
 
-## 0. Tool verification (evidence first; no assumed mechanics)
+## 0. Tool verification (evidence first; timeout-guarded; no assumed mechanics)
 {
   echo '## 0. Tool verification'
   adb version | head -1
   echo '--- adb help exec-* lines:'
   adb help 2>&1 | grep -iE 'exec-in|exec-out' || echo '(adb help lists no exec-*; functional probes decide)'
-  echo '--- exec-out probe:'; $ADB exec-out echo probe-out 2>&1 | od -An -c | head -1
-  echo '--- exec-in probe:'; echo probe-in | $ADB exec-in cat 2>&1 | od -An -c | head -1
-  echo '--- exec-out stdin-forwarding probe:'; echo 'echo stdin-ok' | $ADB exec-out sh 2>&1 | head -1
+  echo '--- exec-out probe:'; timeout 15 $ADB exec-out echo probe-out 2>&1 | od -An -c | head -1; echo "exec-out rc=$?"
+  echo '--- exec-in probe (15s cap; hang expected on raw service without stdin EOF):'
+  echo probe-in | timeout 15 $ADB exec-in cat 2>&1 | od -An -c | head -1; echo "exec-in rc=$? (124=timeout/hang)"
   for t in tar find sha256sum stat readlink du df getfattr; do
     echo "--- toybox $t --help (head -2):"
-    $ADB shell "toybox $t --help 2>&1 | head -2"
+    timeout 15 $ADB shell "toybox $t --help 2>&1 | head -2"
   done
   echo '--- toybox tar create/list smoke in /data/local/tmp:'
-  $ADB shell 'cd /data/local/tmp && echo smoke > s.txt && toybox tar -cf s.tar s.txt && toybox tar -tf s.tar && rm -f s.txt s.tar'
+  timeout 15 $ADB shell 'cd /data/local/tmp && echo smoke > s.txt && toybox tar -cf s.tar s.txt && toybox tar -tf s.tar && rm -f s.txt s.tar'
   echo '--- toybox find -prune smoke:'
-  $ADB shell 'cd /data/local/tmp && mkdir -p p/sub && touch p/sub/x p/y && toybox find p -path p/sub -prune -o -print; rm -rf p'
+  timeout 15 $ADB shell 'cd /data/local/tmp && mkdir -p p/sub && touch p/sub/x p/y && toybox find p -path p/sub -prune -o -print; rm -rf p'
 } >> "$R" 2>&1
-EXEC_OUT_OK=0; $ADB exec-out echo p >/dev/null 2>&1 && EXEC_OUT_OK=1
-EXEC_IN_OK=0;  echo p | $ADB exec-in cat >/dev/null 2>&1 && EXEC_IN_OK=1
-STDIN_FWD_OK=0; [ "$(echo 'echo stdin-ok' | $ADB exec-out sh 2>/dev/null | tr -d '\r')" = "stdin-ok" ] && STDIN_FWD_OK=1
-log "- functional: exec-out=$EXEC_OUT_OK exec-in=$EXEC_IN_OK exec-out-stdin-fwd=$STDIN_FWD_OK"
+EXEC_OUT_OK=0; timeout 15 $ADB exec-out echo p >/dev/null 2>&1 && EXEC_OUT_OK=1
+log "- functional: exec-out=$EXEC_OUT_OK"
 [ "$EXEC_OUT_OK" = 1 ] || abort "adb exec-out unusable; no verified stream-out mechanic"
-[ "$STDIN_FWD_OK" = 1 ] || abort "adb exec-out does not forward stdin; seed/manifest mechanics unverified"
 
-cat > /tmp/manifest.sh <<'MANI'
+cat > /tmp/ldoa-manifest.sh <<'MANI'
 cd /data/data/dev.phonelinux.proto || exit 1
 find . \( -path ./cache -o -path ./code_cache -o -path ./files/dl -o -path ./lib \) -prune -o -print | LC_ALL=C sort | while IFS= read -r p; do
   if [ -L "$p" ]; then echo "L|$(readlink "$p")|||$p";
@@ -51,33 +54,7 @@ find . \( -path ./cache -o -path ./code_cache -o -path ./files/dl -o -path ./lib
   elif [ -f "$p" ]; then echo "F|$(stat -c '%a|%s|%i|%u' "$p" 2>/dev/null)|$(sha256sum "$p" 2>/dev/null | cut -d' ' -f1)||$p"; fi
 done
 MANI
-
-## 1. Install OLD build, one launch (natural prefs/dirs), stable stop
-log '## 1. Install old + first launch + force-stop'
-$ADB install -r "$OLD_APK" >>"$R" 2>&1 || abort 'old APK install failed'
-$ADB shell monkey -p $PKG -c android.intent.category.LAUNCHER 1 >>"$R" 2>&1
-sleep 12
-$ADB shell am force-stop $PKG
-if $ADB exec-out run-as $PKG id > "$OUT/runas-after-forcestop.txt" 2>&1; then
-  log "- run-as after force-stop: OK ($(cat "$OUT/runas-after-forcestop.txt"))"
-else
-  abort 'run-as unavailable after force-stop on old build'
-fi
-
-## 2. Enumerate + classify top-level app-data entries (explicit, logged)
-$ADB exec-out run-as $PKG ls -la "$DEV" > "$OUT/top-level-old.txt" 2>&1
-{
-  echo '## 2. Top-level app-data entries (old build, post-launch)'
-  echo 'Classification: BACKUP = files/ shared_prefs/ no_backup/ and any app_* dirs (app state).'
-  echo 'EXCLUDE = ./cache (ephemeral), ./code_cache (JIT-generated, regenerated on device),'
-  echo '  ./files/dl (installer downloads; app self-cleans + re-downloads, DistroInstaller.kt:109-110),'
-  echo '  ./lib (installd-managed symlink into APK extract dir; stale after reinstall),'
-  echo '  any socket at backup time (transient; app recreates).'
-  sed 's/^/    /' "$OUT/top-level-old.txt"
-} >> "$R"
-
-## 3. Seed representative runtime state (fixture-only, app uid via run-as)
-cat > /tmp/seed.sh <<'SEED'
+cat > /tmp/ldoa-seed.sh <<'SEED'
 set -e
 cd /data/data/dev.phonelinux.proto/files || exit 1
 mkdir -p distros/ubuntu/tmp distros/ubuntu/home/user distros/ubuntu/usr/bin distros/ubuntu/etc
@@ -97,25 +74,54 @@ mkdir -p dl
 echo partial-download-positive-control > dl/ubuntu.tar.gz.tmp
 echo SEED-OK
 SEED
-$ADB exec-out run-as $PKG sh < /tmp/seed.sh >> "$R" 2>&1 || abort 'seeding failed'
+timeout 30 $ADB push /tmp/ldoa-manifest.sh /data/local/tmp/ldoa-manifest.sh >>"$R" 2>&1
+timeout 30 $ADB push /tmp/ldoa-seed.sh /data/local/tmp/ldoa-seed.sh >>"$R" 2>&1
+timeout 15 $ADB shell chmod 644 /data/local/tmp/ldoa-manifest.sh /data/local/tmp/ldoa-seed.sh
+
+## 1. Install OLD build, one launch (natural prefs/dirs), stable stop
+log '## 1. Install old + first launch + force-stop'
+timeout 300 $ADB install -r "$OLD_APK" >>"$R" 2>&1 || abort 'old APK install failed'
+timeout 30 $ADB shell monkey -p $PKG -c android.intent.category.LAUNCHER 1 >>"$R" 2>&1
+sleep 12
+timeout 30 $ADB shell am force-stop $PKG
+if timeout 30 $ADB exec-out run-as $PKG id > "$OUT/runas-after-forcestop.txt" 2>&1; then
+  log "- run-as after force-stop: OK ($(cat "$OUT/runas-after-forcestop.txt"))"
+else
+  abort 'run-as unavailable after force-stop on old build'
+fi
+
+## 2. Enumerate + classify top-level app-data entries (explicit, logged)
+timeout 30 $ADB exec-out run-as $PKG ls -la "$DEV" > "$OUT/top-level-old.txt" 2>&1
+{
+  echo '## 2. Top-level app-data entries (old build, post-launch)'
+  echo 'Classification: BACKUP = files/ shared_prefs/ no_backup/ and any app_* dirs (app state).'
+  echo 'EXCLUDE = ./cache (ephemeral), ./code_cache (JIT-generated, regenerated on device),'
+  echo '  ./files/dl (installer downloads; app self-cleans + re-downloads, DistroInstaller.kt:109-110),'
+  echo '  ./lib (installd-managed symlink into APK extract dir; stale after reinstall),'
+  echo '  any socket at backup time (transient; app recreates).'
+  sed 's/^/    /' "$OUT/top-level-old.txt"
+} >> "$R"
+
+## 3. Seed representative runtime state (fixture-only, app uid via run-as)
+timeout 60 $ADB exec-out run-as $PKG sh /data/local/tmp/ldoa-seed.sh >> "$R" 2>&1 || abort 'seeding failed'
 grep -q SEED-OK "$R" || abort 'seed did not complete'
 log '## 3. Seeded fixture: marker, plain files, 37KiB blob, hardlink pair, symlink, 4755 file, 600 file, fifo, dl/ exclusion positive-control'
 
 ## 4. Measure before streaming (device data size + host free)
 {
   echo '## 4. Pre-stream measurements'
-  echo '- device du -sm of app data:'; $ADB exec-out run-as $PKG du -sm "$DEV"
+  echo '- device du -sm of app data:'; timeout 60 $ADB exec-out run-as $PKG du -sm "$DEV"
   echo '- host free space (MB, out dir):'; df -m "$OUT"
 } >> "$R" 2>&1
 
-## 5. Manifest A (device side, streamed to host)
-$ADB exec-out run-as $PKG sh < /tmp/manifest.sh > "$OUT/manifestA.txt" 2> "$OUT/manifestA.err"
+## 5. Manifest A (device side, streamed to host via exec-out)
+timeout 300 $ADB exec-out run-as $PKG sh /data/local/tmp/ldoa-manifest.sh > "$OUT/manifestA.txt" 2> "$OUT/manifestA.err"
 ACOUNT=$(wc -l < "$OUT/manifestA.txt")
 log "## 5. Manifest A entries: $ACOUNT (stderr: $(wc -c < "$OUT/manifestA.err") bytes)"
 [ "$ACOUNT" -gt 10 ] || abort 'manifest A suspiciously small'
 
 ## 5b. Explicit socket enumeration (excluded from archive, logged, never silent)
-$ADB exec-out run-as $PKG sh -c "cd $DEV && find . -type s 2>/dev/null" > "$OUT/sockets.txt"
+timeout 60 $ADB exec-out run-as $PKG sh -c "cd $DEV && find . -type s 2>/dev/null" > "$OUT/sockets.txt"
 SOCK=$(tr -d '\r' < "$OUT/sockets.txt")
 log "- sockets at backup time: ${SOCK:-none}"
 
@@ -123,7 +129,7 @@ log "- sockets at backup time: ${SOCK:-none}"
 EX="--exclude=./cache* --exclude=./code_cache* --exclude=./files/dl* --exclude=./lib"
 for s in $SOCK; do EX="$EX --exclude=$s"; done
 log "## 6. Backup stream excludes: $EX"
-$ADB exec-out run-as $PKG tar -C "$DEV" -czf- $EX . > "$OUT/backup.tar.gz" 2> "$OUT/backup-stderr.txt"
+timeout 600 $ADB exec-out run-as $PKG tar -C "$DEV" -czf- $EX . > "$OUT/backup.tar.gz" 2> "$OUT/backup-stderr.txt"
 [ -s "$OUT/backup.tar.gz" ] || abort "backup stream empty (stderr: $(cat "$OUT/backup-stderr.txt"))"
 BSHA=$(sha256sum "$OUT/backup.tar.gz" | cut -d' ' -f1)
 log "- backup.tar.gz bytes=$(stat -c %s "$OUT/backup.tar.gz") sha256=$BSHA"
@@ -160,31 +166,32 @@ tail -1 "$OUT/verifyA.txt" | grep -q 'missing=0 mismatched=0' || abort 'archive-
 
 ## 8. Uninstall old, install NEW (different signing key), DO NOT launch
 log '## 8. Uninstall old -> install new (f7154ab, different per-run debug key) - no launch before restore'
-$ADB uninstall $PKG >>"$R" 2>&1 || abort 'uninstall failed'
-$ADB install "$NEW_APK" >>"$R" 2>&1 || abort 'new APK install failed'
-if $ADB exec-out run-as $PKG ls -la "$DEV" > "$OUT/top-level-new-prelaunch.txt" 2>&1; then
+timeout 60 $ADB uninstall $PKG >>"$R" 2>&1 || abort 'uninstall failed'
+timeout 300 $ADB install "$NEW_APK" >>"$R" 2>&1 || abort 'new APK install failed'
+if timeout 30 $ADB exec-out run-as $PKG ls -la "$DEV" > "$OUT/top-level-new-prelaunch.txt" 2>&1; then
   log '- run-as works on never-launched new build'
 else
   log '- NOTE: run-as failed on never-launched new build'
 fi
 sed 's/^/    /' "$OUT/top-level-new-prelaunch.txt" >> "$R"
 
-## 9. Restore via verified stream mechanic
-log '## 9. Restore'
-if [ "$EXEC_IN_OK" = 1 ]; then
-  cat "$OUT/backup.tar.gz" | $ADB exec-in run-as $PKG tar -xzf- -C "$DEV" 2> "$OUT/restore-stderr.txt"
-  log '- mechanic: adb exec-in stream (probe-verified)'
-else
-  $ADB push "$OUT/backup.tar.gz" /data/local/tmp/mig.tgz >>"$R" 2>&1
-  $ADB shell df -m /data/local/tmp >>"$R" 2>&1
-  $ADB shell run-as $PKG tar -xzf /data/local/tmp/mig.tgz -C "$DEV" 2> "$OUT/restore-stderr.txt"
-  $ADB shell rm -f /data/local/tmp/mig.tgz
-  log '- mechanic: push /data/local/tmp + extract (exec-in probe failed)'
-fi
-log "- restore stderr bytes: $(wc -c < "$OUT/restore-stderr.txt")"
+## 9. Restore: push tarball to /data/local/tmp (df-checked) + run-as extract.
+## exec-in is NOT used: probe showed it hangs on this adbd (stdin EOF never
+## reaches the command); push+extract is the verified mechanic here.
+log '## 9. Restore (push + extract; exec-in probe result documented in step 0)'
+timeout 60 $ADB push "$OUT/backup.tar.gz" /data/local/tmp/ldoa-mig.tgz >>"$R" 2>&1 || abort 'backup push failed'
+{
+  echo '- /data/local/tmp df before extract:'; timeout 15 $ADB shell df -m /data/local/tmp
+  echo '- target df:'; timeout 15 $ADB shell df -m "$DEV"
+} >> "$R" 2>&1
+timeout 600 $ADB shell run-as $PKG tar -xzf /data/local/tmp/ldoa-mig.tgz -C "$DEV" 2> "$OUT/restore-stderr.txt"
+RRC=$?
+timeout 15 $ADB shell rm -f /data/local/tmp/ldoa-mig.tgz
+log "- restore rc=$RRC stderr bytes: $(wc -c < "$OUT/restore-stderr.txt")"
+[ "$RRC" = 0 ] || abort "restore extract failed rc=$RRC"
 
 ## 10. Manifest B + per-item diff (uid change expected, not a failure)
-$ADB exec-out run-as $PKG sh < /tmp/manifest.sh > "$OUT/manifestB.txt" 2> "$OUT/manifestB.err"
+timeout 300 $ADB exec-out run-as $PKG sh /data/local/tmp/ldoa-manifest.sh > "$OUT/manifestB.txt" 2> "$OUT/manifestB.err"
 cat > /tmp/diff.py <<'PYEOF'
 import sys
 def load(p):
@@ -244,13 +251,14 @@ grep -q 'content_bad=0 mode_bad=0 link_bad=0' "$OUT/diff.txt" || log '- FIDELITY
 
 ## 11. Boot/integrity on restored data (app-level; no GNOME perf rerun)
 log '## 11. Boot/integrity (restored data)'
-$ADB shell monkey -p $PKG -c android.intent.category.LAUNCHER 1 >>"$R" 2>&1
+timeout 30 $ADB shell monkey -p $PKG -c android.intent.category.LAUNCHER 1 >>"$R" 2>&1
 sleep 15
 {
-  echo '- pidof:'; $ADB shell pidof $PKG
-  echo '- install-complete marker:'; $ADB shell run-as $PKG cat $DEV/files/distros/ubuntu/.install-complete
-  echo '- shared_prefs present:'; $ADB shell run-as $PKG ls $DEV/shared_prefs
+  echo '- pidof:'; timeout 15 $ADB shell pidof $PKG
+  echo '- install-complete marker:'; timeout 15 $ADB shell run-as $PKG cat $DEV/files/distros/ubuntu/.install-complete
+  echo '- shared_prefs present:'; timeout 15 $ADB shell run-as $PKG ls $DEV/shared_prefs
   echo '- FATAL/AndroidRuntime lines for pkg:'
-  $ADB logcat -d | grep -E 'FATAL|AndroidRuntime' | grep $PKG | head -10 || echo '(none)'
+  timeout 30 $ADB logcat -d | grep -E 'FATAL|AndroidRuntime' | grep $PKG | head -10 || echo '(none)'
 } >> "$R" 2>&1
+timeout 15 $ADB shell rm -f /data/local/tmp/ldoa-manifest.sh /data/local/tmp/ldoa-seed.sh
 log '## DONE'
