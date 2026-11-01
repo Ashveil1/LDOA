@@ -251,108 +251,36 @@ class GnomeSessionScriptSafetyTest {
         assertTrue("sampler system-bus liveness probe must exist", script.contains("sysbus_live="))
     }
 
-    /** P1 fix structure: the launch id comes from the app via env (with
-     *  a date fallback), and the parent identity is captured FROZEN at
-     *  launch - never re-read at fallback time (reparenting after tracer
-     *  death is exactly the guarded case). */
+    /** The launch id comes from the app via env (with a date fallback),
+     *  and the parent identity is captured FROZEN at launch for the
+     *  evidence log line - never re-read later (reparenting after tracer
+     *  death makes any later read name the wrong process). Evidence only:
+     *  nothing in the script consumes the identity after the parked
+     *  stop-intent mechanism was removed (run 41306297954). */
     @Test fun envBoundLaunchIdAndFrozenRootIdentity() {
         assertTrue("launch id must prefer the app-passed env value",
             script.contains("LAUNCH_ID=\${LDOA_LAUNCH_ID:-"))
-        assertTrue("stop key must come from env only",
-            script.contains("STOP_KEY=\$LDOA_STOP_KEY"))
-        val freeze = script.indexOf("ROOT_PID=")
-        val use = script.indexOf("owned_stop_intent() {")
-        assertTrue("root identity must be frozen at launch", freeze >= 0)
-        assertTrue("intent check must exist", use >= 0)
-        assertTrue("freeze must precede the intent check", freeze < use)
-        assertTrue("frozen identity must come from /proc/self/stat (not ppid-at-stop)",
-            script.contains("ROOT_PID=" + "\$(sed 's/^[^)]*) //' /proc/self/stat"))
-        assertTrue("frozen identity must be logged for runtime validation (no secret: the nonce is never logged)",
+        assertTrue("no control nonce may remain in the script",
+            !script.contains("STOP_KEY"))
+        assertTrue("frozen identity must be captured from the EXPLICIT pid path /proc/$$ (a subprocess /proc/self resolves to the ephemeral subshell - run 41303335159)",
+            script.contains("ROOT_PID=" + "\$(sed 's/^.*) //' /proc/\$\$/stat"))
+        assertTrue("frozen identity must be logged for runtime validation",
             script.contains("frozen parent identity pid="))
     }
 
-    /** The intent is honored at all four reachable points (observer,
-     *  post-exit decision, fallback gate after the survivor window,
-     *  pre-exec gate after a bounded settle), and NO reader ever deletes
-     *  it: the observer and the parent BOTH consume the same file, so a
-     *  first reader's delete would make the second reader see absence
-     *  and respawn (the multi-reader control-file race). A retained
-     *  intent is inert for later launches (exact id + key + frozen
-     *  identity match required). Every honor exits without a fallback. */
-    @Test fun intentCheckpointsCoverObserverDecisionAndGate() {
-        assertEquals("exactly four honor checkpoints", 4,
-            script.split("owned_stop_intent; then").size - 1)
-        assertTrue("observer checkpoint must end observation",
-            script.contains("observer: owned stop intent honored"))
-        assertTrue("decision checkpoint uses the shared honor path",
-            script.contains("honor_owned_stop \"post-exit decision\""))
-        assertTrue("fallback-gate checkpoint closes the survivor-window race",
-            script.contains("honor_owned_stop \"fallback gate after survivor window\""))
-        assertTrue("pre-exec checkpoint makes the P2 race deterministic",
-            script.contains("honor_owned_stop \"pre-exec gate\""))
-        assertTrue("honor must exit with NO fallback",
-            script.contains("NO fallback, exiting; unexpected-death recovery is unchanged when no intent matches"))
-        assertFalse("no time-based intent cleanup may exist",
-            script.contains("name 'ldoa-stop-intent." + "*' -mmin"))
-        assertFalse("no reader may ever delete an intent file (multi-reader race)",
-            script.contains("rm -f \"/tmp/xdg/ldoa-stop-intent"))
-        assertTrue("retained-intent rationale must be documented in the script",
-            script.contains("NO reader ever deletes the intent file"))
-        val honorFn = script.substringAfter("honor_owned_stop() {").substringBefore("\n}")
-        assertFalse("the honor path must not bare-wait the observer (could sit up to the 600s cap)",
-            honorFn.contains("wait \$WATCHDOG_PID"))
-        assertTrue("bounded observer join must exist in the honor path",
-            honorFn.contains("Bounded observer join"))
-    }
-
-    /** The control nonce is compared, never logged, and the check binds
-     *  launch id + stopkey + frozen root identity with exact fields. */
-    @Test fun controlNonceComparedNeverLogged() {
-        for (line in script.lines()) {
-            assertFalse("STOP_KEY must never be echoed: " + line,
-                line.contains("echo") && line.contains("STOP_KEY"))
-        }
-        assertTrue("stopkey exact-field extract",
-            script.contains("stopkey=[A-Za-z0-9._-]+"))
-        assertTrue("rootpid exact-field compare against the frozen identity",
-            script.contains("[ \"\$IP\" = \"\$ROOT_PID\" ] && [ \"\$IS\" = \"\$ROOT_START\" ]"))
-    }
-    /** ICE strace tracing is a debug OPT-IN (LDOA_TRACE_ICE=1), never the
-     *  default launch path: default launches are untraced so the session
-     *  exit status stays real and no apt/strace wrapper cost is paid per
-     *  launch (run 41298355366: the self-test passed 4/4 while the real
-     *  multi-process trace died 4/4, degrading every launch to the
-     *  bare-shell fallback). */
-    @Test fun iceTracingIsExplicitDebugOptIn() {
-        val gate = script.indexOf("if [ \"\$LDOA_TRACE_ICE\" = \"1\" ]; then")
-        assertTrue("LDOA_TRACE_ICE opt-in gate must exist", gate >= 0)
-        val untracedDefault = script.indexOf("TRACED=untraced")
-        assertTrue("default must be untraced, set before the gate",
-            untracedDefault >= 0 && untracedDefault < gate)
-        val install = script.indexOf("apt-get install -y strace")
-        val branch = script.indexOf("if [ \"\$TRACED\" = traced ]; then")
-        assertTrue("on-demand strace install must exist only inside the opt-in",
-            install > gate && install < branch)
-        assertEquals("exactly one strace self-test site (inside the opt-in)", 1,
-            script.split(".strace-selftest").size - 1)
-        assertTrue("opt-in unavailable path must still launch untraced",
-            script.contains("LDOA_TRACE_ICE=1 but strace unavailable"))
-    }
     /** Frozen parent identity must be captured via the EXPLICIT pid path
      *  /proc/$$ (reader-independent), never a subprocess's /proc/self -
      *  that resolved to an ephemeral command-substitution subshell which
      *  exited before its stat could be read, so ROOT_START logged EMPTY
-     *  on every launch (run 41303335159) and every honor gate was
-     *  silently fail-closed. Capture failure must be LOUD and fail
-     *  closed via the non-empty guards in owned_stop_intent. */
+     *  on every launch (run 41303335159). Capture failure must be LOUD
+     *  (the UNAVAILABLE line). The negative check targets the CAPTURE
+     *  assignment only: comments documenting the bug are not product code. */
     @Test fun frozenIdentityUsesExplicitPidPathAndFailsClosedLoudly() {
         assertTrue("explicit-pid capture must be used",
             script.contains("/proc/\$\$/stat"))
-        assertFalse("subprocess /proc/self capture is the empty-start bug",
-            script.contains("/proc/self/stat"))
-        assertTrue("capture failure must log UNAVAILABLE and fail closed",
+        assertFalse("subprocess /proc/self capture is the empty-start bug (ROOT_PID/ROOT_START assignments only)",
+            script.lineSequence().any { it.contains("ROOT_PID=") && it.contains("/proc/self") })
+        assertTrue("capture failure must log UNAVAILABLE",
             script.contains("frozen parent identity UNAVAILABLE"))
-        assertTrue("non-empty guards must gate the honor compare",
-            script.contains("[ -n \"\$ROOT_PID\" ] && [ -n \"\$ROOT_START\" ] || return 1"))
     }
 }

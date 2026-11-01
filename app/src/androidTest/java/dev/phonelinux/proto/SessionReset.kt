@@ -94,7 +94,7 @@ object SessionReset {
         XServer.start(ctx)
         val logFile = File(ctx.filesDir, "guest-gnome.log")
         // CHAR base from one content snapshot (never File.length() bytes -
-        // same unit discipline as GnomeStopIntentTest.window).
+        // same unit discipline as GnomeFallbackRecoveryTest.window).
         val logBase = (if (logFile.isFile) logFile.readText() else "").length.toLong()
         XServer.launchOrReuseGnomeSession(ctx, distro, rootfs)
         val identCaptured = XServer.hasSessionRootIdentity()

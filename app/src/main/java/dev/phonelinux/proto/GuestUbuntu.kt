@@ -120,16 +120,13 @@ object GuestUbuntu {
             # rotation + export budget.
             export MUTTER_DEBUG="${'$'}{LDOA_MUTTER_DEBUG_TOPICS:-dbus,sm,startup}"
             LAUNCH_ID=${'$'}{LDOA_LAUNCH_ID:-${'$'}(date +%s)}
-            # Owned-stop intent binding (P1 fix): this launch's parent
-            # identity is FROZEN here, at launch, while it is known.
-            # Reading the current ppid at fallback time would break
-            # exactly when the tracer died and this script was reparented
-            # (the P1 case). Guest /proc is the bound HOST /proc
+            # Launch evidence: this launch's parent identity is FROZEN
+            # here, at launch, while it is known (a later ppid read would
+            # break exactly when the tracer died and this script was
+            # reparented). Guest /proc is the bound HOST /proc
             # (empirical: guest-logged gnome-session pid 18471 == host
-            # kill record pid 18471), so the app's spawn-captured root
-            # identity names the same process. STOP_KEY is a control
-            # nonce passed in env: compared, never logged.
-            STOP_KEY=${'$'}LDOA_STOP_KEY
+            # kill record pid 18471), so the logged identity names the
+            # app's spawned process. Evidence only - nothing consumes it.
             # Capture path discipline (run 41303335159 root cause): a
             # subprocess reading /proc/self/stat describes ITSELF (or the
             # command-substitution subshell), never the launcher shell -
@@ -147,7 +144,7 @@ object GuestUbuntu {
               ROOT_START=${'$'}(sed 's/^.*) //' "/proc/${'$'}ROOT_PID/stat" 2>/dev/null | awk '{print ${'$'}20}')
             fi
             if [ -z "${'$'}ROOT_PID" ] || [ -z "${'$'}ROOT_START" ]; then
-              echo "gnome-launch: frozen parent identity UNAVAILABLE (rootpid='${'$'}ROOT_PID' rootstart='${'$'}ROOT_START') scriptpid=${'$'}${'$'} - owned-stop honor gates FAIL CLOSED this launch (no empty-match acceptance)"
+              echo "gnome-launch: frozen parent identity UNAVAILABLE (rootpid='${'$'}ROOT_PID' rootstart='${'$'}ROOT_START') scriptpid=${'$'}${'$'} - parent-chain evidence missing this launch"
             else
               echo "gnome-launch: frozen parent identity pid=${'$'}ROOT_PID start=${'$'}ROOT_START scriptpid=${'$'}${'$'}"
             fi
@@ -1405,53 +1402,6 @@ object GuestUbuntu {
               [ "${'$'}(pid_state "${'$'}1")" = "Z" ] && return 1
               [ "${'$'}(pid_starttime "${'$'}1")" = "${'$'}2" ]
             }
-            # Owned-stop intent: honor ONLY an intent bound to THIS
-            # launch - exact launch id in the filename, exact fixed-field
-            # stopkey, and the launch-time FROZEN root identity (never
-            # the current ppid: reparenting after tracer death is exactly
-            # the case this guards). Exact field compares; any doubt
-            # returns 1 and the fallback path stays as before.
-            owned_stop_intent() {
-              [ -n "${'$'}STOP_KEY" ] || return 1
-              [ -n "${'$'}ROOT_PID" ] && [ -n "${'$'}ROOT_START" ] || return 1
-              F="/tmp/xdg/ldoa-stop-intent.${'$'}LAUNCH_ID"
-              [ -f "${'$'}F" ] || return 1
-              IK=${'$'}(grep -oE '(^| )stopkey=[A-Za-z0-9._-]+' "${'$'}F" 2>/dev/null | head -1 | cut -d= -f2)
-              IP=${'$'}(grep -oE '(^| )rootpid=[0-9]+' "${'$'}F" 2>/dev/null | head -1 | cut -d= -f2)
-              IS=${'$'}(grep -oE '(^| )rootstart=[0-9]+' "${'$'}F" 2>/dev/null | head -1 | cut -d= -f2)
-              [ -n "${'$'}IK" ] && [ "${'$'}IK" = "${'$'}STOP_KEY" ] || return 1
-              [ "${'$'}IP" = "${'$'}ROOT_PID" ] && [ "${'$'}IS" = "${'$'}ROOT_START" ] || return 1
-              return 0
-            }
-            # Honored intent: end this launch's script with NO fallback.
-            # NO reader ever deletes the intent file: the observer and
-            # this parent BOTH consume it, and a first reader's delete
-            # would make the second reader see absence and respawn (the
-            # multi-reader control-file race). A retained intent is inert
-            # for every later launch (exact id + stopkey + frozen identity
-            # match required); cleanup is deferred to a future
-            # identity-proven external owned cleanup, not this fix. The
-            # observer wait is the same bounded one the fallback path uses.
-            honor_owned_stop() {
-              echo "gnome-launch: owned stop intent honored (${'$'}1) launch=${'$'}LAUNCH_ID (planned stop of THIS launch: stopkey + frozen root identity verified) - NO fallback, exiting; unexpected-death recovery is unchanged when no intent matches"
-              kill ${'$'}POLL_A_PID 2>/dev/null
-              [ -n "${'$'}{FP_POLL_PID:-}" ] && kill ${'$'}FP_POLL_PID 2>/dev/null
-              # Bounded observer join: a bare wait could sit up to the
-              # 600s observer cap. 30s is ample - on every honor path the
-              # session is already dead, so the observer's next 10s poll
-              # sees it and honors the same retained intent. A zombie
-              # child reads alive to kill -0, so check the state field.
-              HW=0
-              while [ ${'$'}HW -lt 30 ]; do
-                # Robust parse (comm is NOT a fixed name: prctl can set
-                # any value, with spaces or parens): strip through the
-                # LAST ')' - always comm's closer - then field 1 = state.
-                HST=${'$'}(sed 's/^.*) //' "/proc/${'$'}WATCHDOG_PID/stat" 2>/dev/null | awk '{print ${'$'}1}')
-                [ -z "${'$'}HST" ] || [ "${'$'}HST" = "Z" ] && break
-                sleep 2; HW=${'$'}((HW + 2))
-              done
-              exit 0
-            }
             # Observer (formerly a killing watchdog): the deadline poll exists
             # so a shell that never registers is NOTICED, never KILLED. Phone
             # evidence 2026-10-31: a healthy warm-start session registered at
@@ -1486,12 +1436,6 @@ object GuestUbuntu {
               while [ ${'$'}(( ${'$'}(date +%s) - WD_START )) -lt ${'$'}OBS_CAP ]; do
                 sleep 10
                 if ! kill -0 ${'$'}GSPID 2>/dev/null; then
-                  # An owned stop of THIS launch ends observation NOW:
-                  # the watcher must not linger (or later resurrect).
-                  if owned_stop_intent; then
-                    echo "gnome-launch: observer: owned stop intent honored launch=${'$'}LAUNCH_ID (planned stop) - observation ends, nothing killed, no fallback (intent retained: the parent reads it at its own checkpoint)"
-                    exit 0
-                  fi
                   # Wrapper death alone is NOT session death (ptrace detach
                   # history: tracees continue under a dead wrapper). Two
                   # evidence classes, both preservation-only (never a kill):
@@ -1541,11 +1485,6 @@ object GuestUbuntu {
               wait ${'$'}GSPID 2>/dev/null
               echo "gnome-launch: session launcher died exit=${'$'}? (branch=${'$'}TRACED: ${'$'}WNOTE) - falling back to bare gnome-shell --x11"
             fi
-            # P1: an owned stop recorded BEFORE the teardown signals
-            # suppresses the fallback for THIS launch only (the session
-            # end was planned, not a crash). Absent or mismatched intent
-            # => the crash-recovery path below runs unchanged.
-            if owned_stop_intent; then honor_owned_stop "post-exit decision"; fi
             if [ -f /tmp/xdg/gs-ice.strace ]; then
               echo "gnome-launch: ice-strace ENOSYS lines:"
               grep -n "ENOSYS" /tmp/xdg/gs-ice.strace | head -6
@@ -1605,10 +1544,6 @@ object GuestUbuntu {
               echo "gnome-launch: fallback suppressed - possibly surviving session components after the session exit (owned-tree identity verified:${'$'}{SURV_OWNED:- none} | name-match only, ownership UNKNOWN:${'$'}{SURV:- none} - fail closed, duplicate-WM risk; Stop session in the app cleans up)"
               exit 1
             fi
-                        # A Stop that landed DURING the survivor-check window above
-            # (P2 race) is caught here, after the loop, before any second
-            # WM is spawned.
-            if owned_stop_intent; then honor_owned_stop "fallback gate after survivor window"; fi
             # Fallback-phase readiness poll:
                         # the first 60s poll can expire
             # before the fallback shell registers. Emit the SAME success
@@ -1627,18 +1562,12 @@ object GuestUbuntu {
                 echo "gnome-launch: fallback shell missing after 90s launch=${'$'}LAUNCH_ID"
               fi ) &
             FP_POLL_PID=${'$'}!
-            # Last-chance P2 gate: a Stop landing while the fallback was
-            # being set up is honored BEFORE a second WM execs. The 2s
-            # settle turns the sub-second gate->exec gap into a bounded,
-            # deterministic window (cost: +2s, only on the fallback path).
-            sleep 2
-            if owned_stop_intent; then honor_owned_stop "pre-exec gate"; fi
             exec gnome-shell --x11
             """.trimIndent() + "\n"
 
     /** Launch the GNOME session: workarounds first, then gnome-shell --x11
      *  as the session leader (exec keeps it proot-root's direct child). */
-    fun launchGnomeSession(ctx: Context, rootfs: File, launchId: String, stopKey: String): Process {
+    fun launchGnomeSession(ctx: Context, rootfs: File, launchId: String): Process {
         File(rootfs, "root/gnome-session.sh").writeText(gnomeSessionScript())
         val nd = ctx.applicationInfo.nativeLibraryDir
         val log = File(ctx.filesDir, "guest-gnome.log")
@@ -1673,8 +1602,7 @@ object GuestUbuntu {
             // Owned-stop intent identity (control nonce, never logged):
             // the script freezes both at launch and honors only an
             // intent bound to this exact launch.
-            "LDOA_LAUNCH_ID" to launchId,
-            "LDOA_STOP_KEY" to stopKey
+            "LDOA_LAUNCH_ID" to launchId
         ))
         pb.redirectErrorStream(true)
         pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))
