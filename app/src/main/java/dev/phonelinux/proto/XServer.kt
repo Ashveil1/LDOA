@@ -305,9 +305,14 @@ object XServer {
      *  parent is SIGSTOP-confirmed, so the parent is alive (no
      *  reparenting) and frozen (no new forks): ancestry is provable.
      *  Each captured pid is identity-verified by the caller before
-     *  any signal. */
-    private fun virglChildrenOf(pid: Int): List<Int> =
-        scanProc().filterValues { it.ppid == pid }.keys.toList()
+     *  any signal.
+     *  FAIL-CLOSED: null means the capture FAILED (/proc unreadable) -
+     *  the caller must treat the worker set as UNKNOWN, never as "no
+     *  workers". An empty list means a complete scan found none. */
+    private fun virglChildrenOf(pid: Int): List<Int>? {
+        if (File("/proc").listFiles { f -> f.name.matches(Regex("[0-9]+")) } == null) return null
+        return scanProc().filterValues { it.ppid == pid }.keys.toList()
+    }
 
     /** Stop the opt-in render server with the SAME owned-stop contract as
      *  the GNOME session stop (existing audited helper identityOf):
@@ -382,7 +387,14 @@ object XServer {
                 // Worker set frozen: a stopped parent cannot run accept().
                 val targets = LinkedHashMap<Int, PIdent>()
                 targets[ident.pid] = ident
-                virglChildrenOf(ident.pid).forEach { cp -> identityOf(cp)?.let { targets[cp] = it } }
+                val kids = virglChildrenOf(ident.pid)
+                if (kids == null) {
+                    // Capture FAILED: worker set UNKNOWN - signal ONLY
+                    // the parent identity (never a guess), log loudly.
+                    Log.w(TAG, "virgl worker capture FAILED (/proc unreadable) - worker set UNKNOWN; parent-only signals (" + reason + ")")
+                } else {
+                    kids.forEach { cp -> identityOf(cp)?.let { targets[cp] = it } }
+                }
                 for (t in targets.values) send(t, OsConstants.SIGTERM)
                 send(ident, OsConstants.SIGCONT)
                 waitDead(3_000)
