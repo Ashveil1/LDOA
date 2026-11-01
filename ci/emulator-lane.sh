@@ -292,7 +292,7 @@ fi
 if [ "$LANE" = xcontrol ]; then
   date -u +"XCONTROL check-drawing arm start %H:%M:%S"
   timeout -s KILL 300 adb -s "$SERIAL" shell am instrument -w -e class dev.phonelinux.proto.XServerCheckDrawingTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-xcontrol.log | tail -10 || echo "XCONTROL-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"
-  grep -q "OK (1 tests)" /tmp/instr-xcontrol.log || touch /tmp/PHONELINUX_XCONTROL_FAILED
+  grep -q "OK (1 test)" /tmp/instr-xcontrol.log || touch /tmp/PHONELINUX_XCONTROL_FAILED
   pull_or_absent xcontrol-check-drawing.txt xcontrol-check-drawing.txt 60 "XCONTROL-HARVEST"
   if [ ! -s xcontrol-check-drawing.txt ]; then
     echo "XCONTROL-EVIDENCE-MISSING xcontrol-check-drawing.txt (absent, empty, or remote cat error captured)"
