@@ -243,14 +243,20 @@ class VirglProbeTest {
                         .append(" (breadcrumbs arrive with the Result; stop is")
                         .append(" issued inside the 25s hold window by design)")
                         .append('\n')
-                    diag.append("worker-state-at-stop-return(sample-latencyMs ")
-                        .append((System.nanoTime() - stopRetNanos) / 1_000_000).append("): ")
-                        .append(liveWorkers.map { w ->
-                            val o = VirglTestCommon.obsAs(w.pid, w.start, w.uid)
-                            w.pid.toString() + "/" + o.verdict +
-                                (if (o.state != null) "(" + o.state + ")" else "") +
-                                (if (o.note != null) "[" + o.note + "]" else "") })
-                        .append('\n')
+                    val sampleT0 = System.nanoTime()
+                    val samples = liveWorkers.map { w ->
+                        val rd0 = System.nanoTime()
+                        val o = VirglTestCommon.obsAs(w.pid, w.start, w.uid)
+                        w.pid.toString() + "/" + o.verdict +
+                            (if (o.state != null) "(" + o.state + ")" else "") +
+                            (if (o.note != null) "[" + o.note + "]" else "") +
+                            "{readMs=" + (System.nanoTime() - rd0) / 1_000_000 + "}"
+                    }
+                    diag.append("worker-state-at-stop-return(sample-start-latencyMs ")
+                        .append((sampleT0 - stopRetNanos) / 1_000_000)
+                        .append(" sample-windowMs ")
+                        .append((System.nanoTime() - sampleT0) / 1_000_000).append("): ")
+                        .append(samples).append('\n')
                 } else {
                     diag.append("stop-path: WITHOUT observed worker (deferred until after probe join)\n")
                 }
@@ -278,8 +284,13 @@ class VirglProbeTest {
                 // Stop-outcome assertions run only AFTER the probe evidence
                 // is collected: a leaked worker still fails the arm loudly,
                 // but can no longer destroy the renderer outcome.
-                assertTrue("virgl server still alive as captured identity after stop",
-                    !VirglTestCommon.aliveAs(ident))
+                // Tri-state: a read FAILURE (UNKNOWN) fails loudly -
+                // aliveAs would swallow it as "not alive".
+                val postIdent = VirglTestCommon.obsAs(ident.pid, ident.start, ident.uid)
+                assertTrue("virgl server not gone as captured identity after stop (verdict=" +
+                    postIdent.verdict + (if (postIdent.note != null) " " + postIdent.note else "") + ")",
+                    postIdent.verdict == VirglTestCommon.ObsVerdict.GONE ||
+                        postIdent.state == "Z")
                 for (w in liveWorkers) {
                     val o = VirglTestCommon.obsAs(w.pid, w.start, w.uid)
                     assertTrue("virgl worker " + w.pid + " not gone after stop (verdict=" +
@@ -411,65 +422,91 @@ class VirglProbeTest {
         val ppmVirgl = File(ctx.filesDir, "virgl-frame-virgl.ppm")
         val benchRe = Regex("EGLPROBE-BENCH frames=(\\d+) wallMs=(\\d+)")
         val hashRe = Regex("EGLPROBE-FRAME-FNV64: ([0-9a-f]+)")
+        val out = StringBuilder()
+        var completed = false
+        scratch.delete() // never mix stale output into this run's evidence
         try {
             stageProbe()
-            val out = StringBuilder()
             val wall = LinkedHashMap<String, MutableList<Long>>()
+            wall["llvmpipe"] = mutableListOf(); wall["virgl"] = mutableListOf()
             val hashes = LinkedHashMap<String, String>()
             val visualOk = LinkedHashMap<String, Boolean>()
 
+            // Every probe run: renderer identity asserted (a fallback can
+            // never pass this comparison), raw output accumulated into
+            // out (persisted in finally, so failures keep partials).
+            fun runChecked(arm: String, tag: String, sock: File?,
+                           extraArgs: List<String>, moreBinds: List<Pair<String, String>> = emptyList()): Proot.Result {
+                val res = runProbeArm(arm + " " + tag, scratch, virgl = arm == "virgl",
+                    holdSecs = 0, sock = sock, extraArgs = extraArgs, moreBinds = moreBinds)
+                val rend = VirglTestCommon.rendererOf(res)
+                out.append("== ").append(arm).append(" ").append(tag)
+                    .append(" exit=").append(res.exitCode).append(" renderer=[").append(rend).append("]\n")
+                    .append("--- stdout ---\n").append(res.stdout)
+                    .append("--- stderr ---\n").append(res.stderr).append('\n')
+                assertNotNull(arm + " " + tag + " printed no GL-RENDERER (fallback or break - see report)", rend)
+                if (arm == "virgl") assertTrue("virgl arm must render through virpipe (actual: " + rend + ")",
+                    rend!!.contains("virgl ("))
+                else assertTrue("llvmpipe arm must render through llvmpipe (actual: " + rend + ")",
+                    rend!!.contains("llvmpipe", ignoreCase = true))
+                return res
+            }
+
+            // Visual phase: llvmpipe first, then virgl (server started
+            // once and kept for the whole bench phase).
+            var sock: File? = null
             for (arm in listOf("llvmpipe", "virgl")) {
                 val virgl = arm == "virgl"
-                if (virgl) flag.writeText("1") else flag.delete()
-                var sock: File? = null
                 if (virgl) {
+                    flag.writeText("1")
                     sock = XServer.startVirglServerForTest(ctx,
                         extraEnv = mapOf("VIRGL_LOG_LEVEL" to "warning"))
                         ?: throw AssertionError("virgl server failed to start for visual arm (see files/virgl-server.log)")
-                }
-                try {
-                    val ppm = if (virgl) ppmVirgl else ppmLlvm
-                    ppm.writeBytes(ByteArray(0)) // bind target must exist
-                    // Visual run: frame + region checks + exported image.
-                    // Per-run probe output goes to the scratch report
-                    // (overwritten each run); the summary report is
-                    // written once at the end - never clobbered.
-                    val vres = runProbeArm(arm + " visual (offscreen FBO, source-defined scene)",
-                        scratch, virgl = virgl, holdSecs = 0, sock = sock,
-                        extraArgs = listOf("--visual", "/tmp/eglprobe-out.ppm"),
-                        moreBinds = listOf(ppm.absolutePath to "/tmp/eglprobe-out.ppm"))
-                    // Exit 11 IS the region-fail signal - let the visualOk
-                    // assertion below carry the verdict with the images.
-                    assertTrue(arm + " visual probe broke (exit=" + vres.exitCode +
-                        ", expected 0 or 11; see " + scratch.name + ")",
-                        vres.exitCode == 0 || vres.exitCode == 11)
-                    visualOk[arm] = vres.stdout.contains("EGLPROBE-VISUAL-RESULT: OK")
-                    hashes[arm] = hashRe.find(vres.stdout)?.groupValues?.get(1) ?: "<none>"
-                    out.append("== ").append(arm).append(" visual: ")
-                        .append(if (visualOk[arm] == true) "ALL-REGIONS-OK" else "REGION-FAILURE")
-                        .append(" fnv64=").append(hashes[arm]).append('\n')
-                    // 5 bench repetitions, identical workload.
-                    wall[arm] = mutableListOf()
-                    for (rep in 1..5) {
-                        val bres = runProbeArm(arm + " bench rep" + rep + " (600 frames, batched finish)",
-                            scratch, virgl = virgl, holdSecs = 0, sock = sock,
-                            extraArgs = listOf("--bench", "600"))
-                        assertEquals(arm + " bench rep" + rep + " failed (see " + scratch.name + ")",
-                            0, bres.exitCode)
-                        val m = benchRe.find(bres.stdout)
-                        assertNotNull(arm + " bench rep" + rep + " printed no EGLPROBE-BENCH line", m)
-                        wall[arm]!!.add(m!!.groupValues[2].toLong())
-                    }
-                    val sorted = wall[arm]!!.sorted()
-                    out.append("== ").append(arm).append(" bench wallMs (600 frames, 5 reps): min=")
-                        .append(sorted.first()).append(" median=").append(sorted[2])
-                        .append(" max=").append(sorted.last()).append(" raw=").append(wall[arm])
-                        .append('\n')
-                } finally {
-                    if (virgl) XServer.stopVirglServerForTest("visual-bench-stop")
-                }
+                } else flag.delete()
+                val ppm = if (virgl) ppmVirgl else ppmLlvm
+                ppm.writeBytes(ByteArray(0)) // bind target must exist
+                val vres = runChecked(arm, "visual (offscreen FBO, source-defined scene)", sock,
+                    listOf("--visual", "/tmp/eglprobe-out.ppm"),
+                    listOf(ppm.absolutePath to "/tmp/eglprobe-out.ppm"))
+                // Exit 11 IS the region-fail signal; the visualOk
+                // assertion below carries the verdict with the images.
+                assertTrue(arm + " visual probe broke (exit=" + vres.exitCode +
+                    ", expected 0 or 11; see report)", vres.exitCode == 0 || vres.exitCode == 11)
+                visualOk[arm] = vres.stdout.contains("EGLPROBE-VISUAL-RESULT: OK")
+                hashes[arm] = hashRe.find(vres.stdout)?.groupValues?.get(1) ?: "<none>"
+                // Validate the exported IMAGE itself: P6 header, exact
+                // 256x256 dimensions, exact byte size - never existence.
+                val b = ppm.readBytes()
+                val hdr = "P6\n256 256\n255\n".toByteArray()
+                assertTrue(arm + " frame PPM invalid (size=" + b.size + ", want " +
+                    (hdr.size + 3 * 256 * 256) + " with P6/256x256 header)",
+                    b.size == hdr.size + 3 * 256 * 256 &&
+                        b.copyOfRange(0, hdr.size).contentEquals(hdr))
+                out.append("== ").append(arm).append(" visual: ")
+                    .append(if (visualOk[arm] == true) "ALL-REGIONS-OK" else "REGION-FAILURE")
+                    .append(" fnv64=").append(hashes[arm])
+                    .append(" ppm-validated(P6 256x256 ").append(b.size).append("B)\n")
             }
 
+            // Bench phase: 5 reps, ARM ORDER ALTERNATED per rep to cancel
+            // order bias (server stays up; llvmpipe reps do not touch it).
+            for (rep in 1..5) {
+                val order = if (rep % 2 == 1) listOf("llvmpipe", "virgl") else listOf("virgl", "llvmpipe")
+                for (arm in order) {
+                    val bres = runChecked(arm, "bench rep" + rep + " (600 frames, batched finish)",
+                        sock, listOf("--bench", "600"))
+                    assertEquals(arm + " bench rep" + rep + " failed (see report)", 0, bres.exitCode)
+                    val m = benchRe.find(bres.stdout)
+                    assertNotNull(arm + " bench rep" + rep + " printed no EGLPROBE-BENCH line", m)
+                    wall[arm]!!.add(m!!.groupValues[2].toLong())
+                }
+            }
+            for (arm in listOf("llvmpipe", "virgl")) {
+                val sorted = wall[arm]!!.sorted()
+                out.append("== ").append(arm).append(" bench wallMs (600 frames, 5 reps): min=")
+                    .append(sorted.first()).append(" median=").append(sorted[2])
+                    .append(" max=").append(sorted.last()).append(" raw=").append(wall[arm]).append('\n')
+            }
             out.append("== hash classification: ")
                 .append(if (hashes["llvmpipe"] == hashes["virgl"]) "IDENTICAL frames (bonus)"
                         else "DIFFER - legitimate driver difference while both region-sets pass; inspect the PPMs")
@@ -477,17 +514,17 @@ class VirglProbeTest {
             out.append("== bench classification: emulator methodology-only - GPU-completed offscreen FBO throughput; ")
                 .append("NOT display-path FPS, NOT GNOME smoothness, NOT Adreno, NOT a smoothness verdict\n")
             out.append("emulator result - NOT Adreno; transport/visual qualification only\n")
-            report.writeText(out.toString())
-
+            completed = true
             assertTrue("llvmpipe visual regions failed (baseline scene broken - see report + PPM)",
                 visualOk["llvmpipe"] == true)
             assertTrue("virgl visual regions failed - first FUNCTIONAL virgl defect signal (see report + PPM)",
                 visualOk["virgl"] == true)
         } finally {
-            if (!report.isFile) {
-                report.writeText("== visual/bench compare NOT COMPLETED ==\n" +
-                    "reason: staging, server start, or a probe arm failed first - see the instrument log\n")
-            }
+            XServer.stopVirglServerForTest("visual-bench-cleanup")
+            // Accumulated evidence is persisted on EVERY exit path -
+            // partial results survive a mid-arm failure.
+            report.writeText(if (completed) out.toString()
+                             else "== visual/bench compare ABORTED - partial results below ==\n" + out.toString())
             if (savedFlag != null) flag.writeText(savedFlag) else flag.delete()
         }
     }

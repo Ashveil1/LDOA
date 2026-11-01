@@ -48,19 +48,29 @@ internal object VirglTestCommon {
     enum class ObsVerdict { GONE, ALIVE, UNKNOWN }
     data class IdObs(val verdict: ObsVerdict, val state: String?, val note: String?)
 
+    /** Errno-aware: absence (ENOENT) is GONE; a DENIED read (EACCES) or
+     *  any other failure on an existing entry is UNKNOWN - File.isDirectory
+     *  alone cannot distinguish absent from inaccessible. */
     fun obsAs(pid: Int, start: String, uid: Int): IdObs {
-        val dir = File("/proc/" + pid)
-        if (!dir.isDirectory) return IdObs(ObsVerdict.GONE, null, "no-proc-dir")
-        val statText = try { File(dir, "stat").readText() } catch (t: Throwable) {
-            // Mid-exit race reads as gone only if the dir vanished too.
-            return if (!dir.isDirectory) IdObs(ObsVerdict.GONE, null, "vanished-mid-read")
-                   else IdObs(ObsVerdict.UNKNOWN, null, "stat-unreadable:" + t.javaClass.simpleName)
+        val path = "/proc/" + pid
+        try { android.system.Os.stat(path) } catch (e: android.system.ErrnoException) {
+            return if (e.errno == android.system.OsConstants.ENOENT)
+                IdObs(ObsVerdict.GONE, null, "no-proc-dir(ENOENT)")
+            else IdObs(ObsVerdict.UNKNOWN, null, "proc-dir-stat-errno:" + e.errno)
+        }
+        val statText = try { File(path, "stat").readText() } catch (t: Throwable) {
+            val errno = (t as? android.system.ErrnoException)?.errno
+            return when {
+                errno == android.system.OsConstants.ENOENT -> IdObs(ObsVerdict.GONE, null, "vanished-mid-read(ENOENT)")
+                errno != null -> IdObs(ObsVerdict.UNKNOWN, null, "stat-read-errno:" + errno)
+                else -> IdObs(ObsVerdict.UNKNOWN, null, "stat-unreadable:" + t.javaClass.simpleName)
+            }
         }
         val fields = try { statText.substringAfterLast(')').trim().split(Regex("\\s+")) } catch (t: Throwable) {
             return IdObs(ObsVerdict.UNKNOWN, null, "stat-unparsable")
         }
         if (fields.size < 20) return IdObs(ObsVerdict.UNKNOWN, null, "stat-short")
-        val curUid = try { android.system.Os.stat(dir.path).st_uid } catch (t: Throwable) {
+        val curUid = try { android.system.Os.stat(path).st_uid } catch (t: Throwable) {
             return IdObs(ObsVerdict.UNKNOWN, null, "uid-unreadable:" + t.javaClass.simpleName)
         }
         if (fields[19] != start || curUid != uid)
