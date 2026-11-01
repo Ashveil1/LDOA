@@ -7,14 +7,16 @@ import org.junit.Test
 /**
  * Per-launch performance config (2026-11-01, POCO 25062PC34G, d7fe421):
  * with the gate fixed and the desktop reachable, the phone showed severe
- * stutter. Evidence from the 12:02 diagnostic export: gnome-shell loaded
- * Mesa's libLLVM (llvmpipe software compositing; DRI3 unavailable) at
- * 1080x1957, frame-present intervals of 0.5-4.5s during interaction with a
- * 19.4s stall, Terminal startup 16.3s, tracker-miner-fs-3 autostart
- * enabled, and 1/3 of the 390 KB guest log was mutter STACK debug spam.
- * These tests pin the bounded mitigations: narrow default mutter debug
- * topics, animations off every launch, and per-user tracker miner masks -
- * all reachable on the EXISTING rootfs (per-launch, no reinstall).
+ * stutter. Evidence from the 12:02 export: frame-present intervals of
+ * 0.5-4.5s during interaction with a 19.4s stall (presentation-path
+ * timings, not pure render cost), Terminal startup 16.3s, and 1/3 of the
+ * 390 KB guest log was mutter STACK debug spam. Renderer identity is NOT
+ * established: libLLVM loading does not distinguish llvmpipe from other
+ * gallium drivers, so the probes now capture X extensions and the full
+ * DRI/gallium module set before any renderer claim.
+ * Scope (main todo): user overrides/theme/dock must survive; no blanket
+ * Tracker/Color/Keyboard masks. Animations get a reversible default only
+ * when the user has no explicit setting.
  */
 class GnomeSessionPerfConfigTest {
 
@@ -26,8 +28,6 @@ class GnomeSessionPerfConfigTest {
             "MUTTER_DEBUG must default to dbus,sm,startup via the LDOA_MUTTER_DEBUG_TOPICS override",
             script.contains("MUTTER_DEBUG=\"\${LDOA_MUTTER_DEBUG_TOPICS:-dbus,sm,startup}\"")
         )
-        // The old fixed value must be gone: backend logs every cogl swap
-        // (per-frame) and stack dumps the tracker on every restack.
         assertFalse(
             "fixed 'MUTTER_DEBUG=backend,dbus,stack,sm,startup' must not ship as the default",
             script.contains("export MUTTER_DEBUG=backend,dbus,stack,sm,startup")
@@ -35,33 +35,42 @@ class GnomeSessionPerfConfigTest {
     }
 
     @Test
-    fun animationsDisabledEveryLaunch() {
+    fun animationsDefaultIsGuardedAndReversible() {
         assertTrue(
-            "the per-launch config must disable GNOME animations (llvmpipe compositing turns transitions into multi-second stalls)",
-            script.contains("gsettings set org.gnome.desktop.interface enable-animations false")
+            "the dconf guard must read the explicit user value before any default is written",
+            script.contains("dconf read /org/gnome/desktop/interface/enable-animations")
+        )
+        assertTrue(
+            "an explicit user setting must be preserved and logged",
+            script.contains("animations preserved=")
+        )
+        assertTrue(
+            "the reversible default path must be logged as applied only when no explicit setting exists",
+            script.contains("animations default-applied=false")
         )
     }
 
     @Test
-    fun trackerMinersMaskedPerUser() {
-        assertTrue(
-            "tracker-miner-fs-3 must be masked via a per-user autostart override",
+    fun noTrackerMinerMasking() {
+        assertFalse(
+            "tracker miner masks are outside approved scope (main todo: no blanket Tracker masks)",
             script.contains("tracker-miner-fs-3")
         )
-        assertTrue(
-            "tracker-extract-3 must be masked via a per-user autostart override",
+        assertFalse(
+            "tracker extract masks are outside approved scope",
             script.contains("tracker-extract-3")
-        )
-        assertTrue(
-            "the mask must use Hidden=true (overrides /etc/xdg/autostart entries)",
-            script.contains("Hidden=true")
         )
     }
 
     @Test
-    fun probesSampleCpuAndMemoryPressure() {
+    fun probesCaptureRendererAndPressureEvidence() {
         assertTrue("probes must record loadavg per sample", script.contains("/proc/loadavg"))
         assertTrue("probes must record MemAvailable per sample", script.contains("MemAvailable"))
         assertTrue("probes must record cumulative shell CPU jiffies per sample", script.contains("shell_cpu_jiffies="))
+        assertTrue(
+            "the shell module scan must include gallium and per-driver *_dri.so so the ACTIVE driver is visible",
+            script.contains("gallium|_dri")
+        )
+        assertTrue("probes must capture the X extension inventory once per session", script.contains("x_extensions_begin"))
     }
 }

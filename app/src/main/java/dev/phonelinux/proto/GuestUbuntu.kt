@@ -159,27 +159,27 @@ object GuestUbuntu {
             ) &
             # Per-launch performance config - runs on EVERY launch, so it
             # reaches the already-installed rootfs without any reinstall.
-            # Phone evidence 2026-11-01 (25062PC34G, d7fe421, llvmpipe):
-            # frame-present intervals 0.5-4.5s during interaction with a
-            # 19.4s stall; Terminal startup 16.3s.
+            # Phone evidence 2026-11-01 (25062PC34G, d7fe421): frame-present
+            # intervals 0.5-4.5s during interaction with a 19.4s stall;
+            # Terminal startup 16.3s. (Presentation-path timings; may include
+            # presentation blocking, not pure render cost.)
+            # SCOPE (main todo, 2026-10-31): user overrides/theme/dock must
+            # survive; no blanket Tracker/Color/Keyboard masks. Only a
+            # reversible default where the user has no explicit setting.
             ( sleep 20
-              # Under CPU compositing every animated transition becomes a
-              # multi-second frame sequence; disabling animations is the
-              # largest perceived-stutter lever available without a GPU path.
-              timeout 4 gsettings set org.gnome.desktop.interface enable-animations false 2>&1 | head -1 | sed 's/^/gnome-launch: perf-config animations-set: /'
-              echo "gnome-launch: perf-config launch=${'$'}LAUNCH_ID enable-animations=${'$'}(timeout 4 gsettings get org.gnome.desktop.interface enable-animations 2>&1 | head -1)"
-              # tracker miners autostart-index the rootfs in the background
-              # and compete with the compositor on a 2+6-core budget SoC.
-              # Mask per-user (Hidden=true overrides /etc/xdg/autostart);
-              # takes effect from the NEXT session start (already-running
-              # miners are left alone this session).
-              mkdir -p "${'$'}HOME/.config/autostart"
-              for A in tracker-miner-fs-3 tracker-extract-3; do
-                if [ -f "/etc/xdg/autostart/${'$'}A.desktop" ] && [ ! -f "${'$'}HOME/.config/autostart/${'$'}A.desktop" ]; then
-                  { echo "[Desktop Entry]"; echo "Type=Application"; echo "Name=${'$'}A (disabled by LDOA perf config)"; echo "Hidden=true"; } > "${'$'}HOME/.config/autostart/${'$'}A.desktop"
-                  echo "gnome-launch: perf-config masked ${'$'}A launch=${'$'}LAUNCH_ID"
-                fi
-              done
+              # Animations: under software compositing every animated
+              # transition becomes a multi-second frame sequence. Set the
+              # reversible default ONLY when the user has never made an
+              # explicit choice: dconf read prints nothing while only the
+              # schema default (true) is in effect. Any explicit value -
+              # the user's or one this block wrote earlier - is respected.
+              PREV=${'$'}(timeout 4 dconf read /org/gnome/desktop/interface/enable-animations 2>/dev/null)
+              if [ -z "${'$'}PREV" ]; then
+                timeout 4 gsettings set org.gnome.desktop.interface enable-animations false 2>&1 | head -1 | sed 's/^/gnome-launch: perf-config animations-set: /'
+                echo "gnome-launch: perf-config launch=${'$'}LAUNCH_ID animations default-applied=false (no prior explicit setting; reversible: Settings > Accessibility)"
+              else
+                echo "gnome-launch: perf-config launch=${'$'}LAUNCH_ID animations preserved=${'$'}PREV (explicit setting respected)"
+              fi
             ) &
             # Same identity fix as the Alpine session: GNOME components call
             # getpwuid(getuid()) and fail for the Android app uid.
@@ -408,6 +408,14 @@ object GuestUbuntu {
                 if [ "${'$'}SZ" -gt "${'$'}MAXB" ]; then echo "=== ldoa-probes stopped: size cap ${'$'}MAXB bytes ==="; break; fi
                 i=${'$'}((i + 1))
                 echo "--- sample ${'$'}i +${'$'}(( ${'$'}(date +%s) - LAUNCH_ID ))s utc=${'$'}(date -u +%FT%TZ) ---"
+                if [ "${'$'}i" = "1" ]; then
+                  # X-level capability evidence (2026-11-01 renderer question):
+                  # which DRI/GLX extensions the vendored X server actually
+                  # offers - bounds what any guest GL stack can use.
+                  echo "x_extensions_begin"
+                  timeout 5 xdpyinfo -queryExtensions 2>&1 | head -40 | sed 's/^/  /'
+                  echo "x_extensions_end"
+                fi
                 SP=${'$'}(pgrep -x gnome-shell | head -1)
                 echo "shell_pid=${'$'}{SP:-none}"
                 # CPU/memory pressure evidence (2026-11-01 lag diagnosis):
@@ -459,7 +467,7 @@ object GuestUbuntu {
                 if [ "${'$'}i" = "3" ] || [ "${'$'}i" = "8" ]; then
                   if [ -n "${'$'}SP" ]; then
                     echo "shell_gl_modules_begin pid=${'$'}SP (loaded modules; evidence, not active-renderer proof)"
-                    grep -oE '/[^ ]*\.so[0-9.]*' "/proc/${'$'}SP/maps" 2>/dev/null | grep -Ei 'dri|libGL|libEGL|llvm|virgl|zink|swrast|vulkan' | sort -u | head -24 | sed 's/^/  /'
+                    grep -oE '/[^ ]*\.so[0-9.]*' "/proc/${'$'}SP/maps" 2>/dev/null | grep -Ei 'gallium|_dri\.so|dri|libGL|libEGL|llvm|virgl|zink|swrast|freedreno|vulkan' | sort -u | head -24 | sed 's/^/  /'
                     echo "shell_gl_modules_end"
                   else
                     echo "shell_gl_modules: shell pid not found"
