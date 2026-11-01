@@ -25,7 +25,7 @@
 # REMOVES its target: a harvested file is intact device content or ABSENT,
 # never a masquerading partial/error payload.
 #
-# Env in: LANE (job env: full|native-only|koe-only|virgl-only),
+# Env in: LANE (job env: full|native-only|koe-only|virgl-only|session),
 # ANDROID_SERIAL (provided by the runner; default emulator-5554).
 
 SERIAL="${ANDROID_SERIAL:-emulator-5554}"
@@ -76,12 +76,12 @@ adb -s "$SERIAL" install -r -g app/build/outputs/apk/androidTest/debug/app-debug
 # open qualification blocker (run 40840614400: shell maps no UI cold);
 # coverage NOT dropped.
 date -u +"SETUP auto-enter start %H:%M:%S (lane=$LANE)"
-if [ "$LANE" = full ]; then
+if [ "$LANE" = full ] || [ "$LANE" = session ]; then
   adb -s "$SERIAL" shell am instrument -w -e class dev.phonelinux.proto.UbuntuDesktopAutoEnterTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr0.log | tail -8
 else
   echo "autoenter SKIPPED (lane=$LANE)" > /tmp/instr0.log
 fi
-if [ "$LANE" = full ]; then grep -q "OK (" /tmp/instr0.log || touch /tmp/PHONELINUX_SETUP_FAILED; fi
+if [ "$LANE" = full ] || [ "$LANE" = session ]; then grep -q "OK (" /tmp/instr0.log || touch /tmp/PHONELINUX_SETUP_FAILED; fi
 date -u +"SETUP auto-enter end %H:%M:%S"
 if [ -f /tmp/PHONELINUX_SETUP_FAILED ]; then echo "AUTOENTER-SETUP-FAILED - arms not run"; exit 1; fi
 
@@ -184,23 +184,27 @@ if [ -f /tmp/PHONELINUX_TESTS_FAILED ]; then
   adb -s "$SERIAL" shell am force-stop dev.phonelinux.proto || true
 fi
 
-# P3 real-session virgl qualification (full lane only: needs the provisioned
+# P3 real-session virgl qualification (full + session lanes: needs the
+# provisioned GNOME from the autoenter setup; session lane = autoenter
+# setup + this arm + KOE ONLY - the P3 iteration vehicle. The full lane
+# is UNCHANGED and remains the regression gate for native/lifecycle/
+# export/harness coverage; session never substitutes for it.
 # GNOME from autoenter setup; starts its OWN opted-in session and tears it
 # down itself, so KOE still sees a clean world). Placement after the harness
 # arms, before KOE.
 date -u +"VIRGL-SESSION start %H:%M:%S (lane=$LANE)"
-if [ "$LANE" = full ]; then
+if [ "$LANE" = full ] || [ "$LANE" = session ]; then
   timeout -s KILL 1500 adb -s "$SERIAL" shell am instrument -w -e class dev.phonelinux.proto.VirglGnomeSessionTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl-session.log | tail -15 || echo "VIRGL-SESSION-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"
 else
   echo "virgl-session SKIPPED (lane=$LANE)" > /tmp/instr-virgl-session.log
 fi
-if [ "$LANE" = full ]; then grep -q "OK (" /tmp/instr-virgl-session.log || touch /tmp/PHONELINUX_VIRGL_SESSION_FAILED; fi
+if [ "$LANE" = full ] || [ "$LANE" = session ]; then grep -q "OK (" /tmp/instr-virgl-session.log || touch /tmp/PHONELINUX_VIRGL_SESSION_FAILED; fi
 # Pull + VALIDATE: adb exec-out can return rc=0 while the remote cat fails
 # (its error text lands in the redirect target), and a nonzero pull can
 # still leave partial bytes behind. ANY nonzero exit, empty result, or error
 # payload REMOVES the target: a harvested file is intact device content or
 # ABSENT, never a masquerading partial/error payload.
-if [ "$LANE" = full ]; then
+if [ "$LANE" = full ] || [ "$LANE" = session ]; then
   for f in virgl-session.txt virgl-session-root.xwd; do
     rc=0
     timeout 60 adb -s "$SERIAL" exec-out run-as dev.phonelinux.proto cat "files/$f" > "$f" || rc=$?
@@ -216,7 +220,7 @@ fi
 # Report must exist NON-EMPTY; the xwd is required only when the test
 # captured via xwd (shot-pipeline fallback lands in screenshots/ instead),
 # so it is pulled but not gated.
-if [ "$LANE" = full ]; then
+if [ "$LANE" = full ] || [ "$LANE" = session ]; then
   if [ ! -s virgl-session.txt ] || head -c 40 virgl-session.txt | grep -q "^cat: files/"; then
     echo "VIRGL-SESSION-EVIDENCE-MISSING virgl-session.txt (absent, empty, or remote cat error captured)"
     touch /tmp/PHONELINUX_VIRGL_SESSION_FAILED
@@ -226,7 +230,7 @@ fi
 # artifact must exist AND carry a valid XWD header (big-endian file_version
 # == 7 at offset 4); an absent or invalid artifact is CAPTURE-UNVERIFIED and
 # fails the arm - it never passes as a captured desktop.
-if [ "$LANE" = full ] && [ -s virgl-session.txt ] && grep -q "via xwd -root" virgl-session.txt; then
+if { [ "$LANE" = full ] || [ "$LANE" = session ]; } && [ -s virgl-session.txt ] && grep -q "via xwd -root" virgl-session.txt; then
   xwd_ok=0
   if [ -s virgl-session-root.xwd ] && [ "$(od -An -tx1 -j 4 -N 4 virgl-session-root.xwd 2>/dev/null | tr -d ' \n')" = "00000007" ]; then xwd_ok=1; fi
   if [ "$xwd_ok" -ne 1 ]; then
@@ -268,7 +272,7 @@ find screenshots -type f | sort || true
 # Presentation honesty: if the virgl session test used the shot-pipeline
 # fallback, the screenshot must ACTUALLY land in the artifact - CAPTURED is
 # never taken on the call alone.
-if [ "$LANE" = full ] && [ -s virgl-session.txt ] && grep -q "shot pipeline" virgl-session.txt; then
+if { [ "$LANE" = full ] || [ "$LANE" = session ]; } && [ -s virgl-session.txt ] && grep -q "shot pipeline" virgl-session.txt; then
   ls screenshots/ 2>/dev/null | grep -q "virgl-session-desktop" || { echo "VIRGL-SESSION-SHOT-MISSING: shot-pipeline fallback claimed but no screenshot landed"; touch /tmp/PHONELINUX_VIRGL_SESSION_FAILED; }
 fi
 

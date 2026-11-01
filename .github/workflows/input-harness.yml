@@ -18,10 +18,10 @@ on:
   workflow_dispatch:
     inputs:
       lane:
-        description: 'full = autoenter setup + native + lifecycle (incl. reentry recovery) + export + harness + virgl-session (P3 real-session qualification) + KOE; native-only = full minus GNOME autoenter setup and harness (native + lifecycle + export + KOE, unchanged from before); koe-only = ProotKillOnExitTest fixtures alone (focused KOE qualification, no 48-test rerun); virgl-only = MINIMAL setup (VirglRootfsProvisionTest: ubuntu-base + mesa runtime ONLY, NO GNOME install/launch) + VirglServerSmokeTest (host server lifecycle + hostprobe host-EGL renderer) + VirglProbeTest (guest EGL-surfaceless eglprobe renderer proof, arch-selected from the rootfs ELF header; emulator = NOT Adreno)'
+        description: 'full = autoenter setup + native + lifecycle (incl. reentry recovery) + export + harness + virgl-session (P3 real-session qualification) + KOE; native-only = full minus GNOME autoenter setup and harness (native + lifecycle + export + KOE, unchanged from before); koe-only = ProotKillOnExitTest fixtures alone (focused KOE qualification, no 48-test rerun); virgl-only = MINIMAL setup (VirglRootfsProvisionTest: ubuntu-base + mesa runtime ONLY, NO GNOME install/launch) + VirglServerSmokeTest (host server lifecycle + hostprobe host-EGL renderer) + VirglProbeTest (guest EGL-surfaceless eglprobe renderer proof, arch-selected from the rootfs ELF header; emulator = NOT Adreno); session = autoenter setup + virgl-session (P3 real-session qualification) + KOE ONLY - the P3 iteration vehicle, SAME GNOME provisioning path as full (UbuntuDesktopAutoEnterTest); native/lifecycle/export/harness NOT run and remain gated by the unchanged full lane'
         default: 'full'
         type: choice
-        options: [full, native-only, koe-only, virgl-only]
+        options: [full, native-only, koe-only, virgl-only, session]
 
 jobs:
   lorie-mouse-attribution:

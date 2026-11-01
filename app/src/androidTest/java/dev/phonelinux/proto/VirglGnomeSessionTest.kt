@@ -121,8 +121,8 @@ class VirglGnomeSessionTest {
                 // (run 41336836798 focusRaw: "Bad window command, or no
                 // windows match: |"). Full dump, filtered in-process.
                 val f = currentFocusState(device)
-                focusRawTail = f.first
-                if (f.second) focusLine = focusRawTail
+                focusRawTail = f.excerpt
+                if (f.state == FocusState.FOCUSED) focusLine = focusRawTail
             }
             if (rendererLine.isEmpty()) {
                 val r = device.executeShellCommand("logcat -d -v threadtime -t 800 -s gles-renderer:D")
@@ -150,7 +150,8 @@ class VirglGnomeSessionTest {
         // CURRENT-state re-sample immediately before any capture: focus can
         // change during dismissal, the surface can tear down after an
         // earlier bind, the session can die or a new generation can start.
-        val focusNowOk = currentFocusState(device).second
+        val focusNowObs = currentFocusState(device)
+        val focusNowOk = focusNowObs.state == FocusState.FOCUSED
         val surfaceNow = latestOwnRendererBind(
             device.executeShellCommand("logcat -d -v threadtime -t 800 -s gles-renderer:D"),
             appPid, attachAt)
@@ -160,7 +161,7 @@ class VirglGnomeSessionTest {
         val ok = focusLine.isNotEmpty() && rendererLine.isNotEmpty() && childCount >= 0 &&
             focusNowOk && surfaceNow.isNotEmpty() && sessionAliveNow && generationOk
         val summary = "launchId=" + launchId +
-            " focusEver=[" + (if (focusLine.isEmpty()) "MISSING" else focusLine) + "]" +
+            " focusEver=[" + (if (focusLine.isEmpty()) "MISSING(last=" + focusNowObs.state + ")" else focusLine) + "]" +
             " surfaceEver=[" + (if (rendererLine.isEmpty()) "MISSING" else rendererLine.take(200)) + "]" +
             " sessionClientWindows=" + (if (childCount < 0) "MISSING" else childCount.toString()) +
             " (existence corroboration, not viewability proof)" +
@@ -170,40 +171,61 @@ class VirglGnomeSessionTest {
         val failure = "focusEver=" + focusLine.isNotEmpty() +
             " surfaceEver=" + rendererLine.isNotEmpty() +
             " sessionClientWindows=" + childCount +
-            " focusNow=" + focusNowOk + " surfaceNow=" + surfaceNow.isNotEmpty() +
+            " focusNow=" + focusNowOk + "(" + focusNowObs.state + ") surfaceNow=" + surfaceNow.isNotEmpty() +
             " sessionAliveNow=" + sessionAliveNow + " generationNow=" + generationNow +
             " | focusRaw=[" + focusRawTail + "] rendererRaw=[" + rendererRawTail + "]" +
             " treeTail=[" + treeTail.replace('\n', ' ').take(300) + "]"
         return CaptureIdentity(ok, summary, failure)
     }
 
-    /**
-     * The LATEST rendererSetWindow event for OUR app process at/after
-     * sinceMs decides: returns the bind line when that event is a real
-     * bind (nonzero pointer, W,H > 0), "" when the latest event is a
-     * teardown (0x0 0 0) or no own fresh event exists. Other processes'
-     * renderer lines are excluded by pid match on the threadtime prefix.
-     */
-    /** Current Android window-focus excerpt + whether MainActivity holds it.
-     *  UiDevice.executeShellCommand whitespace-splits its argument and execs
-     *  it WITHOUT a shell (run 41336836798: "dumpsys window | grep ..."
-     *  delivered "|" to dumpsys as an argument -> "Bad window command, or
-     *  no windows match: |"), so the full dump is filtered in-process. The
-     *  excerpt preserves the raw focus lines as failure evidence; when no
-     *  focus lines parse, it preserves the dump head instead so a failure
-     *  is never evidence-free. */
-    private fun currentFocusState(device: androidx.test.uiautomator.UiDevice): Pair<String, Boolean> {
+    /** Current window focus is tri-state: FOCUSED only when an mCurrentFocus
+     *  line names MainActivity and no other focus line contradicts it;
+     *  NOT_FOCUSED when parseable lines consistently name another component;
+     *  UNKNOWN when nothing parses or displays disagree. mFocusedApp alone is
+     *  NEVER proof: it names the focused app, not the focused window, and a
+     *  conflicting mCurrentFocus wins. The state is computed from the FULL
+     *  parsed focus lines BEFORE the diagnostic excerpt is truncated to 300
+     *  chars, so a target line beyond the excerpt still decides. */
+    private enum class FocusState { FOCUSED, NOT_FOCUSED, UNKNOWN }
+    private data class FocusObs(val excerpt: String, val state: FocusState)
+
+    private fun currentFocusState(device: androidx.test.uiautomator.UiDevice): FocusObs {
         val raw = try {
             device.executeShellCommand("dumpsys window")
         } catch (t: Throwable) {
-            return "(dumpsys window threw: " + t.javaClass.simpleName + ")" to false
+            return FocusObs("(dumpsys window threw: " + t.javaClass.simpleName + ")", FocusState.UNKNOWN)
         }
-        val focusLines = raw.lineSequence()
-            .filter { it.contains("mCurrentFocus") || it.contains("mFocusedApp") }
-            .joinToString(" ").replace('\n', ' ').take(300)
-        val excerpt = if (focusLines.isNotEmpty()) focusLines
-            else raw.replace('\n', ' ').take(300)
-        return excerpt to focusLines.contains("com.termux.x11.MainActivity")
+        return parseFocusDump(raw)
+    }
+
+    /** Pure parser (mirror-tested): UiDevice.executeShellCommand whitespace-
+     *  splits and execs WITHOUT a shell (run 41336836798: a "| grep" suffix
+     *  reached dumpsys as arguments), so the full dump is filtered in-process.
+     *  The excerpt preserves the raw focus lines as failure evidence; when no
+     *  focus lines parse, it preserves the dump head instead. */
+    private fun parseFocusDump(raw: String): FocusObs {
+        // dumpsys names components fully-qualified (com.termux.x11/com.termux.
+        // x11.MainActivity) or compact (com.termux.x11/.MainActivity) depending
+        // on line and version; a mention is either form of OUR component.
+        fun mentions(l: String): Boolean =
+            l.contains("com.termux.x11.MainActivity") || l.contains("com.termux.x11/.MainActivity")
+        val cur = raw.lineSequence().filter { it.contains("mCurrentFocus") }.toList()
+        val app = raw.lineSequence().filter { it.contains("mFocusedApp") }.toList()
+        val curT = cur.any { mentions(it) }
+        val curO = cur.any { !mentions(it) }
+        val appO = app.any { !mentions(it) }
+        val appT = app.any { mentions(it) }
+        val state = when {
+            cur.isEmpty() -> FocusState.UNKNOWN       // unparseable display state
+            curT && curO -> FocusState.UNKNOWN        // displays disagree
+            curT && appO -> FocusState.UNKNOWN        // focused-app contradicts current-focus
+            curT -> FocusState.FOCUSED                // current focused window IS MainActivity
+            appT -> FocusState.UNKNOWN                // mFocusedApp alone: not proof
+            else -> FocusState.NOT_FOCUSED            // parseable, consistently elsewhere
+        }
+        val joined = (cur + app).joinToString(" ").replace('\n', ' ').take(300)
+        val excerpt = if (joined.isNotEmpty()) joined else raw.replace('\n', ' ').take(300)
+        return FocusObs(excerpt, state)
     }
 
     private fun latestOwnRendererBind(dump: String, appPid: Int, sinceMs: Long): String {
