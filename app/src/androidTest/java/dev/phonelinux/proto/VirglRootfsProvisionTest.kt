@@ -68,35 +68,54 @@ class VirglRootfsProvisionTest {
             assertTrue("mesa runtime apt failed rc=" + result.exitCode + " (see virgl-provision.txt)",
                 result.exitCode == 0)
 
-            // Presence assertions from the extracted rootfs (arch-agnostic
-            // glob over the multiarch dir), before any probe exec: GLVND
-            // dispatch + Mesa vendor runtime + vendor json + the dri
-            // driver entry used by the surfaceless sw path.
-            // Recursive (bounded depth): dri drivers live at
-            // usr/lib/<multiarch>/dri/*.so, two levels under usr/lib -
-            // a one-level glob misses them (run 41314667337).
-            fun glob1(dir: File, name: String): List<File> =
-                dir.walkTopDown().maxDepth(4).filter { it.isFile && it.name == name }.toList()
-            val libDir = File(rootfs, "usr/lib")
-            val eglLibs = glob1(libDir, "libEGL.so.1")
-            val eglMesa = glob1(libDir, "libEGL_mesa.so.0")
-            val driDrivers = glob1(File(rootfs, "usr/lib"), "swrast_dri.so")
+            // Presence assertions from the extracted rootfs at EXACT
+            // multiarch paths (usr/lib/<arch>-linux-gnu/...), before any
+            // probe exec. NO broad traversal, and guest symlinks are
+            // never host-followed: a guest-ABSOLUTE link would resolve
+            // against the Android host and falsely pass/fail, so
+            // presence = symlink OR file (guestPresent) and dependency
+            // resolution rebases absolute targets under the rootfs
+            // (resolveGuest). Layouts verified against the real
+            // artifacts: ubuntu-base 24.04.5 tarball (usrmerge: bin/lib/
+            // lib64 are RELATIVE links to usr/*; ld-linux chain fully
+            // relative) and the noble mesa 25.2.8 debs (dri/*.so ->
+            // libdril_dri.so, libEGL_mesa.so.0 -> libEGL_mesa.so.0.0.0,
+            // libgallium-<ver>.so at the multiarch level).
+            val multiarch = (File(rootfs, "usr/lib").listFiles()?.toList() ?: emptyList())
+                .filter { it.isDirectory && it.name.endsWith("-linux-gnu") }
+            assertTrue("no *-linux-gnu multiarch dir under rootfs usr/lib", multiarch.isNotEmpty())
+            val ma = multiarch.first()
+            rb.append("multiarch dir: ").append(ma.name)
+                .append(if (multiarch.size > 1) " (also: " + multiarch.drop(1).map { it.name } + ")" else "")
+                .append('\n')
+            val eglLib = File(ma, "libEGL.so.1")
+            val eglMesa = File(ma, "libEGL_mesa.so.0")
+            val driEntry = File(ma, "dri/swrast_dri.so")
             val vendorJson = File(rootfs, "usr/share/glvnd/egl_vendor.d/50_mesa.json")
-            rb.append("libEGL.so.1: ").append(eglLibs.map { it.absolutePath }).append('\n')
-            rb.append("libEGL_mesa.so.0: ").append(eglMesa.map { it.absolutePath }).append('\n')
-            rb.append("50_mesa.json: ").append(vendorJson.exists()).append('\n')
-            rb.append("swrast_dri.so: ").append(driDrivers.map { it.absolutePath }).append('\n')
-            assertTrue("libEGL.so.1 (GLVND) missing after mesa install", eglLibs.isNotEmpty())
-            assertTrue("libEGL_mesa.so.0 (Mesa EGL vendor runtime) missing after mesa install", eglMesa.isNotEmpty())
-            assertTrue("glvnd vendor json missing: " + vendorJson.absolutePath, vendorJson.isFile)
-            if (driDrivers.isEmpty()) {
-                // Diagnostics for the next packaging move: dump any dri dirs.
-                File(rootfs, "usr/lib").walkTopDown().maxDepth(3)
-                    .filter { it.isDirectory && it.name == "dri" }
-                    .forEach { dd -> rb.append("dri dir ").append(dd.absolutePath)
-                        .append(": ").append(dd.list()?.toList()).append('\n') }
+            fun desc(f: File): String {
+                val t = try { java.nio.file.Files.readSymbolicLink(f.toPath()) } catch (e: Exception) { null }
+                return f.absolutePath + (t?.let { " -> " + it } ?: "")
             }
-            assertTrue("swrast_dri.so (mesa dri driver entry) missing after mesa install (see virgl-provision.txt)", driDrivers.isNotEmpty())
+            rb.append("libEGL.so.1: ").append(desc(eglLib)).append(" present=")
+                .append(VirglTestCommon.guestPresent(eglLib)).append('\n')
+            rb.append("libEGL_mesa.so.0: ").append(desc(eglMesa)).append(" present=")
+                .append(VirglTestCommon.guestPresent(eglMesa)).append('\n')
+            rb.append("50_mesa.json: ").append(vendorJson.isFile).append('\n')
+            rb.append("swrast_dri.so: ").append(desc(driEntry)).append(" present=")
+                .append(VirglTestCommon.guestPresent(driEntry)).append('\n')
+            assertTrue("libEGL.so.1 (GLVND) missing after mesa install: " + eglLib.absolutePath,
+                VirglTestCommon.guestPresent(eglLib))
+            assertTrue("libEGL_mesa.so.0 (Mesa EGL vendor runtime) missing after mesa install: " +
+                eglMesa.absolutePath, VirglTestCommon.guestPresent(eglMesa))
+            assertTrue("glvnd vendor json missing: " + vendorJson.absolutePath, vendorJson.isFile)
+            if (!VirglTestCommon.guestPresent(driEntry)) {
+                // Diagnostics for the next packaging move: dump the dri dir.
+                val driDir = File(ma, "dri")
+                rb.append("dri dir ").append(driDir.absolutePath).append(": ")
+                    .append(driDir.list()?.toList()).append('\n')
+            }
+            assertTrue("swrast_dri.so (mesa dri driver entry) missing after mesa install " +
+                "(see virgl-provision.txt)", VirglTestCommon.guestPresent(driEntry))
             // Record the ACTUAL installed versions (never hardcode one:
             // noble moved 24.2.8 -> 25.2.8 backport mid-series).
             val status = File(rootfs, "var/lib/dpkg/status")
@@ -121,28 +140,19 @@ class VirglRootfsProvisionTest {
             // between mesa packagings (24.2: linked from *_dri.so; 25.2:
             // libgallium-<ver>.so pulled by libEGL_mesa via DT_NEEDED).
             // So resolve the ACTUAL dependency chain: readlink targets of
-            // the EGL vendor lib and swrast_dri.so, plus any libgallium-*
-            // in the multiarch dirs. Presence of ".virgl_test" in ANY
+            // the EGL vendor lib and swrast_dri.so (rebased under the
+            // rootfs, never host-followed), plus any libgallium-* in the
+            // SAME multiarch dir. Presence of ".virgl_test" in ANY
             // candidate proves vtest code is present; ABSENCE only means
             // location moved again (VIRPIPE-CAPABILITY-UNKNOWN) - the
             // runtime eglprobe (stage 10/20) is the real virpipe gate.
-            fun resolved(f: File): File {
-                var curf = f; var depth = 0
-                while (depth++ < 8) {
-                    val target = try {
-                        java.nio.file.Files.readSymbolicLink(curf.toPath())
-                    } catch (e: Exception) { null } ?: break
-                    curf = if (target.isAbsolute) File(rootfs, target.toString().removePrefix("/"))
-                          else File(curf.parentFile, target.toString())
-                }
-                return curf
-            }
-            fun globPrefix(dir: File, prefix: String): List<File> =
-                dir.walkTopDown().maxDepth(4)
-                    .filter { it.isFile && it.name.startsWith(prefix) && it.name.contains(".so") }.toList()
             val needle = ".virgl_test".toByteArray()
-            val candidates = (listOfNotNull(eglMesa.firstOrNull(), driDrivers.firstOrNull())
-                .map { resolved(it) } + globPrefix(libDir, "libgallium-")).distinct()
+            val gallium = (ma.listFiles()?.toList() ?: emptyList())
+                .filter { VirglTestCommon.guestPresent(it) &&
+                    it.name.startsWith("libgallium-") && it.name.contains(".so") }
+                .map { VirglTestCommon.resolveGuest(rootfs, it) }
+            val candidates = (listOf(eglMesa, driEntry)
+                .map { VirglTestCommon.resolveGuest(rootfs, it) } + gallium).distinct()
             var hasVtest = false
             candidates.forEach { c ->
                 val found = if (c.isFile) {

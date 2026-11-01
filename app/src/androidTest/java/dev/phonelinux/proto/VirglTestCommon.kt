@@ -23,6 +23,32 @@ internal object VirglTestCommon {
         return XServer.PIdent(pid, fields[19], uid)
     }
 
+    /** Guest presence WITHOUT host-following: a guest-ABSOLUTE symlink
+     *  (-> /usr/lib/...) would resolve against the ANDROID host fs and
+     *  falsely pass/fail; the link itself counts as a present entry. */
+    fun guestPresent(f: File): Boolean =
+        java.nio.file.Files.isSymbolicLink(f.toPath()) || f.isFile
+
+    /** Resolve a guest symlink chain WITHOUT escaping the rootfs:
+     *  absolute targets rebase under rootfs; relative targets resolve
+     *  beside the link; bounded at 8 hops. */
+    fun resolveGuest(rootfs: File, f: File): File {
+        val rootCanon = rootfs.canonicalPath
+        var cur = f; var depth = 0
+        while (depth++ < 8) {
+            val target = try {
+                java.nio.file.Files.readSymbolicLink(cur.toPath())
+            } catch (e: Exception) { null } ?: break
+            val next = if (target.isAbsolute) File(rootfs, target.toString().removePrefix("/"))
+                       else File(cur.parentFile, target.toString())
+            // Never follow a link OUT of the rootfs: a relative target
+            // with enough ".." segments could escape onto the host.
+            if (!next.canonicalPath.startsWith(rootCanon + File.separator)) break
+            cur = next
+        }
+        return cur
+    }
+
     fun aliveAs(id: XServer.PIdent): Boolean {
         val cur = identOf(id.pid) ?: return false
         return cur.start == id.start && cur.uid == id.uid

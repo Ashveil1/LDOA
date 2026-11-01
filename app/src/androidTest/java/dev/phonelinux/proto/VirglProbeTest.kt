@@ -66,7 +66,10 @@ class VirglProbeTest {
      *  before any exec. Fails LOUDLY on any mismatch. */
     private fun stageProbe(): String {
         val extDir = ctx.getExternalFilesDir(null)
-        val rootSh = File(rootfs, "bin/sh")
+        // Resolve guest symlink chains WITHOUT host-following (usrmerge:
+        // bin -> usr/bin is relative, but a guest-ABSOLUTE link would
+        // resolve against the Android host - rebase under the rootfs).
+        val rootSh = VirglTestCommon.resolveGuest(rootfs, File(rootfs, "bin/sh"))
         val guestMach = elfMachine(rootSh)
         val guestArch = when (guestMach) {
             0x3E -> "x86_64"
@@ -75,8 +78,14 @@ class VirglProbeTest {
                 " (" + rootSh.absolutePath + ") - cannot select a probe binary")
         }
         val interp = if (guestArch == "x86_64") "lib64/ld-linux-x86-64.so.2" else "lib/ld-linux-aarch64.so.1"
-        assertTrue("guest libc interpreter missing in rootfs: " + interp,
-            File(rootfs, interp).exists())
+        // ubuntu-base 24.04.5 amd64: lib64 -> usr/lib64 and
+        // usr/lib64/ld-linux-x86-64.so.2 -> ../lib/x86_64-linux-gnu/
+        // ld-linux-x86-64.so.2 are ALL relative, but resolve explicitly
+        // so a future absolute link cannot falsely resolve on the host.
+        val interpResolved = VirglTestCommon.resolveGuest(rootfs, File(rootfs, interp))
+        assertTrue("guest libc interpreter missing in rootfs: " + interp +
+            " (resolved: " + interpResolved.absolutePath + ")",
+            VirglTestCommon.guestPresent(interpResolved))
         val ext = File(extDir, "eglprobe-" + guestArch)
         assertTrue("eglprobe-" + guestArch + " not pushed by the lane to " + ext.absolutePath +
             " - build/push step missing or failed", ext.isFile)
