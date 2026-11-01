@@ -13,8 +13,9 @@ import java.io.File
  * Runtime qualification of the crash-fallback RECOVERY path (kept from
  * the parked stop-intent suite; the intent mechanism itself was removed
  * after run 41306297954 showed a proot tracee cannot do useful work
- * after its tracer dies - ENOSYS on intercepted syscalls - making the
- * intent's guarded case unreachable).
+ * after its tracer dies - ENOSYS on intercepted syscalls. That finding
+ * covers the tested guarded case only; other tracer-death shapes were
+ * not established either way).
  *
  * One real session: an unexpected death (session + owned shells killed
  * by verified identity, the launcher script left alive, NO owned stop)
@@ -65,19 +66,37 @@ class GnomeFallbackRecoveryTest {
      *  window fell back to the whole file, and a STALE alive line from
      *  the previous session matched). Same discipline as
      *  SessionReset.trackedWarmup. */
-    private fun window(base: Long): String {
+    private fun window(base: Long): String? {
         if (!logFile.isFile) return ""
         val content = logFile.readText()
-        val b = if (content.length >= base) base.toInt() else 0
-        return content.substring(b.coerceAtMost(content.length))
+        // FAIL CLOSED on shrink: a shorter content than base means the
+        // log rotated/truncated under us; falling back to offset 0 would
+        // re-admit the stale lines the base exists to exclude.
+        if (content.length < base) return null
+        return content.substring(base.toInt())
     }
 
-    /** Wait for a line containing [needle] in the post-base window. */
-    private fun awaitLine(base: Long, needle: String, timeoutMs: Long, pollMs: Long = 2_000): String? {
+    /** A marker line belonging to THIS launch generation: it must sit
+     *  AFTER the exact launch-id line of this launch inside the post-base
+     *  window (a bare window match can still pick a line that precedes
+     *  this launch's id within the same file tail). */
+    private fun lineOfThisLaunch(w: String, launchId: String, needle: String): String? {
+        val idIdx = w.lastIndexOf("gnome-launch: launch id=" + launchId)
+        if (idIdx < 0) return null
+        val needleIdx = w.lastIndexOf(needle)
+        if (needleIdx < idIdx) return null
+        return w.substring(needleIdx).lineSequence().first().trim()
+    }
+
+    /** Wait for [needle] bound to THIS launch id; fails closed on rotation. */
+    private fun awaitLine(base: Long, launchId: String, needle: String, timeoutMs: Long, pollMs: Long = 2_000): String? {
         val end = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < end) {
-            val hit = window(base).lineSequence().lastOrNull { it.contains(needle) }
-            if (hit != null) return hit.trim()
+            val w = window(base)
+                ?: throw AssertionError("guest-gnome.log rotated/shrank under launch " + launchId +
+                    " - marker binding is void (fail-closed)")
+            val hit = lineOfThisLaunch(w, launchId, needle)
+            if (hit != null) return hit
             Thread.sleep(pollMs)
         }
         return null
@@ -118,13 +137,11 @@ class GnomeFallbackRecoveryTest {
      *  the window) inside one consistent snapshot - a plain substring
      *  search can match a previous generation's alive line (stale world),
      *  and log rotation alone does not protect ordering. */
-    private fun aliveOfThisLaunch(w: String, launchId: String): String? {
-        val idIdx = w.lastIndexOf("gnome-launch: launch id=" + launchId)
-        if (idIdx < 0) return null
-        val aliveIdx = w.lastIndexOf("gnome-launch: gnome-session alive pid=")
-        if (aliveIdx < idIdx) return null
-        return w.substring(aliveIdx).lineSequence().first().trim()
-    }
+    private fun aliveOfThisLaunch(w: String, launchId: String): String? =
+        lineOfThisLaunch(w, launchId, "gnome-launch: gnome-session alive pid=")
+
+    private var lastLaunchBase: Long? = null
+    private var lastLaunchId: String? = null
 
     private fun freshLaunch(): Triple<Process, Long, String> {
         SessionReset.resetForFreshLaunch(ctx, d) { Log.i(TAG, it) }
@@ -139,18 +156,42 @@ class GnomeFallbackRecoveryTest {
         assertTrue("current launch identity unavailable from app - cannot bind " +
             "readiness to THIS launch (failing clearly, not scanning the window)",
             launchId != null)
+        lastLaunchBase = base; lastLaunchId = launchId
         var aliveLine: String? = null
         val end = System.currentTimeMillis() + 6 * 60_000
         while (aliveLine == null && System.currentTimeMillis() < end) {
-            aliveLine = aliveOfThisLaunch(window(base), launchId!!)
+            val w = window(base)
+                ?: throw AssertionError("guest-gnome.log rotated/shrank under launch " + launchId +
+                    " - marker binding is void (fail-closed)")
+            aliveLine = aliveOfThisLaunch(w, launchId!!)
             if (aliveLine == null) Thread.sleep(2_000)
         }
-        assertTrue("session did not reach THIS launch's alive marker: " + window(base).takeLast(400),
-            aliveLine != null)
+        assertTrue("session did not reach THIS launch's alive marker: " +
+            (window(base)?.takeLast(400) ?: "<rotated>"), aliveLine != null)
         return Triple(proc, base, aliveLine!!)
     }
 
     @Test fun unexpectedDeathRecoversToRegisteredFallback() {
+        // Stale-evidence hygiene + failure preservation: the evidence file
+        // from any prior run is cleared at start; on failure the launch
+        // window tail is persisted BEFORE the @After cleanup runs, so a
+        // failed run keeps its evidence (the instr log tail is not enough
+        // when assertion messages truncate at 400 chars).
+        val evidence = File(ctx.filesDir, "gnome-recovery-evidence.txt")
+        evidence.delete()
+        try {
+            runRecoveryBody()
+        } catch (t: Throwable) {
+            try {
+                val base = lastLaunchBase
+                evidence.writeText("== recovery test FAILED: " + t.message + "\n== launch window tail ==\n" +
+                    (if (base != null) window(base)?.takeLast(4000) ?: "<log rotated>" else "<no launch reached>"))
+            } catch (we: Throwable) { }
+            throw t
+        }
+    }
+
+    private fun runRecoveryBody() {
         val (proc, base, aliveLine) = freshLaunch()
         val gsPid = aliveLine.substringAfter("gnome-session alive pid=").takeWhile { it.isDigit() }.toInt()
         val gsTicksOpt = startTicksOf(gsPid)
@@ -163,12 +204,12 @@ class GnomeFallbackRecoveryTest {
         for (sp in ourGnomeShellPids()) {
             val t = startTicksOf(sp); if (t != null) killVerified(sp, t, android.system.OsConstants.SIGKILL)
         }
-        val fellBack = awaitLine(base, "falling back to bare gnome-shell", 120_000)
+        val fellBack = awaitLine(base, lastLaunchId!!, "falling back to bare gnome-shell", 120_000)
         assertTrue("crash recovery must reach the fallback decision without an owned stop: " +
-            window(base).takeLast(400), fellBack != null)
-        val registered = awaitLine(base, "fallback shell registered", 150_000)
+            (window(base)?.takeLast(400) ?: "<rotated>"), fellBack != null)
+        val registered = awaitLine(base, lastLaunchId!!, "fallback shell registered", 150_000)
         assertTrue("ACTUAL recovery: the fallback shell must exec and register on the bus: " +
-            window(base).takeLast(400), registered != null)
+            (window(base)?.takeLast(400) ?: "<rotated>"), registered != null)
         assertTrue("the registered fallback shell must be an owned process",
             ourGnomeShellPids().isNotEmpty())
 
