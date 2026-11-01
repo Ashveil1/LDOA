@@ -148,11 +148,11 @@ jobs:
             if [ "$LANE" = virgl-only ]; then grep -q "OK (" /tmp/instr-virgl-provision.log || touch /tmp/PHONELINUX_VIRGL_FAILED; fi
             if [ "$LANE" = virgl-only ] && [ ! -f /tmp/PHONELINUX_VIRGL_FAILED ]; then timeout -s KILL 900 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.VirglServerSmokeTest,dev.phonelinux.proto.VirglProbeTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl.log | tail -40 || echo "VIRGL-INSTR-TIMEOUT: outer 900s bound hit - instrument never returned"; else echo "virgl SKIPPED (lane=$LANE)" > /tmp/instr-virgl.log; fi
             if [ "$LANE" = virgl-only ]; then grep -q "OK (" /tmp/instr-virgl.log || touch /tmp/PHONELINUX_VIRGL_FAILED; fi
-            if [ "$LANE" = virgl-only ]; then for f in virgl-provision.txt virgl-smoke.txt virgl-probe-default.txt virgl-probe-virpipe.txt virgl-server.log; do timeout 60 adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/$f > $f || echo "VIRGL-PULL-FAILED $f rc=$?"; done; fi
+            if [ "$LANE" = virgl-only ]; then for f in virgl-provision.txt virgl-smoke.txt virgl-probe-default.txt virgl-probe-virpipe.txt virgl-probe-nofork.txt virgl-server.log; do timeout 60 adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/$f > $f || echo "VIRGL-PULL-FAILED $f rc=$?"; done; fi
             # Evidence contract: every expected report must exist NON-EMPTY
             # (the tests write stub reports for unreached arms, so absence
             # means capture broke, not that the arm was skipped).
-            if [ "$LANE" = virgl-only ]; then for f in virgl-provision.txt virgl-smoke.txt virgl-probe-default.txt virgl-probe-virpipe.txt; do if [ ! -s "$f" ]; then echo "VIRGL-EVIDENCE-MISSING $f"; touch /tmp/PHONELINUX_VIRGL_FAILED; fi; done; fi
+            if [ "$LANE" = virgl-only ]; then for f in virgl-provision.txt virgl-smoke.txt virgl-probe-default.txt virgl-probe-virpipe.txt; do if [ ! -s "$f" ] || head -c 40 "$f" | grep -q "^cat: files/"; then echo "VIRGL-EVIDENCE-MISSING $f (absent, empty, or remote cat error captured)"; touch /tmp/PHONELINUX_VIRGL_FAILED; fi; done; fi
             # Diagnostics export + reuse-gate health (cheap, rootfs-free,
             # gates the user-facing ZIP export). Full output printed and
             # archived - no tail-only retention for gate classes.

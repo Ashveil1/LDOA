@@ -239,7 +239,8 @@ object XServer {
      *  then launches the normal software path, classified as such.
      *  Socket-ready is NOT GL-context-ready: the guest-side glxinfo
      *  renderer string is the only accepted proof of the virgl route. */
-    private fun startVirglServerOptIn(ctx: Context): File? {
+    private fun startVirglServerOptIn(ctx: Context, extraEnv: Map<String, String> = emptyMap(),
+                                      extraArgs: List<String> = emptyList()): File? {
         if (!virglOptedIn(ctx)) return null
         val nd = ctx.applicationInfo.nativeLibraryDir
         val bin = File(nd, "libvirgl_test_server.so")
@@ -258,9 +259,14 @@ object XServer {
         try { sock.delete() } catch (t: Throwable) { } // clean ONLY our own socket path
         val log = File(ctx.filesDir, "virgl-server.log")
         val proc = try {
-            val pb = ProcessBuilder(bin.absolutePath,
+            val args = mutableListOf(bin.absolutePath,
                 "--use-egl-surfaceless", "--use-gles", "--socket-path", sock.absolutePath)
+            // Test-only extras (diagnostics): the session launch at the
+            // call site above passes neither - product default unchanged.
+            args.addAll(extraArgs)
+            val pb = ProcessBuilder(args)
             pb.environment()["LD_LIBRARY_PATH"] = nd
+            pb.environment().putAll(extraEnv)
             pb.redirectErrorStream(true)
             pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))
             pb.start()
@@ -494,7 +500,13 @@ object XServer {
      *  the opt-in server directly (no GNOME launch needed for the
      *  transport proof). Same start/stop code the product path uses -
      *  no duplicate logic in tests. */
-    internal fun startVirglServerForTest(ctx: Context): File? = startVirglServerOptIn(ctx)
+    /** extraEnv/extraArgs are TEST-ONLY diagnostics (e.g. VIRGL_LOG_LEVEL
+     *  per virglrenderer 1.3.0 src/virgl_util.c:137-145, or upstream's
+     *  --no-fork, vtest/vtest_server.c:185). The session launch passes
+     *  neither and is byte-identical to before. */
+    internal fun startVirglServerForTest(ctx: Context, extraEnv: Map<String, String> = emptyMap(),
+                                         extraArgs: List<String> = emptyList()): File? =
+        startVirglServerOptIn(ctx, extraEnv, extraArgs)
     internal fun stopVirglServerForTest(reason: String) = stopVirglServer(reason)
     /** The CURRENT generation's socket (null when no server is up). Never
      *  reconstruct a path: socket names are generation-unique, so a stale

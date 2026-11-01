@@ -105,7 +105,7 @@ class VirglProbeTest {
     }
 
     private fun runProbeArm(title: String, reportFile: File, virgl: Boolean,
-                            holdSecs: Int, sock: File?): Proot.Result {
+                            holdSecs: Int, sock: File?, bootBudgetMs: Long = 120_000L): Proot.Result {
         val binds = mutableListOf<Pair<String, String>>()
         if (virgl) {
             assertNotNull("virgl socket missing for probe bind (server not up?)", sock)
@@ -117,7 +117,7 @@ class VirglProbeTest {
         val cmd = mutableListOf("/tmp/eglprobe")
         if (holdSecs > 0) cmd.addAll(listOf("--hold", holdSecs.toString()))
         val result = Proot.runGuest(ctx, rootfs, cmd, extraBinds = binds, extraEnv = env,
-            fakeRoot = false, timeoutMs = (holdSecs * 1000L) + 120_000L)
+            fakeRoot = false, timeoutMs = (holdSecs * 1000L) + bootBudgetMs)
         VirglTestCommon.writeProbeReport(reportFile, title, cmd, env, binds, result)
         return result
     }
@@ -141,13 +141,19 @@ class VirglProbeTest {
             val baseClass = if (soft.containsMatchIn(baseline)) "software"
                 else "NOT-virgl, NOT a known software string (unknown/other)"
 
-            // Arm B: opt-in virgl. Server up, then the holding probe keeps
-            // a client connected so Stop runs with an owned worker. Any
-            // early exit still writes the virpipe report (never masked).
+            // Arm B: opt-in virgl. The probe RESULT is the primary
+            // evidence: a missing forked worker is an observation recorded
+            // in the report, never a reason to discard the actual renderer
+            // outcome (review 2026-11-01). The renderer init runs LAZILY in
+            // the forked worker after accept (vtest_server.c:648-662), so
+            // "server up" says nothing about renderer init - only the
+            // guest probe outcome does.
             var armBReason = "arm B did not complete"
+            val diag = StringBuilder()
             try {
                 flag.writeText("1")
-                val sock = XServer.startVirglServerForTest(ctx)
+                val sock = XServer.startVirglServerForTest(ctx,
+                    extraEnv = mapOf("VIRGL_LOG_LEVEL" to "warning"))
                     ?: throw AssertionError("virgl server failed to start (see files/virgl-server.log)")
                 val ident = XServer.virglServerIdentForTest()
                 assertNotNull("virgl server identity not captured (fail-closed stop only)", ident)
@@ -156,39 +162,106 @@ class VirglProbeTest {
                 val curSock = XServer.virglCurrentSocketForTest()
                 assertEquals("current socket state differs from the started generation",
                     sock.absolutePath, curSock?.absolutePath)
+                diag.append("server: pid=").append(ident!!.pid).append(" start=").append(ident.start)
+                    .append(" sock=").append(sock.absolutePath).append('\n')
 
                 var virglResult: Proot.Result? = null
                 var virglErr: Throwable? = null
                 val t = kotlin.concurrent.thread {
                     try {
                         virglResult = runProbeArm("virpipe (opt-in, vtest socket bound, GALLIUM_DRIVER=virpipe)",
-                            probeReportVirgl, virgl = true, holdSecs = 25, sock = sock)
+                            probeReportVirgl, virgl = true, holdSecs = 25, sock = sock,
+                            bootBudgetMs = 20_000L)
                     } catch (e: Throwable) { virglErr = e }
                 }
-                // While the client holds the connection, the vtest server
-                // has a forked worker (vtest_server.c:548, one per accept).
-                var workers = VirglTestCommon.childrenOf(ident!!.pid)
+                // Bounded observation window: 15s. Arm A's whole guest boot
+                // + probe takes ~0.3s on this emulator, so a connected
+                // client's worker would be visible within ~1s. Absence is
+                // RECORDED here and asserted only against the collected
+                // probe outcome below - never asserted before it.
+                var scan: VirglTestCommon.ChildScan? = null
+                var liveWorkers: List<VirglTestCommon.ProcObs> = emptyList()
                 val wEnd = System.nanoTime() + 15_000_000_000L
-                while (workers.isEmpty() && System.nanoTime() < wEnd) {
-                    Thread.sleep(500); workers = VirglTestCommon.childrenOf(ident.pid)
+                while (System.nanoTime() < wEnd) {
+                    scan = VirglTestCommon.scanChildren(ident.pid)
+                    liveWorkers = (scan.viaChildrenFile + scan.viaPpidScan)
+                        .filter { it.state != "Z" }.distinctBy { it.pid }
+                    if (liveWorkers.isNotEmpty()) break
+                    Thread.sleep(500)
                 }
-                assertTrue("no owned vtest worker observed while eglprobe held the connection" +
-                    " - the stop-with-worker path was NOT exercised", workers.isNotEmpty())
-                XServer.stopVirglServerForTest("probe-stop-with-client")
-                assertTrue("virgl server still alive as captured identity after stop",
-                    !VirglTestCommon.aliveAs(ident))
-                for (w in workers) {
-                    assertTrue("virgl worker " + w.pid + " still alive after stop", !VirglTestCommon.aliveAs(w))
-                }
-                t.join(150_000)
-                assertTrue("virpipe probe thread did not finish: " + virglErr, virglErr == null && virglResult != null)
+                val unix = VirglTestCommon.procNetUnixRows(sock.name)
+                diag.append("worker-window: 15s; live-workers: ")
+                    .append(if (liveWorkers.isEmpty()) "NONE-OBSERVED"
+                            else liveWorkers.joinToString(",") { it.pid.toString() + "/" + it.state })
+                    .append('\n')
+                diag.append("children-file-raw: [").append(scan?.childrenFileRaw ?: "<unread>")
+                    .append("] children-file-error: ").append(scan?.childrenFileError ?: "none")
+                    .append(" ppid-scan-error: ").append(scan?.scanError ?: "none").append('\n')
+                diag.append("children-file-entries(incl-zombies): ")
+                    .append(scan?.viaChildrenFile?.joinToString(",") { it.pid.toString() + "/" + it.state } ?: "<none>")
+                    .append(" ppid-scan-entries(incl-zombies): ")
+                    .append(scan?.viaPpidScan?.joinToString(",") { it.pid.toString() + "/" + it.state } ?: "<none>")
+                    .append('\n')
+                diag.append("proc-net-unix(circumstantial-labeled) rows-with-sockname: [")
+                    .append(unix.first ?: "<none>").append("] read-error: ")
+                    .append(unix.second ?: "none").append(" total-table-rows: ")
+                    .append(unix.third).append('\n')
+                diag.append("probe-thread-alive-after-window: ").append(t.isAlive).append('\n')
 
-                assertEquals("virpipe eglprobe failed (see " + probeReportVirgl.name + ")",
-                    0, virglResult!!.exitCode)
-                val candidate = VirglTestCommon.rendererOf(virglResult!!)
+                if (liveWorkers.isNotEmpty()) {
+                    // Stop WITH an observed worker: the owned
+                    // stop-with-client path is genuinely exercised.
+                    XServer.stopVirglServerForTest("probe-stop-with-client")
+                    assertTrue("virgl server still alive as captured identity after stop",
+                        !VirglTestCommon.aliveAs(ident))
+                    for (w in liveWorkers) {
+                        val obs = VirglTestCommon.obsOf(w.pid)
+                        assertTrue("virgl worker " + w.pid + " still running after stop (state=" +
+                            (obs?.state ?: "gone") + ")", obs == null || obs.state == "Z")
+                    }
+                    diag.append("stop-path: WITH observed worker(s) ")
+                        .append(liveWorkers.map { it.pid }).append('\n')
+                } else {
+                    diag.append("stop-path: WITHOUT observed worker (deferred until after probe join)\n")
+                }
+                // Bounded join EITHER WAY: the probe's own runGuest timeout
+                // (25s hold + 20s boot budget) bounds the guest; on timeout
+                // the Result still carries partial stdout/stderr with the
+                // stage breadcrumbs localizing where the guest hung.
+                t.join(70_000)
+                diag.append("probe-thread-alive-after-join: ").append(t.isAlive)
+                    .append(" thread-err: ").append(virglErr?.toString() ?: "none").append('\n')
+                if (liveWorkers.isEmpty()) {
+                    XServer.stopVirglServerForTest("probe-stop-no-observed-worker")
+                    assertTrue("virgl server still alive as captured identity after stop",
+                        !VirglTestCommon.aliveAs(ident))
+                }
+                assertTrue("virpipe probe thread did not finish within bound: " + virglErr,
+                    virglErr == null && virglResult != null)
+                val res = virglResult!!
+                val candidate = VirglTestCommon.rendererOf(res)
+                val stringsDone = res.stdout.contains("EGLPROBE-STRINGS-DONE")
+                // A stop with a held client RESETS the connection: mesa
+                // prints "lost connection" and eglprobe aborts AFTER the
+                // strings were printed - that exit code is expected
+                // non-zero; classify, do not fail. Without a held client
+                // the exit code contract is strict.
+                if (liveWorkers.isEmpty() || !stringsDone) {
+                    assertEquals("virpipe eglprobe failed (see " + probeReportVirgl.name + ")",
+                        0, res.exitCode)
+                }
                 assertNotNull("virpipe probe printed no GL-RENDERER (see " + probeReportVirgl.name + ")", candidate)
                 assertTrue("opt-in probe must render through virpipe; any other string means the virgl" +
                     " route FAILED (actual: " + candidate + ")", candidate!!.contains("virgl ("))
+                // A provably HELD connection (hold-entered breadcrumb) with
+                // NO worker observed by EITHER /proc mechanism means the
+                // observation harness is defective on this device - fail
+                // loudly WITH the raw captures, never silently.
+                if (res.stderr.contains("EGLPROBE-STAGE: hold-entered") && liveWorkers.isEmpty()) {
+                    throw AssertionError("guest provably HELD the vtest connection (hold-entered) but no" +
+                        " forked worker was observed by either /proc mechanism - worker observation is" +
+                        " defective on this device (see diagnostics in " + probeReportVirgl.name + ")")
+                }
                 val host = candidate.substringAfter("virgl (").substringBefore(")")
                 val hostClass = if (soft.containsMatchIn(host))
                     "virgl transport PROVEN; host backend SOFTWARE (" + host + ") - NO GPU offload claim"
@@ -199,16 +272,23 @@ class VirglProbeTest {
                     listOf("/tmp/eglprobe", "--hold", "25"),
                     mapOf("EGL_PLATFORM" to "surfaceless", "GALLIUM_DRIVER" to "virpipe"),
                     listOf(sock.absolutePath to "/tmp/.virgl_test"),
-                    virglResult,
+                    res,
                     extra = "baseline-classification: " + baseClass + " renderer=[" + baseline + "]\n" +
                         "host-classification: " + hostClass + "\n" +
-                        "workers-at-stop: " + workers.map { it.pid } + "\n" +
+                        "workers-at-stop: " + liveWorkers.map { it.pid } + "\n" +
+                        "--- diagnostics ---\n" + diag.toString() +
                         "emulator result - NOT Adreno; transport proof only, no performance claim\n")
             } finally {
-                if (!probeReportVirgl.isFile) {
-                    probeReportVirgl.writeText("== virpipe arm NOT COMPLETED ==\nreason: " + armBReason + "\n")
+                // Append-only evidence: a stub NEVER replaces an existing
+                // report, and the stub carries the diagnostics too.
+                if (armBReason != "completed" || !probeReportVirgl.isFile) {
+                    val stub = "== virpipe arm NOT COMPLETED ==\nreason: " + armBReason + "\n" +
+                        "--- diagnostics ---\n" + diag.toString()
+                    if (probeReportVirgl.isFile) probeReportVirgl.appendText("\n" + stub)
+                    else probeReportVirgl.writeText(stub)
                 }
             }
+
         } finally {
             // Unmasked contract: a missing virpipe report is classified,
             // never silently absent - covers failure BEFORE arm B starts
@@ -218,6 +298,39 @@ class VirglProbeTest {
                     "reason: staging or baseline arm failed first - see virgl-probe-default.txt" +
                     " (if present) and the instrument log\n")
             }
+            if (savedFlag != null) flag.writeText(savedFlag) else flag.delete()
+        }
+    }
+
+    /** Diagnostic compare (review 2026-11-01): upstream vtest supports
+     *  --no-fork (vtest_server.c:185 {"no-fork", no_argument, NULL,
+     *  OPT_NO_FORK}; do_fork=false at lines 210/213/271), which moves the
+     *  renderer init into the MAIN server process at the first client
+     *  (vtest_server.c:648-662). If the forked arm shows no worker but
+     *  this arm proves the virgl renderer, renderer init is healthy and
+     *  the fork/observation path is the defect; if both fail, renderer
+     *  init on the SwiftShader translator is the defect. Test-only flag:
+     *  the product launch never passes --no-fork. */
+    @Test fun virpipeNoForkRendererCompare() {
+        val savedFlag = if (flag.isFile) flag.readText() else null
+        try {
+            stageProbe()
+            flag.writeText("1")
+            val sock = XServer.startVirglServerForTest(ctx,
+                extraEnv = mapOf("VIRGL_LOG_LEVEL" to "warning"),
+                extraArgs = listOf("--no-fork"))
+                ?: throw AssertionError("virgl server (--no-fork) failed to start (see files/virgl-server.log)")
+            val report = File(ctx.filesDir, "virgl-probe-nofork.txt")
+            val res = runProbeArm("virpipe no-fork compare (renderer proof only)",
+                report, virgl = true, holdSecs = 0, sock = sock, bootBudgetMs = 30_000L)
+            XServer.stopVirglServerForTest("nofork-compare-stop")
+            val candidate = VirglTestCommon.rendererOf(res)
+            assertNotNull("no-fork arm printed no GL-RENDERER (see virgl-probe-nofork.txt)", candidate)
+            assertTrue("no-fork arm must render through virpipe; any other string means renderer" +
+                " init FAILED in the main server process too (actual: " + candidate + ")",
+                candidate!!.contains("virgl ("))
+        } finally {
+            XServer.stopVirglServerForTest("nofork-compare-cleanup")
             if (savedFlag != null) flag.writeText(savedFlag) else flag.delete()
         }
     }

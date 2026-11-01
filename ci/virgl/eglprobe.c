@@ -68,6 +68,11 @@ typedef EGLBoolean (*PFN_eglDestroyContext)(EGLDisplay, EGLContext);
 typedef EGLBoolean (*PFN_eglTerminate)(EGLDisplay);
 typedef const unsigned char *(*PFN_glGetString)(EGLenum);
 
+/* Flushed stage breadcrumbs on stderr: proot drains stderr concurrently
+ * and the partial capture survives runGuest's timeout kill, so the last
+ * breadcrumb localizes a hang instead of a bare "thread alive". */
+#define STAGE(s) do { fprintf(stderr, "EGLPROBE-STAGE: %s\n", s); fflush(stderr); } while (0)
+
 static int fail(int stage, const char *what, PFN_eglGetError getError) {
     fprintf(stderr, "EGLPROBE-ERROR stage=%d %s", stage, what);
     if (getError) fprintf(stderr, " eglError=0x%x", getError());
@@ -96,6 +101,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "EGLPROBE-ERROR stage=2 missing egl symbol in libEGL\n");
         return 2;
     }
+    STAGE("libEGL-ready");
 
     /* Capability check BEFORE relying on the platform: the surfaceless
      *  platform is a Mesa extension (EGL_MESA_platform_surfaceless), not
@@ -108,29 +114,37 @@ int main(int argc, char **argv) {
         fprintf(stderr, "EGLPROBE-ERROR stage=10 EGL_MESA_platform_surfaceless NOT in client extensions\n");
         return 10;
     }
+    STAGE("client-exts-ok");
     EGLDisplay dpy = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, NULL, NULL);
     if (!dpy) return fail(3, "eglGetPlatformDisplay(SURFACELESS)", getError);
+    STAGE("display-ok");
     EGLint maj = 0, min = 0;
     if (!initialize(dpy, &maj, &min)) return fail(4, "eglInitialize", getError);
+    STAGE("init-ok");
     printf("EGL-VENDOR: %s\n", queryString(dpy, EGL_VENDOR));
     printf("EGL-VERSION: %s\n", queryString(dpy, EGL_VERSION));
     fflush(stdout);
 
     if (!bindAPI(EGL_OPENGL_ES_API)) return fail(5, "eglBindAPI(GLES)", getError);
+    STAGE("bind-ok");
     EGLint cfgAttrs[] = { EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_NONE };
     EGLConfig cfg;
     EGLint n = 0;
     if (!chooseConfig(dpy, cfgAttrs, &cfg, 1, &n) || n < 1) return fail(6, "eglChooseConfig", getError);
+    STAGE("config-ok");
     EGLint ctxAttrs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
     EGLContext ctx = createContext(dpy, cfg, NULL, ctxAttrs);
     if (!ctx) return fail(7, "eglCreateContext", getError);
+    STAGE("context-ok");
     if (!makeCurrent(dpy, NULL, NULL, ctx)) return fail(8, "eglMakeCurrent(surfaceless)", getError);
+    STAGE("current-ok");
 
     void *gl = dlopen("libGLESv2.so.2", RTLD_NOW);
     if (!gl) gl = dlopen("libGLESv2.so", RTLD_NOW);
     if (!gl) { fprintf(stderr, "EGLPROBE-ERROR stage=9 dlopen(libGLESv2): %s\n", dlerror()); return 9; }
     PFN_glGetString glGetString = (PFN_glGetString) dlsym(gl, "glGetString");
     if (!glGetString) { fprintf(stderr, "EGLPROBE-ERROR stage=9 missing glGetString\n"); return 9; }
+    STAGE("libGLES-ready");
     const unsigned char *vendor = glGetString(GL_VENDOR);
     const unsigned char *renderer = glGetString(GL_RENDERER);
     const unsigned char *version = glGetString(GL_VERSION);
@@ -142,7 +156,7 @@ int main(int argc, char **argv) {
 
     if (argc >= 3 && strcmp(argv[1], "--hold") == 0) {
         int secs = atoi(argv[2]);
-        if (secs > 0) sleep((unsigned int) secs);
+        if (secs > 0) { STAGE("hold-entered"); sleep((unsigned int) secs); STAGE("hold-exited"); }
     }
 
     makeCurrent(dpy, NULL, NULL, NULL);
