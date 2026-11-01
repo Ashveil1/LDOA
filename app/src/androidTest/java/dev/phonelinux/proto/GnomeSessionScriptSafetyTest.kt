@@ -250,4 +250,66 @@ class GnomeSessionScriptSafetyTest {
         assertTrue("installed-version probe must exist", script.contains("dpkg-query -W -f="))
         assertTrue("sampler system-bus liveness probe must exist", script.contains("sysbus_live="))
     }
+
+    /** P1 fix structure: the launch id comes from the app via env (with
+     *  a date fallback), and the parent identity is captured FROZEN at
+     *  launch - never re-read at fallback time (reparenting after tracer
+     *  death is exactly the guarded case). */
+    @Test fun envBoundLaunchIdAndFrozenRootIdentity() {
+        assertTrue("launch id must prefer the app-passed env value",
+            script.contains("LAUNCH_ID=\${LDOA_LAUNCH_ID:-"))
+        assertTrue("stop key must come from env only",
+            script.contains("STOP_KEY=\$LDOA_STOP_KEY"))
+        val freeze = script.indexOf("ROOT_PID=")
+        val use = script.indexOf("owned_stop_intent() {")
+        assertTrue("root identity must be frozen at launch", freeze >= 0)
+        assertTrue("intent check must exist", use >= 0)
+        assertTrue("freeze must precede the intent check", freeze < use)
+        assertTrue("frozen identity must come from /proc/self/stat (not ppid-at-stop)",
+            script.contains("ROOT_PID=" + "\$(sed 's/^[^)]*) //' /proc/self/stat"))
+        assertTrue("frozen identity must be logged for runtime validation (no secret: the nonce is never logged)",
+            script.contains("frozen parent identity pid="))
+    }
+
+    /** The intent is honored at all four reachable points (observer,
+     *  post-exit decision, fallback gate after the survivor window,
+     *  pre-exec gate after a bounded settle), and NO reader ever deletes
+     *  it: the observer and the parent BOTH consume the same file, so a
+     *  first reader's delete would make the second reader see absence
+     *  and respawn (the multi-reader control-file race). A retained
+     *  intent is inert for later launches (exact id + key + frozen
+     *  identity match required). Every honor exits without a fallback. */
+    @Test fun intentCheckpointsCoverObserverDecisionAndGate() {
+        assertEquals("exactly four honor checkpoints", 4,
+            script.split("owned_stop_intent; then").size - 1)
+        assertTrue("observer checkpoint must end observation",
+            script.contains("observer: owned stop intent honored"))
+        assertTrue("decision checkpoint uses the shared honor path",
+            script.contains("honor_owned_stop \"post-exit decision\""))
+        assertTrue("fallback-gate checkpoint closes the survivor-window race",
+            script.contains("honor_owned_stop \"fallback gate after survivor window\""))
+        assertTrue("pre-exec checkpoint makes the P2 race deterministic",
+            script.contains("honor_owned_stop \"pre-exec gate\""))
+        assertTrue("honor must exit with NO fallback",
+            script.contains("NO fallback, exiting; unexpected-death recovery is unchanged when no intent matches"))
+        assertFalse("no time-based intent cleanup may exist",
+            script.contains("name 'ldoa-stop-intent." + "*' -mmin"))
+        assertFalse("no reader may ever delete an intent file (multi-reader race)",
+            script.contains("rm -f \"/tmp/xdg/ldoa-stop-intent"))
+        assertTrue("retained-intent rationale must be documented in the script",
+            script.contains("NO reader ever deletes the intent file"))
+    }
+
+    /** The control nonce is compared, never logged, and the check binds
+     *  launch id + stopkey + frozen root identity with exact fields. */
+    @Test fun controlNonceComparedNeverLogged() {
+        for (line in script.lines()) {
+            assertFalse("STOP_KEY must never be echoed: " + line,
+                line.contains("echo") && line.contains("STOP_KEY"))
+        }
+        assertTrue("stopkey exact-field extract",
+            script.contains("stopkey=[A-Za-z0-9._-]+"))
+        assertTrue("rootpid exact-field compare against the frozen identity",
+            script.contains("[ "\$IP" = "\$ROOT_PID" ] && [ "\$IS" = "\$ROOT_START" ]"))
+    }
 }

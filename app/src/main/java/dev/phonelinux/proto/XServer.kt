@@ -38,6 +38,13 @@ object XServer {
      *  after the session died (custom-worker review lesson, Phase A
      *  patch 3/8). */
     @Volatile private var sessionRootIdent: PIdent? = null
+    /** Owned-stop intent identity of the CURRENT launch (control nonce,
+     *  never logged): written to the guest as a stop intent BEFORE any
+     *  teardown signal so a surviving launcher script can tell a planned
+     *  stop from a crash and suppress its bare-shell fallback. */
+    private var currentLaunchId: String? = null
+    private var currentLaunchStopKey: String? = null
+    private val stopKeyRng = java.security.SecureRandom()
     @Volatile private var sessionBusIdent: PIdent? = null
     @Volatile private var gnomeSession: Pair<String, Process>? = null
 
@@ -221,7 +228,10 @@ object XServer {
             return@synchronized current.second
         }
         Log.i(TAG, "launching GNOME session")
-        return@synchronized GuestUbuntu.launchGnomeSession(ctx, rootfs).also {
+        val launchId = System.currentTimeMillis().toString() + "-" + Integer.toHexString(stopKeyRng.nextInt())
+        val keyBytes = ByteArray(16); stopKeyRng.nextBytes(keyBytes)
+        val stopKey = keyBytes.joinToString("") { "%02x".format(it) }
+        return@synchronized GuestUbuntu.launchGnomeSession(ctx, rootfs, launchId, stopKey).also {
             gnomeSession = distro.id to it; gnomeSessionBus = null; ownershipGeneration++
             retainedSessionStarting = false; sessionGatePassed = false; lateWatchFor = null
             // Capture the root identity AT SPAWN: the launcher knows exactly
@@ -231,6 +241,8 @@ object XServer {
             // tracer alone, orphaning the guest tree (the same leak class
             // as a name-kill, just quieter). Gate-confirm re-captures below.
             sessionRootIdent = pidOf(it)?.let { pid -> identityOf(pid) }
+            currentLaunchId = launchId; currentLaunchStopKey = stopKey
+            writeLaunchMarker(rootfs, launchId, stopKey, sessionRootIdent)
             if (sessionRootIdent == null) Log.w(TAG,
                 "GNOME session root identity NOT captured at spawn: any teardown before gate-confirm degrades to tracer-destroy only (guest tree leaks)")
         }
@@ -411,6 +423,8 @@ object XServer {
         sessionProcess = null
         sessionRootIdent = null
         sessionBusIdent = null
+        currentLaunchId = null
+        currentLaunchStopKey = null
         busIdentGeneration = 0L
         sessionGateLogBase = 0L
         lastBusCaptureRejection = null
@@ -1006,6 +1020,13 @@ object XServer {
         val procSnap = rootProc
         val idents = LinkedHashMap<Int, PIdent>()
         teardownHookForTest?.invoke()
+        // Owned-stop intent FIRST, before any signal: a launcher script
+        // that survives this teardown (P1: dead/reused root skips the
+        // tree walk; P2: Stop landing inside the survivor-check window)
+        // must be able to tell this planned stop from a crash and
+        // suppress its bare-shell fallback. Best-effort: a write failure
+        // never blocks teardown and never changes fallback behavior.
+        writeOwnedStopIntent(ctx, rootSnap)
         if (rootSnap != null) {
             val cur = identityOf(rootSnap.pid)
             if (cur != null && cur.start == rootSnap.start && cur.uid == rootSnap.uid) {
@@ -1040,6 +1061,8 @@ object XServer {
             sessionProcess = null
             sessionRootIdent = null
             sessionBusIdent = null
+            currentLaunchId = null
+            currentLaunchStopKey = null
             busIdentGeneration = 0L
             gnomeSession = null
             gnomeSessionBus = null
@@ -1259,6 +1282,100 @@ object XServer {
         val uid = try { Os.stat("/proc/" + pid).st_uid } catch (t: Throwable) { return null }
         if (uid != android.os.Process.myUid()) return null
         return PIdent(pid, info.start, uid)
+    }
+
+    internal data class LaunchMarker(val launchId: String, val stopKey: String,
+        val rootPid: Int, val rootStart: String, val rootUid: Int)
+
+    private fun launchMarkerFile(rootfs: File) = File(rootfs, "tmp/xdg/ldoa-launch-current")
+
+    /** Launch-time identity marker (atomic tmp+rename): the ONLY way a
+     *  stop after an app restart can recover the launch's stop-intent
+     *  identity. A stale marker is a LEAD, never proof - the stop path
+     *  cross-checks it against the live owned root before use. */
+    private fun writeLaunchMarker(rootfs: File, launchId: String, stopKey: String, root: PIdent?) {
+        if (root == null) return
+        try {
+            val dir = File(rootfs, "tmp/xdg")
+            if (!dir.isDirectory) return
+            val tmp = File(dir, ".ldoa-launch-current.tmp")
+            tmp.writeText("launchid=" + launchId + " stopkey=" + stopKey + " rootpid=" + root.pid +
+                " rootstart=" + root.start + " rootuid=" + root.uid + "\n")
+            if (!tmp.renameTo(launchMarkerFile(rootfs)))
+                Log.w(TAG, "launch marker rename failed - post-restart stop-intent unavailable (fallback behavior unchanged)")
+        } catch (t: Throwable) {
+            Log.w(TAG, "launch marker write failed (best-effort): " + t.message)
+        }
+    }
+
+    private fun readLaunchMarker(rootfs: File): LaunchMarker? {
+        return try {
+            val f = launchMarkerFile(rootfs)
+            if (!f.isFile) return null
+            val fields = f.readText().trim().split(Regex("\\s+"))
+                .mapNotNull { val i = it.indexOf('='); if (i > 0) it.substring(0, i) to it.substring(i + 1) else null }
+                .toMap()
+            LaunchMarker(
+                fields["launchid"] ?: return null,
+                fields["stopkey"] ?: return null,
+                fields["rootpid"]?.toIntOrNull() ?: return null,
+                fields["rootstart"] ?: return null,
+                fields["rootuid"]?.toIntOrNull() ?: return null)
+        } catch (t: Throwable) { null }
+    }
+
+    /** Record the owned-stop intent for the CURRENT launch BEFORE any
+     *  teardown signal (atomic tmp+rename + readback verify). Identity
+     *  sources, in order: this process's in-memory launch fields; after
+     *  an app restart, the launch marker - but only when its frozen root
+     *  identity is LIVE and equals the currently-owned root (a stale
+     *  marker must never bind a stop to the wrong world). Any doubt: no
+     *  intent, and the guest's fallback behavior stays exactly as
+     *  before. The control nonce is written to the guest file only and
+     *  never logged. */
+    private fun writeOwnedStopIntent(ctx: Context, rootSnap: PIdent?) {
+        try {
+            val rootfs = DistroInstaller(ctx).rootfsDir(Distros.UBUNTU)
+            val dir = File(rootfs, "tmp/xdg")
+            if (!dir.isDirectory) return
+            var launchId: String?
+            var stopKey: String?
+            synchronized(ownershipLock) { launchId = currentLaunchId; stopKey = currentLaunchStopKey }
+            var root: PIdent? = rootSnap
+            if (launchId == null || stopKey == null || root == null) {
+                val m = readLaunchMarker(rootfs)
+                val owned = synchronized(ownershipLock) { sessionRootIdent }
+                if (m != null && owned != null &&
+                    m.rootPid == owned.pid && m.rootStart == owned.start && m.rootUid == owned.uid) {
+                    val live = identityOf(m.rootPid)
+                    if (live != null && live.start == m.rootStart && live.uid == m.rootUid) {
+                        launchId = m.launchId; stopKey = m.stopKey; root = owned
+                    }
+                }
+            }
+            val id = launchId; val key = stopKey; val rt = root
+            if (id == null || key == null || rt == null || !id.matches(Regex("[A-Za-z0-9._-]+"))) {
+                Log.i(TAG, "owned-stop intent: no trustworthy launch identity - none written (fallback behavior unchanged)")
+                return
+            }
+            val content = "stopkey=" + key + " rootpid=" + rt.pid + " rootstart=" + rt.start + " rootuid=" + rt.uid + "\n"
+            val tmp = File(dir, ".ldoa-stop-intent." + id + ".tmp")
+            val dst = File(dir, "ldoa-stop-intent." + id)
+            tmp.writeText(content)
+            if (!tmp.renameTo(dst)) {
+                Log.w(TAG, "owned-stop intent rename failed (fallback behavior unchanged)")
+                return
+            }
+            val back = try { dst.readText() } catch (t: Throwable) { "" }
+            if (back != content) {
+                Log.w(TAG, "owned-stop intent readback mismatch - removed (fallback behavior unchanged)")
+                try { dst.delete() } catch (t: Throwable) { }
+                return
+            }
+            Log.i(TAG, "owned-stop intent recorded for this launch before any signal (key never logged)")
+        } catch (t: Throwable) {
+            Log.w(TAG, "owned-stop intent write failed (best-effort, fallback behavior unchanged): " + t.message)
+        }
     }
 
     /** TERM the captured identities (launch-confirmed root tree + the

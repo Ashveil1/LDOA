@@ -1,0 +1,244 @@
+package dev.phonelinux.proto
+
+import android.util.Log
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import org.junit.After
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import org.junit.runner.RunWith
+import java.io.File
+
+/**
+ * Runtime qualification of the owned-stop intent (P1/P2 fallback
+ * suppression). Two real sessions only.
+ *
+ * T1 simulates the audited P1 path and PROVES it is not vacuous: the
+ * script's frozen parent identity must equal the app's spawned tracer
+ * pid (the script's parent really is the tracer, not an intermediate
+ * wrapper), the script must survive the tracer's SIGKILL, and its ppid
+ * must change (reparenting actually simulated). Then an owned Stop
+ * lands and the session is killed. BOTH intent readers must honor the
+ * SAME retained file: whichever checkpoint fires first, the other still
+ * sees the intent (no reader ever deletes it - a delete-after-first-read
+ * would make the second reader see absence and respawn). The parent's
+ * honor waits for the observer, so the observer's honor always lands
+ * while the parent is still alive. Reader ORDER is timing-dependent
+ * (the parent's wait unblocks ~immediately, the observer polls every
+ * 10s); both orders are safe, so the test asserts both honor lines and
+ * the retained file, not the order.
+ *
+ * T2 keeps crash recovery intact: with NO owned stop, an unexpected
+ * session death (session + shell killed by verified identity, script
+ * left alive) must still reach the fallback decision - and a planted
+ * STALE intent (old id/key/foreign root) must be ignored and never
+ * deleted by a non-owner. The P2 race probe then kills the tracer
+ * (identity-verified) and lands Stop right after the fallback decision
+ * line: with the root dead the teardown skips the tree walk fail-closed
+ * (nothing else can kill the script first), the intent is still written
+ * from the in-memory launch identity, and the surviving script is
+ * deterministically inside the survivor-window/2s pre-exec span (the
+ * survivor window is ~0s once all owned shells are dead). One of the
+ * two post-decision gates must honor the intent and NO second
+ * gnome-shell may exec. Coverage label: the probe exercises the
+ * fallback-gate/pre-exec-gate span; the decision checkpoint is
+ * exercised by T1; a live-root Stop needs no gate (the identity-
+ * verified teardown kills the whole tree, script included).
+ */
+@RunWith(AndroidJUnit4::class)
+class GnomeStopIntentTest {
+    private val TAG = "GnomeStopIntentTest"
+    private val ctx get() = InstrumentationRegistry.getInstrumentation().targetContext
+    private val d = Distros.UBUNTU
+    private val rootfs get() = DistroInstaller(ctx).rootfsDir(d)
+    private val logFile get() = File(ctx.filesDir, "guest-gnome.log")
+
+    @After fun cleanup() {
+        try { XServer.stopDesktopMode(ctx) } catch (t: Throwable) { }
+        try { XServer.resetOwnershipStateForTest() } catch (t: Throwable) { }
+    }
+
+    private fun pidOf(p: Process): Int =
+        try { val f = p.javaClass.getDeclaredField("pid"); f.isAccessible = true; f.getInt(p) }
+        catch (t: Throwable) { -1 }
+
+    /** /proc stat fields after the comm ')' : [0]=state [1]=ppid [19]=starttime. */
+    private fun statFields(pid: Int): List<String>? {
+        val st = try { File("/proc/" + pid + "/stat").readText() } catch (t: Throwable) { return null }
+        val close = st.lastIndexOf(')')
+        if (close < 0) return null
+        val rest = st.substring(close + 1).trim().split(Regex("\\s+"))
+        return if (rest.size >= 20) rest else null
+    }
+
+    private fun startTicksOf(pid: Int): String? = statFields(pid)?.get(19)
+
+    /** Identity-checked kill: signal only if pid still carries the same
+     *  start ticks and runs as our uid. */
+    private fun killVerified(pid: Int, startTicks: String, sig: Int): Boolean {
+        if (startTicksOf(pid) != startTicks) return false
+        val uid = try { android.system.Os.stat("/proc/" + pid).st_uid } catch (t: Throwable) { return false }
+        if (uid != android.os.Process.myUid()) return false
+        return try { android.os.Process.sendSignal(pid, sig); true } catch (t: Throwable) { false }
+    }
+
+    private fun window(base: Long): String {
+        if (!logFile.isFile) return ""
+        val content = logFile.readText()
+        val b = if (content.length >= base) base.toInt() else 0
+        return content.substring(b.coerceAtMost(content.length))
+    }
+
+    /** Wait for a line containing [needle] in the post-base window. */
+    private fun awaitLine(base: Long, needle: String, timeoutMs: Long, pollMs: Long = 2_000): String? {
+        val end = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < end) {
+            val hit = window(base).lineSequence().lastOrNull { it.contains(needle) }
+            if (hit != null) return hit.trim()
+            Thread.sleep(pollMs)
+        }
+        return null
+    }
+
+    private fun ourGnomeShellPids(): List<Int> {
+        val out = ArrayList<Int>()
+        for (f in File("/proc").listFiles { x -> x.name.matches(Regex("[0-9]+")) } ?: return out) {
+            val comm = try { File(f, "comm").readText().trim() } catch (t: Throwable) { continue }
+            if (comm != "gnome-shell") continue
+            val uid = try { android.system.Os.stat(f.absolutePath).st_uid } catch (t: Throwable) { continue }
+            if (uid == android.os.Process.myUid()) out.add(f.name.toInt())
+        }
+        return out
+    }
+
+    private fun freshLaunch(): Pair<Process, Long> {
+        SessionReset.resetForFreshLaunch(ctx, d) { Log.i(TAG, it) }
+        XServer.start(ctx)
+        val base = if (logFile.isFile) logFile.length() else 0L
+        val proc = XServer.launchOrReuseGnomeSession(ctx, d, rootfs)
+        val alive = awaitLine(base, "gnome-launch: gnome-session alive pid=", 6 * 60_000)
+        assertTrue("session did not reach the alive marker: " + window(base).takeLast(400), alive != null)
+        return proc to base
+    }
+
+    private fun launchIdOf(base: Long): String {
+        val line = window(base).lineSequence().lastOrNull { it.contains("gnome-launch: launch id=") }
+        assertTrue("launch id line must exist", line != null)
+        return line!!.substringAfter("gnome-launch: launch id=").trim()
+            .takeWhile { it.isLetterOrDigit() || it == '.' || it == '_' || it == '-' }
+    }
+
+    @Test fun ownedStopAfterParentDeathSuppressesFallback() {
+        val (proc, base) = freshLaunch()
+        val aliveLine = awaitLine(base, "gnome-launch: gnome-session alive pid=", 10_000)!!
+        val gsPid = aliveLine.substringAfter("gnome-session alive pid=").takeWhile { it.isDigit() }.toInt()
+        val gsTicks = startTicksOf(gsPid)
+        assertTrue("need session start ticks", gsTicks != null)
+
+        // Parent-chain validation (non-vacuous fixture): the script's
+        // FROZEN parent identity must name the app's spawned tracer -
+        // if proot inserted an intermediate wrapper this fails loudly
+        // instead of "passing" a fixture that never had the P1 shape.
+        val frozen = awaitLine(base, "frozen parent identity pid=", 10_000)!!
+        val frozenPid = frozen.substringAfter("pid=").takeWhile { it.isDigit() }.toInt()
+        val scriptPid = frozen.substringAfter("scriptpid=").takeWhile { it.isDigit() }.toInt()
+        val tracerPid = pidOf(proc)
+        assertTrue("frozen parent must be the spawned tracer pid (parent chain validated)",
+            tracerPid > 0 && frozenPid == tracerPid)
+        assertTrue("script pid must be distinct from the tracer", scriptPid > 0 && scriptPid != tracerPid)
+        val scriptTicks = startTicksOf(scriptPid)
+        assertTrue("script must be alive before the kill", scriptTicks != null)
+
+        // Parent death FIRST (P1): SIGKILL the proot tracer; no userspace
+        // runs, the script is orphaned, the session lives on.
+        val tracerTicks = startTicksOf(tracerPid)
+        assertTrue("tracer kill must be identity-verified",
+            tracerTicks != null && killVerified(tracerPid, tracerTicks!!, android.system.OsConstants.SIGKILL))
+
+        // Non-vacuous survival + reparenting proof.
+        Thread.sleep(2_000)
+        val postFields = statFields(scriptPid)
+        assertTrue("script must SURVIVE the tracer kill (else no-fallback would be vacuous)",
+            postFields != null && postFields[19] == scriptTicks)
+        assertTrue("script must be REPARENTED after the tracer kill (ppid changed off the tracer)",
+            postFields!![1].toIntOrNull() != tracerPid)
+
+        // The owned Stop: root identity is gone, the tree walk is skipped
+        // fail-closed, and the stop intent must have been written BEFORE
+        // any signal (in-memory launch identity, same process).
+        XServer.stopDesktopMode(ctx)
+
+        // Session death wakes the script at the fallback decision.
+        assertTrue("session kill must be identity-verified",
+            killVerified(gsPid, gsTicks!!, android.system.OsConstants.SIGKILL))
+
+        // BOTH readers must honor the SAME retained intent file.
+        val honorParent = awaitLine(base, "owned stop intent honored (post-exit decision)", 120_000)
+        val honorObserver = awaitLine(base, "observer: owned stop intent honored", 120_000)
+        assertTrue("parent decision must honor the owned-stop intent (P1): " + window(base).takeLast(400),
+            honorParent != null)
+        assertTrue("observer must ALSO honor the retained intent (first reader must not delete it)",
+            honorObserver != null)
+        Thread.sleep(12_000) // let any wrongful fallback announce itself
+        val w = window(base)
+        assertFalse("NO fallback may follow an owned stop of this launch",
+            w.lineSequence().any { it.contains("falling back to bare gnome-shell") })
+        // The intent file must STILL EXIST after both honors (retention proof).
+        val intent = File(rootfs, "tmp/xdg/ldoa-stop-intent." + launchIdOf(base))
+        assertTrue("intent file must be retained after both readers honored it", intent.isFile)
+        // Test-side hygiene only: the product never deletes intent files.
+        intent.delete()
+        // The SESSION's own gnome-shell is a documented P1 leftover (the
+        // dead root skips the tree walk fail-closed; it is preserved,
+        // never name-killed). Clean it up identity-verified so the NEXT
+        // test's fresh-launch reset does not fail closed on it.
+        for (sp in ourGnomeShellPids()) {
+            val t = startTicksOf(sp); if (t != null) killVerified(sp, t, android.system.OsConstants.SIGKILL)
+        }
+    }
+
+    @Test fun unexpectedDeathStillRecoversAndIgnoresStaleIntent() {
+        val (proc, base) = freshLaunch()
+        val aliveLine = awaitLine(base, "gnome-launch: gnome-session alive pid=", 10_000)!!
+        val gsPid = aliveLine.substringAfter("gnome-session alive pid=").takeWhile { it.isDigit() }.toInt()
+        val gsTicks = startTicksOf(gsPid)!!
+
+        // Stale intent from an old world: old id, wrong key, foreign root.
+        val stale = File(rootfs, "tmp/xdg/ldoa-stop-intent.9999999999-deadbeef")
+        stale.writeText("stopkey=deadbeefcafe rootpid=1 rootstart=1 rootuid=0\n")
+
+        // Unexpected death: session + shell gone, script alive, NO owned
+        // stop. Recovery must fire; the stale intent must be ignored.
+        assertTrue(killVerified(gsPid, gsTicks, android.system.OsConstants.SIGKILL))
+        for (sp in ourGnomeShellPids()) {
+            val t = startTicksOf(sp); if (t != null) killVerified(sp, t, android.system.OsConstants.SIGKILL)
+        }
+        // Fast poll: the Stop below must land inside the 2s pre-exec
+        // settle deterministically.
+        val fellBack = awaitLine(base, "falling back to bare gnome-shell", 120_000, pollMs = 250)
+        assertTrue("crash recovery must still reach the fallback decision without an owned stop: " +
+            window(base).takeLast(400), fellBack != null)
+        assertTrue("stale intent must survive (never deleted by a non-owner)", stale.isFile)
+
+        // P2 race probe (deterministic): kill the tracer so the teardown
+        // cannot kill the script before the gate, then Stop. The script is
+        // inside the survivor-window/2s pre-exec span; one of the two
+        // post-decision gates must honor the intent.
+        val tracerPid2 = pidOf(proc)
+        val tracerTicks2 = startTicksOf(tracerPid2)
+        assertTrue("tracer kill must be identity-verified",
+            tracerTicks2 != null && killVerified(tracerPid2, tracerTicks2!!, android.system.OsConstants.SIGKILL))
+        XServer.stopDesktopMode(ctx)
+        val gated = awaitLine(base, "owned stop intent honored (pre-exec gate)", 120_000)
+            ?: awaitLine(base, "owned stop intent honored (fallback gate after survivor window)", 5_000)
+        assertTrue("a post-decision gate must honor the Stop that raced the fallback: " + window(base).takeLast(400),
+            gated != null)
+        Thread.sleep(15_000)
+        assertTrue("no owned gnome-shell may survive Stop + settle (no second WM exec'd)",
+            ourGnomeShellPids().isEmpty())
+        // Assert complete: the file is test-planted residue; remove it
+        // here (the product itself must never delete a non-owned intent).
+        stale.delete()
+    }
+}

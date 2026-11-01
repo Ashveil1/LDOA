@@ -18,10 +18,10 @@ on:
   workflow_dispatch:
     inputs:
       lane:
-        description: 'full = autoenter setup + native + lifecycle + export + harness + KOE; native-only = full minus GNOME autoenter setup and harness (native + lifecycle + export + KOE, unchanged from before); koe-only = ProotKillOnExitTest fixtures alone (focused KOE qualification, no 48-test rerun)'
+        description: 'full = autoenter setup + native + lifecycle + export + harness + KOE; native-only = full minus GNOME autoenter setup and harness (native + lifecycle + export + KOE, unchanged from before); koe-only = ProotKillOnExitTest fixtures alone (focused KOE qualification, no 48-test rerun); stop-intent-only = GnomeStopIntentTest + GnomeSessionScriptSafetyTest + GnomeSessionLifecycleTest alone (focused owned-stop intent qualification)'
         default: 'full'
         type: choice
-        options: [full, native-only, koe-only]
+        options: [full, native-only, koe-only, stop-intent-only]
 
 jobs:
   lorie-mouse-attribution:
@@ -92,8 +92,11 @@ jobs:
             # window, concurrent stops): cheap (sleep-process fakes, no
             # rootfs), always on, independently bounded.
             date -u +"LIFECYCLE start %H:%M:%S"
-            if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then timeout -s KILL 300 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.GnomeSessionLifecycleTest,dev.phonelinux.proto.OpenDesktopReentryTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-lifecycle.log | tail -8 || echo "LIFECYCLE-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"; else echo "lifecycle SKIPPED (lane=$LANE)" > /tmp/instr-lifecycle.log; fi
+            if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then timeout -s KILL 900 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.GnomeSessionLifecycleTest,dev.phonelinux.proto.OpenDesktopReentryTest,dev.phonelinux.proto.GnomeStopIntentTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-lifecycle.log | tail -8 || echo "LIFECYCLE-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"; else echo "lifecycle SKIPPED (lane=$LANE)" > /tmp/instr-lifecycle.log; fi
             if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then grep -q "OK (" /tmp/instr-lifecycle.log || touch /tmp/PHONELINUX_LIFECYCLE_FAILED; fi
+            # Focused owned-stop intent qualification (dispatch-only lane).
+            if [ "$LANE" = stop-intent-only ]; then timeout -s KILL 900 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.GnomeStopIntentTest,dev.phonelinux.proto.GnomeSessionScriptSafetyTest,dev.phonelinux.proto.GnomeSessionLifecycleTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-stopintent.log | tail -8 || echo "STOPINTENT-INSTR-TIMEOUT: outer 900s bound hit - instrument never returned"; else echo "stop-intent SKIPPED (lane=$LANE)" > /tmp/instr-stopintent.log; fi
+            if [ "$LANE" = stop-intent-only ]; then grep -q "OK (" /tmp/instr-stopintent.log || touch /tmp/PHONELINUX_STOPINTENT_FAILED; fi
             # Diagnostics export + reuse-gate health (cheap, rootfs-free,
             # gates the user-facing ZIP export). Full output printed and
             # archived - no tail-only retention for gate classes.
@@ -126,6 +129,7 @@ jobs:
             find screenshots -type f | sort || true
             if [ -f /tmp/PHONELINUX_LIFECYCLE_FAILED ]; then echo "LIFECYCLE-FAILED-OR-TIMEOUT"; fi
             if [ -f /tmp/PHONELINUX_KOE_FAILED ]; then echo "KOE-FIXTURES-FAILED-OR-TIMEOUT"; fi
+            if [ -f /tmp/PHONELINUX_STOPINTENT_FAILED ]; then echo "STOPINTENT-FAILED-OR-TIMEOUT"; fi
             if [ -f /tmp/PHONELINUX_NATIVE_FAILED ]; then echo "NATIVE-FAKEROOT-FAILED-OR-TIMEOUT"; fi
             if [ -f /tmp/PHONELINUX_EXPORT_FAILED ]; then echo "EXPORT-REUSEGATE-FAILED-OR-TIMEOUT"; fi
             if [ -f /tmp/PHONELINUX_TESTS_FAILED ]; then exit 1; fi
@@ -133,6 +137,7 @@ jobs:
             if [ -f /tmp/PHONELINUX_KOE_FAILED ]; then exit 1; fi
             if [ -f /tmp/PHONELINUX_NATIVE_FAILED ]; then exit 1; fi
             if [ -f /tmp/PHONELINUX_EXPORT_FAILED ]; then exit 1; fi
+            if [ -f /tmp/PHONELINUX_STOPINTENT_FAILED ]; then exit 1; fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -147,6 +152,7 @@ jobs:
             /tmp/instr0.log
             /tmp/instr-native.log
             /tmp/instr-lifecycle.log
+            /tmp/instr-stopintent.log
             /tmp/instr-export.log
             /tmp/gradle-build.log
             /tmp/instr.log
