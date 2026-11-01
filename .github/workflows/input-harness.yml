@@ -189,12 +189,17 @@ jobs:
             timeout -s KILL 300 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.ProotKillOnExitTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-koe.log | tail -10 || echo "KOE-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"
             grep -q "OK (13 tests)" /tmp/instr-koe.log || touch /tmp/PHONELINUX_KOE_FAILED
             timeout 60 adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/guest-gnome.log > guest-gnome.log || echo "GNOME-LOG-PULL-FAILED rc=$?"
+            timeout 60 adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/gnome-recovery-evidence.txt > gnome-recovery-evidence.txt || echo "RECOVERY-EVIDENCE-PULL-FAILED rc=$? (absent on green runs - written on recovery-test failure)"
             timeout 60 adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/phantom-snapshots.log > phantom-snapshots.log || echo "PHANTOM-SNAPSHOTS-PULL-FAILED rc=$?"
             timeout 120 adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/phantom-dumpsys-raw.log > phantom-dumpsys-raw.log || echo "PHANTOM-RAW-PULL-FAILED rc=$?"
             timeout 60 adb -s emulator-5554 logcat -d > /tmp/shotlog.txt || true
             python3 .github/scripts/extract_shots.py /tmp/shotlog.txt screenshots || true
             python3 .github/scripts/extract_shots.py /tmp/instr.log screenshots || true
             find screenshots -type f | sort || true
+            # Presentation honesty: if the virgl session test used the
+            # shot-pipeline fallback, the screenshot must ACTUALLY land in
+            # the artifact - CAPTURED is never taken on the call alone.
+            if [ "$LANE" = full ] && [ -s virgl-session.txt ] && grep -q "shot pipeline" virgl-session.txt; then ls screenshots/ 2>/dev/null | grep -q "virgl-session-desktop" || { echo "VIRGL-SESSION-SHOT-MISSING: shot-pipeline fallback claimed but no screenshot landed"; touch /tmp/PHONELINUX_VIRGL_SESSION_FAILED; }; fi
             if [ -f /tmp/PHONELINUX_LIFECYCLE_FAILED ]; then echo "LIFECYCLE-FAILED-OR-TIMEOUT"; fi
             if [ -f /tmp/PHONELINUX_KOE_FAILED ]; then echo "KOE-FIXTURES-FAILED-OR-TIMEOUT"; fi
             if [ -f /tmp/PHONELINUX_NATIVE_FAILED ]; then echo "NATIVE-FAKEROOT-FAILED-OR-TIMEOUT"; fi
@@ -239,4 +244,5 @@ jobs:
             virgl-server.log
             virgl-session.txt
             virgl-session-root.xwd
+            gnome-recovery-evidence.txt
             /tmp/instr-virgl-session.log
