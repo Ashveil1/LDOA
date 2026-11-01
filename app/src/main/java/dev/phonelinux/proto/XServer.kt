@@ -165,17 +165,38 @@ object XServer {
     @Volatile var preparing = false
         private set
     // In-flight attempt routing: while a start runs, the VISIBLE caller
-    // RE-ATTACHES (its callbacks replace these) instead of being refused;
-    // completion routes to the latest caller's activity so a recreated
-    // MainActivity still receives the outcome (POCO 2026-11-01: the second
-    // open got "tap ignored", its preparing overlay never cleared, and the
-    // app had no escape - the user was trapped on a spinner).
-    @Volatile private var attemptActivity: Activity? = null
-    @Volatile private var attemptOnError: ((String) -> Unit)? = null
-    @Volatile private var attemptOnStage: ((String) -> Unit)? = null
+    // RE-ATTACHES instead of being refused; completion routes to the
+    // latest attached caller so a recreated MainActivity still receives
+    // the outcome (POCO 2026-11-01: the second open got "tap ignored",
+    // its preparing overlay never cleared, and the app had no escape -
+    // the user was trapped on a spinner). One immutable holder, swapped
+    // atomically: a completion never sees a torn activity/callback mix,
+    // and clearing it drops the activity reference (no leak).
+    private class AttemptRouting(val activity: Activity,
+                                 val onError: (String) -> Unit,
+                                 val onStage: (String) -> Unit)
+    @Volatile private var attemptRouting: AttemptRouting? = null
+    // Attempt epoch: bumped by each new attempt AND by a completed user
+    // Stop, so a stale completion (its session already torn down, or a
+    // newer attempt in flight) is dropped - it can never reopen the X
+    // view over a stopped session or clear a newer attempt's preparing.
+    @Volatile private var attemptSeq = 0L
+    @Volatile private var lastStartSeq = 0L
+    // True while stopDesktopMode's teardown is in flight: a completion
+    // landing inside that window belongs to the world being stopped.
+    @Volatile private var stopInFlight = false
 
-    /** Simulate an in-flight attempt (regression tests only). */
-    internal fun setPreparingForTest(value: Boolean) { preparing = value }
+    /** Simulate a fresh attempt start (regression tests only): same epoch
+     *  semantics as the real openDesktop start. Returns the attempt seq. */
+    internal fun beginAttemptForTest(): Long = synchronized(ownershipLock) {
+        attemptSeq++; lastStartSeq = attemptSeq; preparing = true; attemptSeq
+    }
+
+    /** Detach the visible caller (overlay "Hide - keep starting"): the
+     *  attempt keeps running but its completion stays silent - no
+     *  foreground steal; the next Continue/open brings the ready desktop
+     *  forward through the reuse path. */
+    internal fun detachAttemptRouting() { attemptRouting = null }
 
     /** True when a GNOME desktop session for this distro is already alive:
      *  re-entering the desktop then only brings the X11 activity forward
@@ -385,6 +406,12 @@ object XServer {
         sessionGateLogBase = 0L
         lastBusCaptureRejection = null
         deniedBusRolePidsForTest.clear()
+        preparing = false
+        attemptRouting = null
+        attemptSeq = 0L
+        lastStartSeq = 0L
+        stopInFlight = false
+        lastOpenedXForTest = null
     }
 
     /** Test-only seam: deny ONLY the session-bus role binding for one
@@ -619,21 +646,22 @@ object XServer {
             // stage lines and outcome reach the screen the user is actually
             // looking at. The single-attempt guard stands - no second
             // session is launched.
-            attemptActivity = activity
-            attemptOnError = onError
-            attemptOnStage = onStage
+            attemptRouting = AttemptRouting(activity, onError, onStage)
             onStage("a desktop start is already in progress - following it now")
             return
         }
-        preparing = true
-        attemptActivity = activity
-        attemptOnError = onError
-        attemptOnStage = onStage
+        val mySeq = synchronized(ownershipLock) {
+            attemptSeq++
+            lastStartSeq = attemptSeq
+            preparing = true
+            attemptRouting = AttemptRouting(activity, onError, onStage)
+            attemptSeq
+        }
         thread(name = "xserver-start") {
             val ctx = activity.applicationContext
             // Stage lines route to the LATEST attached caller, not the
             // (possibly destroyed) screen that began the attempt.
-            val stage: (String) -> Unit = { s -> attemptOnStage?.invoke(s) }
+            val stage: (String) -> Unit = { s -> attemptRouting?.onStage?.invoke(s) }
             var launched = false
             var failure: String? = null
             try {
@@ -835,41 +863,61 @@ object XServer {
                 Log.e(TAG, "X server start failed", t)
                 failure = "X server failed: " + (t.message ?: t.javaClass.simpleName)
             }
-            finishAttempt(ctx, launched, failure)
+            finishAttempt(ctx, launched, failure, mySeq)
         }
     }
 
     /** Attempt completion, routed to the LATEST attached caller (the one
      *  the user is actually looking at; a recreated MainActivity re-attaches
      *  through the preparing path above). Extracted for direct regression
-     *  testing. launched=true opens the X view on the attached activity, or
-     *  from the app context with NEW_TASK when that screen is gone - a ready
-     *  desktop is never stranded behind a stale activity reference. */
-    internal fun finishAttempt(ctx: Context, launched: Boolean, failure: String?) {
+     *  testing; attemptSeqAtStart binds the completion to its attempt.
+     *
+     *  A STALE completion (a user Stop or a newer attempt superseded it)
+     *  is dropped entirely: it never reopens the X view over a stopped
+     *  session, never restarts the session service, never delivers an
+     *  outcome, and clears `preparing` only when no newer attempt owns it.
+     *  launched=true opens the X view ONLY on an attached live activity -
+     *  no forced NEW_TASK launch: with no attached screen (Hide, or the
+     *  screen is gone) the ready session is simply brought forward by the
+     *  next open through the reuse path. */
+    internal fun finishAttempt(ctx: Context, launched: Boolean, failure: String?,
+                               attemptSeqAtStart: Long = attemptSeq) {
         Handler(Looper.getMainLooper()).post {
-            preparing = false
-            val a = attemptActivity
-            val oe = attemptOnError
-            attemptActivity = null
-            attemptOnError = null
-            attemptOnStage = null
+            // Check-and-claim under the ownership lock: a Stop's
+            // invalidation (same lock) can never slip between the epoch
+            // check and the routing hand-off.
+            var r: AttemptRouting? = null
+            synchronized(ownershipLock) {
+                if (attemptSeqAtStart != attemptSeq || stopInFlight) {
+                    gateLog("attempt completion dropped (superseded by Stop or a newer attempt); launched=" + launched)
+                    if (lastStartSeq <= attemptSeqAtStart && !stopInFlight) preparing = false
+                    return@post
+                }
+                preparing = false
+                r = attemptRouting
+                attemptRouting = null
+            }
             if (launched) {
                 // L1: persistent background notification + manual
                 // wakelock toggle while the session lives (accepted
                 // requirements File v2). Service watches session end.
                 SessionService.start(ctx)
+                val a = r?.activity
                 if (a != null && !a.isFinishing && !a.isDestroyed) {
+                    lastOpenedXForTest = a
                     a.startActivity(Intent(a, com.termux.x11.MainActivity::class.java))
                 } else {
-                    ctx.startActivity(Intent(ctx, com.termux.x11.MainActivity::class.java)
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    gateLog("desktop ready; no attached live screen - next open brings it forward (no forced launch)")
                 }
             } else {
                 Log.e(TAG, "desktop open failed-closed: " + failure)
-                oe?.invoke(failure ?: "unknown desktop start failure")
+                r?.onError?.invoke(failure ?: "unknown desktop start failure")
             }
         }
     }
+
+    /** Test observability: the activity a successful completion routed to. */
+    @Volatile internal var lastOpenedXForTest: Activity? = null
 
     /**
      * End the desktop session (user stop): verified teardown of the guest
@@ -879,12 +927,20 @@ object XServer {
      * escapes the parentage walk) is captured by pidfile identity under
      * the same rule. Leftovers are logged, never hidden.
      */
-    fun stopDesktopMode(ctx: Context) {
+    fun stopDesktopMode(ctx: Context, invalidateAttempt: Boolean = true) {
         // Snapshot ownership ONCE at entry: kills AND clears below apply to
         // this snapshot. The epoch guard then keeps a concurrent
         // relaunch/retain that landed mid-teardown from losing its handles
         // (previously the unconditional clears could erase a newly confirmed
         // session's ownership: orphaned session, re-armed double-launch).
+        // stopInFlight marks the teardown window: an attempt completion
+        // landing inside it belongs to the world being stopped and must
+        // not route (reopen the X view / revive callbacks). Skipped for
+        // the retry-implied-stop inside openDesktop's own attempt - that
+        // teardown clears the way for ITS OWN launch and must not
+        // invalidate it.
+        if (invalidateAttempt) stopInFlight = true
+        try {
         var genAtEntry = 0L
         var rootIdent: PIdent? = null
         var busIdent: PIdent? = null
@@ -936,6 +992,9 @@ object XServer {
         // session - leave its handles, the shared X server and the pref.
         synchronized(ownershipLock) {
             if (ownershipGeneration != genAtEntry) {
+                // A newer world took over mid-teardown: it owns its own
+                // attempt and routing - invalidate nothing of it.
+                if (invalidateAttempt) stopInFlight = false
                 Log.w(TAG, "stopDesktopMode: ownership changed hands during teardown " +
                     "(concurrent launch/retain) - new session handles, X server and active-pref left intact")
                 return
@@ -955,8 +1014,24 @@ object XServer {
             ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
                 .edit().putBoolean("ubuntu_desktop_active", false)
                 .putBoolean("ubuntu_desktop_degraded", false).apply()
+            // The stopped world's in-flight attempt is invalidated HERE,
+            // only after the epoch check passed (a newer attempt surviving
+            // the guard keeps its seq, routing and preparing): its late
+            // completion is dropped by finishAttempt's epoch check.
+            if (invalidateAttempt) {
+                attemptSeq++
+                attemptRouting = null
+                preparing = false
+                stopInFlight = false
+            }
         }
         Log.i(TAG, "stopDesktopMode: desktop session ended by user")
+        } catch (t: Throwable) {
+            // A wedged stopInFlight would drop every future completion and
+            // re-create the spinner trap: never let it survive a failure.
+            if (invalidateAttempt) stopInFlight = false
+            throw t
+        }
     }
 
     /** Failure-path ownership retention:
@@ -975,7 +1050,10 @@ object XServer {
     internal fun teardownRetainedFailedSession(ctx: Context): Boolean {
         if (retainedSessionFailed && (sessionProcess != null || gnomeSession != null)) {
             Log.i(TAG, "openDesktop: retained FAILED session present - verified teardown before relaunch (retry implies stop)")
-            stopDesktopMode(ctx)
+            // invalidateAttempt=false: this teardown serves THIS attempt's
+            // own relaunch - it must not bump the epoch the attempt just
+            // captured or drop its routing.
+            stopDesktopMode(ctx, invalidateAttempt = false)
             return true
         }
         return false

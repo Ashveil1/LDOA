@@ -24,9 +24,11 @@ import java.util.concurrent.CopyOnWriteArrayList
  * refused with "tap ignored" and NO callback - the caller's preparing
  * overlay never cleared, had no controls, and with the session notification
  * dismissed the user had no route to the desktop and no Stop. Fix: the
- * second caller RE-ATTACHES to the in-flight attempt (latest callbacks and
- * activity win, still exactly one attempt, no duplicate session), and the
- * overlay carries Stop session / Hide controls.
+ * second caller RE-ATTACHES to the in-flight attempt (one atomically
+ * swapped routing holder; still exactly one attempt, no duplicate
+ * session), the overlay carries Stop session / Hide controls, and attempt
+ * epochs keep a stale completion from reopening the X view over a stopped
+ * session or clearing a newer attempt's preparing.
  */
 @RunWith(AndroidJUnit4::class)
 class OpenDesktopReentryTest {
@@ -47,27 +49,27 @@ class OpenDesktopReentryTest {
 
     @After
     fun tearDown() {
-        // Never leak a simulated in-flight flag into later phases.
+        // Never leak a simulated in-flight attempt or the session service
+        // into later phases.
         if (XServer.preparing) XServer.finishAttempt(ctx, false, "test cleanup")
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        SessionService.stop(ctx)
         XServer.resetOwnershipStateForTest()
     }
 
     @Test
-    fun secondOpenWhilePreparingReattachesAndReceivesOutcome() {
+    fun reattachReceivesFailureOutcome() {
         val instr = InstrumentationRegistry.getInstrumentation()
-        val stagesA = CopyOnWriteArrayList<String>()
         val errorsA = CopyOnWriteArrayList<String>()
         val stagesB = CopyOnWriteArrayList<String>()
         val errorsB = CopyOnWriteArrayList<String>()
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            var seq = 0L
             scenario.onActivity { a ->
                 Shot.dismissSystemDialogs(device)
-                // Simulate an in-flight attempt owned by a previous screen:
-                // the early path must re-attach, not refuse.
-                XServer.setPreparingForTest(true)
+                seq = XServer.beginAttemptForTest()
                 XServer.openDesktop(a, Distros.UBUNTU,
-                    onStage = { stagesA.add(it) }, onError = { errorsA.add(it) })
+                    onStage = { }, onError = { errorsA.add(it) })
                 // A still newer screen re-attaches again: latest caller wins.
                 XServer.openDesktop(a, Distros.UBUNTU,
                     onStage = { stagesB.add(it) }, onError = { errorsB.add(it) })
@@ -77,10 +79,109 @@ class OpenDesktopReentryTest {
             assertTrue("attempt still marked in flight after re-attach", XServer.preparing)
             // The in-flight attempt completes with a failure: the LATEST
             // caller gets the outcome, the superseded caller stays silent.
-            XServer.finishAttempt(ctx, false, "simulated attempt failure")
+            XServer.finishAttempt(ctx, false, "simulated attempt failure", seq)
             instr.waitForIdleSync()
             assertEquals(listOf("simulated attempt failure"), errorsB.toList())
             assertTrue("superseded caller must not receive the outcome", errorsA.isEmpty())
+            assertFalse("preparing cleared on completion", XServer.preparing)
+        }
+    }
+
+    @Test
+    fun successCompletionRoutesToLatestAttachedActivity() {
+        val instr = InstrumentationRegistry.getInstrumentation()
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            var act: MainActivity? = null
+            var seq = 0L
+            scenario.onActivity { a ->
+                Shot.dismissSystemDialogs(device)
+                act = a
+                seq = XServer.beginAttemptForTest()
+                XServer.openDesktop(a, Distros.UBUNTU, onStage = { }, onError = { })
+            }
+            XServer.finishAttempt(ctx, true, null, seq)
+            instr.waitForIdleSync()
+            assertTrue("X view opened on the latest attached activity",
+                XServer.lastOpenedXForTest === act)
+            assertFalse("preparing cleared on completion", XServer.preparing)
+        }
+    }
+
+    @Test
+    fun stopInvalidatesInFlightAttemptCompletion() {
+        val instr = InstrumentationRegistry.getInstrumentation()
+        val errors = CopyOnWriteArrayList<String>()
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            var seq = 0L
+            scenario.onActivity { a ->
+                Shot.dismissSystemDialogs(device)
+                seq = XServer.beginAttemptForTest()
+                XServer.openDesktop(a, Distros.UBUNTU,
+                    onStage = { }, onError = { errors.add(it) })
+            }
+            // User Stop while the attempt is in flight (empty world here:
+            // teardown is fast but runs the full invalidation path).
+            val t = Thread { XServer.stopDesktopMode(ctx) }
+            t.start(); t.join(30_000)
+            assertFalse("Stop clears preparing - a post-Stop open starts fresh",
+                XServer.preparing)
+            // The stopped world's completion arrives late: dropped entirely.
+            XServer.finishAttempt(ctx, true, null, seq)
+            instr.waitForIdleSync()
+            assertNull("no X view reopen over a stopped session",
+                XServer.lastOpenedXForTest)
+            assertTrue("no outcome delivered for a stopped attempt", errors.isEmpty())
+            assertFalse("preparing stays cleared", XServer.preparing)
+        }
+    }
+
+    @Test
+    fun staleCompletionCannotClearNewerAttempt() {
+        val instr = InstrumentationRegistry.getInstrumentation()
+        val errors = CopyOnWriteArrayList<String>()
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            var seqOld = 0L
+            var seqNew = 0L
+            scenario.onActivity { a ->
+                Shot.dismissSystemDialogs(device)
+                seqOld = XServer.beginAttemptForTest()
+                XServer.openDesktop(a, Distros.UBUNTU,
+                    onStage = { }, onError = { errors.add(it) })
+            }
+            val t = Thread { XServer.stopDesktopMode(ctx) }
+            t.start(); t.join(30_000)
+            // A fresh attempt starts after the Stop.
+            scenario.onActivity { seqNew = XServer.beginAttemptForTest() }
+            // The OLD worker's completion lands now: must not clear the
+            // newer attempt's preparing or deliver anything.
+            XServer.finishAttempt(ctx, true, null, seqOld)
+            instr.waitForIdleSync()
+            assertTrue("newer attempt keeps its in-flight flag", XServer.preparing)
+            assertNull("old worker must not open the X view", XServer.lastOpenedXForTest)
+            // The newer attempt completes normally.
+            XServer.finishAttempt(ctx, false, "new attempt failure", seqNew)
+            instr.waitForIdleSync()
+            assertFalse("newer attempt completion clears preparing", XServer.preparing)
+            assertEquals(listOf("new attempt failure"), errors.toList())
+        }
+    }
+
+    @Test
+    fun hideDetachesRoutingAndCompletionStaysSilent() {
+        val instr = InstrumentationRegistry.getInstrumentation()
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            var seq = 0L
+            scenario.onActivity { a ->
+                Shot.dismissSystemDialogs(device)
+                seq = XServer.beginAttemptForTest()
+                XServer.openDesktop(a, Distros.UBUNTU, onStage = { }, onError = { })
+                // Overlay "Hide - keep starting": detach, no auto-open.
+                XServer.detachAttemptRouting()
+            }
+            XServer.finishAttempt(ctx, true, null, seq)
+            instr.waitForIdleSync()
+            assertNull("Hide: completion must not steal the foreground",
+                XServer.lastOpenedXForTest)
             assertFalse("preparing cleared on completion", XServer.preparing)
         }
     }

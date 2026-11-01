@@ -323,9 +323,10 @@ class MainActivity : ComponentActivity() {
                             // in-flight start + dismissed notification left
                             // a spinner with no way out). Stop ends the
                             // session cleanly - files stay on the device.
-                            // Hide leaves the start running; the attempt
-                            // still routes here when it finishes, and
-                            // "Continue to desktop setup" re-attaches.
+                            // Hide leaves the start running but DETACHES:
+                            // completion stays silent (no surprise jump
+                            // into the desktop); "Continue to desktop
+                            // setup" brings the ready session forward.
                             Row {
                                 TextButton(onClick = {
                                     vm.log += "[tap] preparing overlay: stop session\n"
@@ -340,6 +341,7 @@ class MainActivity : ComponentActivity() {
                                 Spacer(Modifier.width(12.dp))
                                 TextButton(onClick = {
                                     vm.log += "[tap] preparing overlay: hide (start keeps running)\n"
+                                    XServer.detachAttemptRouting()
                                     vm.desktopPrep = false
                                 }, modifier = Modifier.semantics { contentDescription = "preparing-hide-wait" }) {
                                     Text("Hide - keep starting", color = TextDim)
