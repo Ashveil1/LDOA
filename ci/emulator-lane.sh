@@ -234,28 +234,47 @@ if [ "$LANE" = full ] || [ "$LANE" = session ]; then grep -q "OK (" /tmp/instr-v
 # payload REMOVES the target: a harvested file is intact device content or
 # ABSENT, never a masquerading partial/error payload.
 if [ "$LANE" = full ] || [ "$LANE" = session ]; then
-  for f in virgl-session.txt virgl-session-root.xwd; do
+  for f in virgl-session.txt virgl-session-xcontent.img virgl-session-xcontent.partial; do
     pull_or_absent "$f" "$f" 60 "VIRGL-SESSION-HARVEST"
   done
 fi
-# Report must exist NON-EMPTY; the xwd is required only when the test
-# captured via xwd (shot-pipeline fallback lands in screenshots/ instead),
-# so it is pulled but not gated.
+# Report must exist NON-EMPTY; the guest-content image is required only
+# when the test recorded a guest-xcontent CAPTURE (a NOT-CAPTURED verdict
+# is a recorded outcome, and the .partial is optional evidence), so both
+# are pulled but not gated here.
 if [ "$LANE" = full ] || [ "$LANE" = session ]; then
   if [ ! -s virgl-session.txt ] || head -c 40 virgl-session.txt | grep -q "^cat: files/"; then
     echo "VIRGL-SESSION-EVIDENCE-MISSING virgl-session.txt (absent, empty, or remote cat error captured)"
     touch /tmp/PHONELINUX_VIRGL_SESSION_FAILED
   fi
 fi
-# Capture-artifact validity: when the report selected the xwd path, the
-# artifact must exist AND carry a valid XWD header (big-endian file_version
-# == 7 at offset 4); an absent or invalid artifact is CAPTURE-UNVERIFIED and
-# fails the arm - it never passes as a captured desktop.
-if { [ "$LANE" = full ] || [ "$LANE" = session ]; } && [ -s virgl-session.txt ] && grep -q "via xwd -root" virgl-session.txt; then
-  xwd_ok=0
-  if [ -s virgl-session-root.xwd ] && [ "$(od -An -tx1 -j 4 -N 4 virgl-session-root.xwd 2>/dev/null | tr -d ' \n')" = "00000007" ]; then xwd_ok=1; fi
-  if [ "$xwd_ok" -ne 1 ]; then
-    echo "VIRGL-SESSION-CAPTURE-INVALID: report selected xwd -root but the artifact is absent or fails the XWD header check (file_version@4 != 7) - CAPTURE UNVERIFIED"
+# Capture-artifact validity: HEADER CHECK ONLY, never an image decode
+# proof. When the report recorded a guest-xcontent CAPTURE, the artifact
+# must exist AND match the recorded tool's format header: XWD requires
+# file_version==7 at offset 4 PLUS header_size>=100, width/height within
+# 1..16384 and file length > header_size (all big-endian); PNG requires
+# the FULL 8-byte signature. Absent/invalid = CAPTURE-UNVERIFIED and
+# fails the arm - it never passes as captured guest content. What the
+# image SHOWS is reviewer pixel inspection, never this gate.
+if { [ "$LANE" = full ] || [ "$LANE" = session ]; } && [ -s virgl-session.txt ] && grep -q "VERDICT guest-xcontent: CAPTURED" virgl-session.txt; then
+  img_ok=0
+  if [ -s virgl-session-xcontent.img ]; then
+    if grep -q "VERDICT guest-xcontent: CAPTURED tool=xwd" virgl-session.txt; then
+      be32() { od -An -tx1 -j "$2" -N 4 "$1" 2>/dev/null | tr -d ' \n'; }
+      _f=virgl-session-xcontent.img
+      hsz=$(be32 $_f 0); ver=$(be32 $_f 4); wid=$(be32 $_f 16); hei=$(be32 $_f 20)
+      hsz=${hsz:-00000000}; wid=${wid:-00000000}; hei=${hei:-00000000}
+      sz=$(wc -c < $_f | tr -d ' ')
+      if [ "$ver" = "00000007" ] && [ $((0x$hsz)) -ge 100 ] \
+         && [ $((0x$wid)) -ge 1 ] && [ $((0x$wid)) -le 16384 ] \
+         && [ $((0x$hei)) -ge 1 ] && [ $((0x$hei)) -le 16384 ] \
+         && [ "$sz" -gt $((0x$hsz)) ]; then img_ok=1; fi
+    else
+      [ "$(od -An -tx1 -N 8 virgl-session-xcontent.img 2>/dev/null | tr -d ' \n')" = "89504e470d0a1a0a" ] && img_ok=1
+    fi
+  fi
+  if [ "$img_ok" -ne 1 ]; then
+    echo "VIRGL-SESSION-CAPTURE-INVALID: report recorded guest-xcontent CAPTURED but the artifact is absent or fails the format HEADER check (XWD version+sane header_size/dimensions/length, or full 8-byte PNG signature) - CAPTURE UNVERIFIED (header check, not image decode proof)"
     touch /tmp/PHONELINUX_VIRGL_SESSION_FAILED
   fi
 fi
