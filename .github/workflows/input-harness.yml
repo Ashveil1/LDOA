@@ -18,10 +18,10 @@ on:
   workflow_dispatch:
     inputs:
       lane:
-        description: 'full = autoenter setup + native + lifecycle + export + harness + KOE; native-only = full minus GNOME autoenter setup and harness (native + lifecycle + export + KOE, unchanged from before); koe-only = ProotKillOnExitTest fixtures alone (focused KOE qualification, no 48-test rerun); stop-intent-only = GnomeStopIntentTest + GnomeSessionScriptSafetyTest + GnomeSessionLifecycleTest + XServerLogWindowTest alone (focused owned-stop intent + log-window discipline qualification)'
+        description: 'full = autoenter setup + native + lifecycle + export + harness + KOE; native-only = full minus GNOME autoenter setup and harness (native + lifecycle + export + KOE, unchanged from before); koe-only = ProotKillOnExitTest fixtures alone (focused KOE qualification, no 48-test rerun); stop-intent-only = GnomeStopIntentTest + GnomeSessionScriptSafetyTest + GnomeSessionLifecycleTest + XServerLogWindowTest alone (focused owned-stop intent + log-window discipline qualification); virgl-only = autoenter setup + VirglSpikeTest alone (bounded VirGL spike measurement: software baseline vs opt-in virgl renderer proof, emulator = NOT Adreno)'
         default: 'full'
         type: choice
-        options: [full, native-only, koe-only, stop-intent-only]
+        options: [full, native-only, koe-only, stop-intent-only, virgl-only]
 
 jobs:
   lorie-mouse-attribution:
@@ -74,8 +74,8 @@ jobs:
             # path stays a separate open qualification blocker (run
             # 40840614400: shell maps no UI cold); coverage NOT dropped.
             date -u +"SETUP auto-enter start %H:%M:%S (lane=$LANE)"
-            if [ "$LANE" = full ] || [ "$LANE" = stop-intent-only ]; then adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.UbuntuDesktopAutoEnterTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr0.log | tail -8; else echo "autoenter SKIPPED (lane=$LANE)" > /tmp/instr0.log; fi
-            if [ "$LANE" = full ] || [ "$LANE" = stop-intent-only ]; then grep -q "OK (" /tmp/instr0.log || touch /tmp/PHONELINUX_SETUP_FAILED; fi
+            if [ "$LANE" = full ] || [ "$LANE" = stop-intent-only ] || [ "$LANE" = virgl-only ]; then adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.UbuntuDesktopAutoEnterTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr0.log | tail -8; else echo "autoenter SKIPPED (lane=$LANE)" > /tmp/instr0.log; fi
+            if [ "$LANE" = full ] || [ "$LANE" = stop-intent-only ] || [ "$LANE" = virgl-only ]; then grep -q "OK (" /tmp/instr0.log || touch /tmp/PHONELINUX_SETUP_FAILED; fi
             date -u +"SETUP auto-enter end %H:%M:%S"
             if [ -f /tmp/PHONELINUX_SETUP_FAILED ]; then echo "AUTOENTER-SETUP-FAILED - arms not run"; exit 1; fi
             # EVIDENCE-ONLY harness: asserts bootstrap facts, logs/attaches
@@ -98,6 +98,12 @@ jobs:
             # Focused owned-stop intent qualification (dispatch-only lane).
             if [ "$LANE" = stop-intent-only ]; then timeout -s KILL 1200 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.GnomeStopIntentTest,dev.phonelinux.proto.GnomeSessionScriptSafetyTest,dev.phonelinux.proto.GnomeSessionLifecycleTest,dev.phonelinux.proto.XServerLogWindowTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-stopintent.log | tail -8 || echo "STOPINTENT-INSTR-TIMEOUT: outer 900s bound hit - instrument never returned"; else echo "stop-intent SKIPPED (lane=$LANE)" > /tmp/instr-stopintent.log; fi
             if [ "$LANE" = stop-intent-only ]; then grep -q "OK (" /tmp/instr-stopintent.log || touch /tmp/PHONELINUX_STOPINTENT_FAILED; fi
+            # Bounded VirGL spike measurement (dispatch-only lane): ONE test
+            # class, two launches (software baseline + opt-in virgl), guest
+            # glxinfo renderer proof; virgl-server.log is archived evidence.
+            if [ "$LANE" = virgl-only ]; then timeout -s KILL 1800 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.VirglSpikeTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl.log | tail -10 || echo "VIRGL-INSTR-TIMEOUT: outer 1800s bound hit - instrument never returned"; else echo "virgl SKIPPED (lane=$LANE)" > /tmp/instr-virgl.log; fi
+            if [ "$LANE" = virgl-only ]; then grep -q "OK (" /tmp/instr-virgl.log || touch /tmp/PHONELINUX_VIRGL_FAILED; fi
+            if [ "$LANE" = virgl-only ]; then adb -s emulator-5554 shell "run-as dev.phonelinux.proto cat files/virgl-server.log 2>/dev/null | tail -30" || true; fi
             # Diagnostics export + reuse-gate health (cheap, rootfs-free,
             # gates the user-facing ZIP export). Full output printed and
             # archived - no tail-only retention for gate classes.
@@ -139,6 +145,7 @@ jobs:
             if [ -f /tmp/PHONELINUX_NATIVE_FAILED ]; then exit 1; fi
             if [ -f /tmp/PHONELINUX_EXPORT_FAILED ]; then exit 1; fi
             if [ -f /tmp/PHONELINUX_STOPINTENT_FAILED ]; then exit 1; fi
+            if [ -f /tmp/PHONELINUX_VIRGL_FAILED ]; then exit 1; fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
