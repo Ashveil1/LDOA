@@ -170,7 +170,7 @@ static void scene_expected(int x, int y, unsigned char *r, unsigned char *g, uns
 /* FNV-1a 64 over the RGBA frame: a change DETECTOR, not correctness
  * proof. Correctness is the region checks below + the exported image. */
 static unsigned long long frame_fnv64(const unsigned char *px, int w, int h) {
-    unsigned long long h64 = 1469598103934665603ULL;
+    unsigned long long h64 = 14695981039346656037ULL; /* FNV-1a 64 offset basis */
     long n = (long) w * h * 4, i;
     for (i = 0; i < n; i++) { h64 ^= px[i]; h64 *= 1099511628211ULL; }
     return h64;
@@ -234,13 +234,16 @@ static int check_frame(const unsigned char *px, int w, int h, int *out_checks) {
 static int write_ppm(const char *path, const unsigned char *px, int w, int h) {
     FILE *f = fopen(path, "wb");
     long i, n = (long) w * h;
+    int bad = 0;
     if (!f) return -1;
-    fprintf(f, "P6\n%d %d\n255\n", w, h);
-    for (i = 0; i < n; i++) {
-        fputc(px[i * 4], f); fputc(px[i * 4 + 1], f); fputc(px[i * 4 + 2], f);
+    if (fprintf(f, "P6\n%d %d\n255\n", w, h) < 0) bad = 1;
+    for (i = 0; i < n && !bad; i++) {
+        if (fputc(px[i * 4], f) == EOF || fputc(px[i * 4 + 1], f) == EOF ||
+            fputc(px[i * 4 + 2], f) == EOF) bad = 1;
     }
-    fclose(f);
-    return 0;
+    if (fflush(f) != 0) bad = 1;
+    if (fclose(f) != 0) bad = 1; /* flush/close surface deferred write errors */
+    return bad ? -1 : 0;
 }
 
 /* Flushed stage breadcrumbs on stderr: proot drains stderr concurrently
