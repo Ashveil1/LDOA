@@ -170,7 +170,17 @@ jobs:
             date -u +"VIRGL-SESSION start %H:%M:%S (lane=$LANE)"
             if [ "$LANE" = full ]; then timeout -s KILL 1500 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.VirglGnomeSessionTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl-session.log | tail -15 || echo "VIRGL-SESSION-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"; else echo "virgl-session SKIPPED (lane=$LANE)" > /tmp/instr-virgl-session.log; fi
             if [ "$LANE" = full ]; then grep -q "OK (" /tmp/instr-virgl-session.log || touch /tmp/PHONELINUX_VIRGL_SESSION_FAILED; fi
-            if [ "$LANE" = full ]; then for f in virgl-session.txt virgl-session-root.xwd; do timeout 60 adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/$f > $f || echo "VIRGL-SESSION-PULL-FAILED $f rc=$?"; done; fi
+            # Pull + VALIDATE: a failed remote cat leaves its error text in
+            # the local redirect target (adb exec-out rc can be 0), which
+            # would masquerade as a real artifact. Remove error payloads
+            # and empty pulls, and classify the capture ABSENT accurately.
+            if [ "$LANE" = full ]; then for f in virgl-session.txt virgl-session-root.xwd; do
+              timeout 60 adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/$f > $f || echo "VIRGL-SESSION-PULL-FAILED $f rc=$?"
+              if [ ! -s "$f" ] || head -c 40 "$f" | grep -q "^cat: files/"; then
+                rm -f "$f"
+                echo "VIRGL-SESSION-HARVEST: $f ABSENT on device (or pull failed) - removed empty/error-payload file; classified as NO-CAPTURE, never evidence"
+              fi
+            done; fi
             # Report must exist NON-EMPTY; the xwd is required only when the
             # test captured via xwd (shot-pipeline fallback lands in
             # screenshots/ instead), so it is pulled but not gated.
@@ -190,6 +200,7 @@ jobs:
             grep -q "OK (13 tests)" /tmp/instr-koe.log || touch /tmp/PHONELINUX_KOE_FAILED
             timeout 60 adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/guest-gnome.log > guest-gnome.log || echo "GNOME-LOG-PULL-FAILED rc=$?"
             timeout 60 adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/gnome-recovery-evidence.txt > gnome-recovery-evidence.txt || echo "RECOVERY-EVIDENCE-PULL-FAILED rc=$? (absent on green runs - written on recovery-test failure)"
+            if [ ! -s gnome-recovery-evidence.txt ] || head -c 40 gnome-recovery-evidence.txt | grep -q "^cat: files/"; then rm -f gnome-recovery-evidence.txt; echo "RECOVERY-EVIDENCE-HARVEST: absent on device (or pull failed) - removed empty/error-payload file; ABSENT = no recovery failure evidence written"; fi
             timeout 60 adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/phantom-snapshots.log > phantom-snapshots.log || echo "PHANTOM-SNAPSHOTS-PULL-FAILED rc=$?"
             timeout 120 adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/phantom-dumpsys-raw.log > phantom-dumpsys-raw.log || echo "PHANTOM-RAW-PULL-FAILED rc=$?"
             timeout 60 adb -s emulator-5554 logcat -d > /tmp/shotlog.txt || true
