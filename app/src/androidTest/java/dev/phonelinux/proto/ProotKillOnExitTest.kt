@@ -281,11 +281,15 @@ class ProotKillOnExitTest {
     private fun assertShapedFakeAlive(p: Process, needleDir: String) {
         val pid = pidOf(p)
         Thread.sleep(2_000)
-        val cmd = try { File("/proc/" + pid + "/cmdline").readText().replace('\u0000', ' ').trim() }
-            catch (t: Throwable) { "" }
+        // argv0 is the FIRST NUL-separated field: the needle directory
+        // name itself contains spaces, so splitting the joined display
+        // string on spaces would cut argv0 in the middle of the path.
+        val fields = try { File("/proc/" + pid + "/cmdline").readText().split('\u0000').filter { it.isNotEmpty() } }
+            catch (t: Throwable) { emptyList() }
+        val cmd = fields.joinToString(" ")
         assertTrue("shaped fake must be alive 2s after spawn " + procSnapshot(p, "fake"), p.isAlive)
         assertTrue("argv0 basename must be the real sleep applet, not a faked argv0: " + cmd,
-            cmd.split(' ').firstOrNull()?.substringAfterLast('/') == "sleep")
+            fields.firstOrNull()?.substringAfterLast('/') == "sleep")
         assertTrue("cmdline must carry the shape via the directory name: " + cmd,
             cmd.contains(needleDir))
     }
