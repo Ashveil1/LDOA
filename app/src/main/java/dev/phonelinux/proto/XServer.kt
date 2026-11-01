@@ -167,6 +167,15 @@ object XServer {
      *  interleave a simulated relaunch deterministically. App code never
      *  sets this. */
     @Volatile internal var teardownHookForTest: (() -> Unit)? = null
+
+    // Test-only: extra arguments appended to the X server command line.
+    // Allowlisted to the vendored "-check-drawing" (InitOutput.c:379) and
+    // consumed ONLY in debug builds. Production never sets this; the
+    // control-arm instrumentation sets it BEFORE start() and restores the
+    // previous value after. Anything outside the allowlist is dropped
+    // (defense in depth: this must never become a general server-flags
+    // channel).
+    @Volatile internal var extraServerArgsForTest: List<String> = emptyList()
     @Volatile var preparing = false
         private set
     // In-flight attempt routing: while a start runs, the VISIBLE caller
@@ -562,6 +571,14 @@ object XServer {
      *  never bind readiness to the latest id line found in a log window. */
     internal fun currentLaunchIdForTest(): String? = synchronized(ownershipLock) { currentLaunchId }
 
+    /** Test-only: pid of the server process THIS start() spawned (the
+     *  Process handle itself is the ownership proof - never a /proc
+     *  guess). Null when no start this invocation owns is alive. */
+    internal fun xServerPidForTest(): Int? = synchronized(ownershipLock) {
+        val pr = process
+        if (pr != null && pr.isAlive) pr.pid().toInt() else null
+    }
+
     /** Test-only: identity of the current opt-in virgl render server
      *  (null when none). Lets the spike test verify the owned worker
      *  cleanup at Stop. */
@@ -881,7 +898,11 @@ object XServer {
             try { prev.delete(); if (!log.renameTo(prev)) Log.w(TAG, "xserver log rotation rename failed") }
             catch (t: Throwable) { Log.w(TAG, "xserver log rotation failed", t) }
         }
-        val pb = ProcessBuilder("/system/bin/app_process", "/", "com.termux.x11.CmdEntryPoint", ":0")
+        val serverArgs = mutableListOf("/system/bin/app_process", "/",
+            "com.termux.x11.CmdEntryPoint", ":0")
+        if (BuildConfig.DEBUG)
+            serverArgs.addAll(extraServerArgsForTest.filter { it == "-check-drawing" })
+        val pb = ProcessBuilder(serverArgs)
         val env = pb.environment()
         env["CLASSPATH"] = ctx.applicationInfo.sourceDir
         env["TMPDIR"] = tmpDir(ctx).absolutePath
