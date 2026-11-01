@@ -94,6 +94,84 @@ class VirglGnomeSessionTest {
     private fun gsStartMatches(gsPid: Int, recorded: String?): Boolean =
         recorded != null && procStartTick(gsPid) == recorded
 
+    /** Device-side SHA-256 of a delivered helper binary (recorded pair
+     * with the CI log's runner-side sha256; not a gate). */
+    private fun sha256Hex(f: File): String =
+        java.security.MessageDigest.getInstance("SHA-256").digest(f.readBytes())
+            .joinToString("") { "%02x".format(it) }
+
+    /**
+     * Checked removal of a KNOWN owned guest file. Never swallows the
+     * result: NoSuchFileException = already absent (no leftover);
+     * anything else is recorded with the exact error and a re-checked
+     * existence state (UNKNOWN when even that check fails).
+     */
+    private fun removeOwnedGuestFile(rootfs: File, rel: String): String {
+        val f = File(rootfs, rel)
+        return try {
+            java.nio.file.Files.delete(f.toPath())
+            "removed (owned path $rel)"
+        } catch (nsf: java.nio.file.NoSuchFileException) {
+            "already-absent (NoSuchFileException - no leftover)"
+        } catch (t: Throwable) {
+            val stillThere = try { f.exists().toString() } catch (e: Throwable) {
+                "UNKNOWN (" + e.javaClass.simpleName + ")"
+            }
+            "REMOVAL-FAILED [" + (t.message ?: t.javaClass.simpleName) + "] exists=" + stillThere +
+                " (owned path " + rel + " may remain in guest tmp; recorded, not silently ignored)"
+        }
+    }
+
+    /**
+     * Validate the helper's PPM artifact BEFORE accepting it: a fresh
+     * (mtime at/after invocation, 1s slack), REGULAR, non-symlink file
+     * within the bounded-output cap, with a well-formed P6 header
+     * (comments allowed, width 1..32, height = 5 stacked patches,
+     * maxval 255) and a body of EXACTLY 3*w*h bytes. Returns null when
+     * valid, else the rejection reason. XP_RESULT text alone never
+     * accepts output.
+     */
+    private fun validateXmapPpm(f: File, invokedAtMs: Long): String? {
+        val p = f.toPath()
+        if (!java.nio.file.Files.isRegularFile(p, java.nio.file.LinkOption.NOFOLLOW_LINKS))
+            return "absent, symlink, or non-regular file"
+        if (f.lastModified() < invokedAtMs - 1_000)
+            return "stale (mtime " + f.lastModified() + " before invocation " + invokedAtMs + ")"
+        val len = f.length()
+        if (len < 9 || len > 66_000) return "size " + len + " outside 9..66000"
+        // 4 KiB header window: the helper writes ~0.5 KiB of comments;
+        // a header beyond this window rejects (fail-closed, never a
+        // false ACCEPT).
+        val head = ByteArray(4096)
+        val n = f.inputStream().use { it.read(head) }
+        if (n < 9) return "header shorter than 9 bytes"
+        var i = 0
+        fun tok(): String? {
+            while (i < n) {
+                val ch = head[i].toInt().toChar()
+                if (ch == '#') { while (i < n && head[i].toInt() != 10) i++ }
+                else if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') i++
+                else break
+            }
+            val start = i
+            while (i < n && head[i].toInt() > 32 && head[i].toInt() < 127) i++
+            return if (i > start) String(head, start, i - start) else null
+        }
+        if (tok() != "P6") return "bad magic"
+        val w = tok()?.toIntOrNull() ?: return "missing width"
+        val h = tok()?.toIntOrNull() ?: return "missing height"
+        val maxval = tok()?.toIntOrNull() ?: return "missing maxval"
+        if (w < 1 || w > 32) return "width " + w + " outside 1..32"
+        if (h != w * 5) return "height " + h + " != 5 stacked patches of " + w
+        if (maxval != 255) return "maxval " + maxval + " != 255"
+        if (i < n && head[i].toInt() == 9 || i < n && head[i].toInt() == 10 ||
+            i < n && head[i].toInt() == 13 || i < n && head[i].toInt() == 32) i++
+        val body = len - i
+        if (body != 3L * w * h) return "body " + body + " != 3*" + w + "*" + h
+        return null
+    }
+
+
     /**
      * Capture-target IDENTITY for the shot-pipeline fallback: make the X
      * view foreground and PROVE the display shows THIS session's desktop
@@ -960,10 +1038,240 @@ class VirglGnomeSessionTest {
             // changed: at most ONE verified narrow dismissal per arm; a
             // recurrence ends focus polling early WITH EVIDENCE instead of
             // manufacturing focus.
+            val establishAt = System.currentTimeMillis()
             val ident = establishDesktopCaptureIdentity(launchId!!, rootfs, gsPid)
             out.append("capture-identity: ").append(ident.summary).append('\n')
             assertTrue("capture-target identity NOT established - " + ident.failure, ident.ok)
+            // WINDOW TOPOLOGY + BOUNDED ROOT PIXEL probes (xmap /
+            // xmap-pixels): bounded SEQUENTIAL samples before the
+            // screencap, then a FRESH final-sample immediately before
+            // the shot (xcontrol settle/final-sample pattern). TOPOLOGY:
+            // a viewable window can be blank; unmapped windows prove
+            // nothing about overlay or root rendering; NO content or
+            // presentation discrimination is claimed from map state.
+            // PIXELS: bounded root XGetImage patches from the CI-built
+            // helper; black-or-failed patches are NOT proof of absent
+            // guest content, and root GetImage is NOT the exact
+            // compositor scanout or renderer texture (source header +
+            // ci/xmap-pixels/BUILD.md). Probes and screencap are
+            // SEQUENTIAL: timestamps and order are recorded, never a
+            // same-instant claim. Generation and process identity are
+            // re-checked before and after; a change discards the sample
+            // as STALE rather than reading across generations. A probe
+            // FAILURE never skips Android-side evidence (the screencap
+            // still runs); only the stale-owner gate skips probes.
+            val xmapGate: String? = when {
+                XServer.currentLaunchIdForTest() != launchId ->
+                    "generation changed before topology probe"
+                !gsStartMatches(gsPid, gsStartTick) ->
+                    "session process generation changed before topology probe"
+                else -> null
+            }
+            if (xmapGate != null) {
+                out.append("VERDICT window-topology: SKIPPED fail-closed: ")
+                    .append(xmapGate).append('\n')
+                out.append("VERDICT window-pixels: SKIPPED fail-closed (same stale-owner gate)\n")
+            } else {
+                val xmapScript = "ldoa-guest-xmap-" + launchId + ".sh"
+                val xmapBase = "/tmp/ldoa-xmap-" + launchId
+                File(rootfs, "tmp/" + xmapScript).writeText(
+                    InstrumentationRegistry.getInstrumentation().context.assets
+                        .open("ldoa-guest-xmap.sh").bufferedReader().readText())
+                try {
+                    try {
+                        val xmapT0 = System.currentTimeMillis()
+                        val xmap = Proot.runGuest(ctx, rootfs,
+                            listOf("/bin/sh", "/tmp/" + xmapScript, xmapBase),
+                            extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"),
+                            extraEnv = mapOf("DISPLAY" to ":0"), timeoutMs = 45_000)
+                        val xmapT1 = System.currentTimeMillis()
+                        out.append("window-topology probe (order 1 of 3: topology, pixels,")
+                            .append(" screencap; sequential ms timestamps start=").append(xmapT0)
+                            .append(" end=").append(xmapT1)
+                            .append(" launchId=").append(launchId)
+                            .append(" gsPid=").append(gsPid).append("):\n")
+                        xmap.stdout.lineSequence().filter { it.startsWith("XM_") }
+                            .forEach { out.append("  ").append(it).append('\n') }
+                        val toolLine = xmap.stdout.lineSequence()
+                            .firstOrNull { it.startsWith("XM_TOOL ") } ?: ""
+                        val statsLines = xmap.stdout.lineSequence()
+                            .filter { it.startsWith("XM_STATS ") }.toList()
+                        val viewable = statsLines.count { it.contains("mapstate=IsViewable") }
+                        val topologyVerdict = when {
+                            XServer.currentLaunchIdForTest() != launchId ||
+                                !gsStartMatches(gsPid, gsStartTick) ->
+                                "STALE (generation changed during probe; sample discarded," +
+                                    " never read across generations)"
+                            toolLine.isEmpty() -> "NO-RECORD (probe produced no tool line)"
+                            toolLine.endsWith("absent") ->
+                                "NO-RECORD (xwininfo absent - topology leg missing, not zero-content)"
+                            statsLines.isEmpty() ->
+                                "NO-RECORD (no window stats parsed; see raw XM_ lines)"
+                            else -> "topology sampled: " + viewable + " of " + statsLines.size +
+                                " probed windows IsViewable (TOPOLOGY ONLY: viewable != drawn" +
+                                " != presented; viewable blank windows and overlay/root" +
+                                " rendering outside the sample remain possible)"
+                        }
+                        out.append("VERDICT window-topology: ").append(topologyVerdict).append('\n')
+                    } catch (t: Throwable) {
+                        out.append("VERDICT window-topology: NO-RECORD (probe threw ")
+                            .append(t.javaClass.simpleName).append(": ")
+                            .append(t.message ?: "no-message")
+                            .append("; Android-side evidence continues)\n")
+                    }
+
+                    // STEP 2 of 3: bounded root pixel sample. The helper
+                    // is CI-built on the ubuntu-24.04 runner (noble ABI;
+                    // ci/xmap-pixels/BUILD.md) and adb-pushed to
+                    // /data/local/tmp/ldoa-xmap-pixels; the CI log
+                    // prints its runner-side sha256 and the device-side
+                    // sha256 is recorded here (recorded pair for
+                    // reviewer comparison, not a gate).
+                    val pxHelper = "ldoa-xmap-pixels-" + launchId
+                    val pxPpmRel = "tmp/ldoa-xmap-" + launchId + ".ppm"
+                    val devHelper = File("/data/local/tmp/ldoa-xmap-pixels")
+                    if (!devHelper.isFile) {
+                        out.append("VERDICT window-pixels: NO-RECORD (helper not delivered to" +
+                            " /data/local/tmp - CI build/push failed or non-CI run; see" +
+                            " XMAP-PIXELS-BUILD lines in the lane log)\n")
+                    } else {
+                        try {
+                            // Staleness BEFORE invocation: any previous
+                            // PPM/helper at these launch-unique paths is
+                            // removed AND confirmed gone; a survivor
+                            // (or symlink) refuses the sample.
+                            removeOwnedGuestFile(rootfs, pxPpmRel)
+                            removeOwnedGuestFile(rootfs, "tmp/" + pxHelper)
+                            val prePpm = File(rootfs, pxPpmRel)
+                            val preHelper = File(rootfs, "tmp/" + pxHelper)
+                            if (prePpm.exists() || java.nio.file.Files.isSymbolicLink(prePpm.toPath()) ||
+                                preHelper.exists() || java.nio.file.Files.isSymbolicLink(preHelper.toPath())) {
+                                out.append("VERDICT window-pixels: NO-RECORD (stale/symlink artifact" +
+                                    " path survived pre-invocation removal; refusing to sample)\n")
+                            } else {
+                            val pxSha = sha256Hex(devHelper)
+                            File(rootfs, "tmp/" + pxHelper).writeBytes(devHelper.readBytes())
+                            File(rootfs, "tmp/" + pxHelper).setExecutable(true, false)
+                            val pxT0 = System.currentTimeMillis()
+                            val px = Proot.runGuest(ctx, rootfs,
+                                listOf("/bin/sh", "-c",
+                                    "ldconfig -p 2>/dev/null | grep -i libX11 | sed 's/^/XP_LDCONFIG /';" +
+                                        " exec /tmp/" + pxHelper + " /tmp/" + pxPpmRel.removePrefix("tmp/")),
+                                extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"),
+                                extraEnv = mapOf("DISPLAY" to ":0"), timeoutMs = 30_000)
+                            val pxT1 = System.currentTimeMillis()
+                            out.append("window-pixels probe (order 2 of 3; sequential ms timestamps")
+                                .append(" start=").append(pxT0).append(" end=").append(pxT1)
+                                .append(" helper-device-sha256=").append(pxSha)
+                                .append(" exit=").append(px.exitCode).append("):\n")
+                            px.stdout.lineSequence().filter { it.startsWith("XP_") }
+                                .forEach { out.append("  ").append(it).append('\n') }
+                            val ppmGuest = File(rootfs, pxPpmRel)
+                            val resultLine = px.stdout.lineSequence()
+                                .firstOrNull { it.startsWith("XP_RESULT ") } ?: ""
+                            val patchesOk = Regex("""patches-ok=(\d+)""").find(resultLine)
+                                ?.groupValues?.get(1)?.toIntOrNull() ?: -1
+                            // Exit taxonomy: XP_RESULT alone NEVER accepts
+                            // output. 0 = full sample; 7 = PARTIAL sample
+                            // (valid patches logged, never full success);
+                            // 2/3/4/5/6/8 = NO-RECORD with the helper's
+                            // own stage; anything else unexpected. The
+                            // artifact must ALSO pass freshness/symlink/
+                            // header/dims/body validation.
+                            val ppmReject = validateXmapPpm(ppmGuest, pxT0)
+                            val pixelsVerdict = when {
+                                XServer.currentLaunchIdForTest() != launchId ||
+                                    !gsStartMatches(gsPid, gsStartTick) ->
+                                    "STALE (generation changed during probe; sample discarded," +
+                                        " never read across generations)"
+                                px.exitCode == 6 ->
+                                    "NO-RECORD (helper deadline hit; see XP_ERROR stage lines)"
+                                px.exitCode == 2 || px.exitCode == 3 || px.exitCode == 4 ||
+                                    px.exitCode == 5 || px.exitCode == 8 ->
+                                    "NO-RECORD (helper exit " + px.exitCode +
+                                        "; see XP_ERROR/XP_XERROR stage lines)"
+                                px.exitCode != 0 && px.exitCode != 7 ->
+                                    "NO-RECORD (unexpected helper exit " + px.exitCode + ")"
+                                resultLine.isEmpty() ->
+                                    "NO-RECORD (no XP_RESULT line at exit " + px.exitCode + ")"
+                                ppmReject != null ->
+                                    "NO-RECORD (artifact rejected: " + ppmReject + ")"
+                                px.exitCode == 7 -> {
+                                    File(ctx.filesDir, "virgl-session-xmap.ppm")
+                                        .writeBytes(ppmGuest.readBytes())
+                                    "SAMPLED-PARTIAL (exit 7: " + patchesOk + " of 5 patches valid;" +
+                                        " PARTIAL sample - valid patches logged, NOT full success;" +
+                                        " black-or-failed is NOT proof of absent content; NOT the" +
+                                        " compositor scanout; artifact virgl-session-xmap.ppm" +
+                                        " header-gated CI-side; reviewer pixel inspection required)"
+                                }
+                                else -> {
+                                    File(ctx.filesDir, "virgl-session-xmap.ppm")
+                                        .writeBytes(ppmGuest.readBytes())
+                                    "SAMPLED (5 of 5 patches; black-or-failed is NOT proof of" +
+                                        " absent content; NOT the compositor scanout; artifact" +
+                                        " virgl-session-xmap.ppm header-gated CI-side; reviewer pixel" +
+                                        " inspection still required)"
+                                }
+                            }
+                            out.append("VERDICT window-pixels: ").append(pixelsVerdict).append('\n')
+                            }
+                        } catch (t: Throwable) {
+                            out.append("VERDICT window-pixels: NO-RECORD (probe threw ")
+                                .append(t.javaClass.simpleName).append(": ")
+                                .append(t.message ?: "no-message")
+                                .append("; Android-side evidence continues)\n")
+                        } finally {
+                            out.append("guest pixel-helper removal: ")
+                                .append(removeOwnedGuestFile(rootfs, "tmp/" + pxHelper)).append('\n')
+                            out.append("guest pixel-ppm removal: ")
+                                .append(removeOwnedGuestFile(rootfs, pxPpmRel)).append('\n')
+                        }
+                    }
+                } finally {
+                    out.append("guest xmap script removal: ")
+                        .append(removeOwnedGuestFile(rootfs, "tmp/" + xmapScript)).append('\n')
+                }
+            }
+
+            // FINAL SAMPLE immediately before the screencap (xcontrol
+            // pattern): focus NOW + generation NOW + session process
+            // NOW. The full establish (ANR dismissal budget) is NOT
+            // re-run - this is the current-state resample only, and a
+            // lapse here means the pending capture can no longer be
+            // bound to the established target: fail-closed.
+            val finalDevice = androidx.test.uiautomator.UiDevice.getInstance(
+                InstrumentationRegistry.getInstrumentation())
+            val finalFocusAt = System.currentTimeMillis()
+            val finalFocus = currentFocusState(finalDevice)
+            val finalGenOk = XServer.currentLaunchIdForTest() == launchId
+            val finalGsOk = gsStartMatches(gsPid, gsStartTick)
+            // CURRENT renderer display binding (own PID, entries since
+            // the establish phase): the latest own rendererSetWindow
+            // must still be a NONZERO bind - a post-bind teardown
+            // (handle 0 / zero dims) yields EMPTY and fails closed.
+            val finalBindAt = System.currentTimeMillis()
+            val finalBind = latestOwnRendererBind(
+                finalDevice.executeShellCommand("logcat -d -v threadtime -t 800 -s gles-renderer:D"),
+                android.os.Process.myPid(), establishAt)
+            out.append("final-sample pre-shot (after topology/pixels, immediately before")
+                .append(" screencap): focusSampleAt=").append(finalFocusAt)
+                .append(" bindSampleAt=").append(finalBindAt)
+                .append(" focusNow=").append(finalFocus.state)
+                .append(" generationOk=").append(finalGenOk)
+                .append(" sessionProcOk=").append(finalGsOk)
+                .append(" bindNow=").append(
+                    if (finalBind.isEmpty()) "EMPTY(latest own entry is teardown or none since establish)"
+                    else "[" + finalBind.take(200) + "]").append('\n')
+            assertTrue("capture-target identity LAPSED before screencap (focusNow=" +
+                finalFocus.state + " generationOk=" + finalGenOk + " sessionProcOk=" + finalGsOk +
+                " bindNowEmpty=" + finalBind.isEmpty() + ")",
+                finalFocus.state == FocusState.FOCUSED && finalGenOk && finalGsOk &&
+                    finalBind.isNotEmpty())
+            val shotAt = System.currentTimeMillis()
             Shot.save("virgl-session-desktop")
+            out.append("screencap-order: 3 of 3, requested at ").append(shotAt)
+                .append(" (sequential after topology + pixel probes; no same-instant claim)\n")
             presentationVerdict = "capture via Android-display screencap (shot pipeline, name" +
                 " virgl-session-desktop); capture-target identity ESTABLISHED [" + ident.summary + "];" +
                 " artifact arrival GATED CI-side; REVIEWER-VERIFIED presentation: PENDING" +

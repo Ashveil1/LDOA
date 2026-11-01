@@ -12,9 +12,12 @@
 # (no slashes, dots, or traversal).
 #
 # stdout protocol (parsed by the instrumented test):
+#   XC_TOOL    <name>=present|absent   (unconditional per-tool presence;
+#              settles conjunct ambiguity - a skipped branch is never
+#              evidence about the individual tools it would have used)
 #   XC_ATTEMPT tool=<name> exit=<rc> [stderr=<head>]
 #              [rejected-size|rejected=output-is-symlink|...]
-#              [partial=<path> excerpt-max=262144 origbytes=<n> sha256=<h>]
+#              [partial=<path> excerpt-max=262144 origbytes=<n>]
 #   XC_RESULT  tool=<name> exit=0 out=<path> bytes=<n>      (success)
 #   XC_RESULT  error=<bad-outbase|stale-removal-failed|
 #              tools-unavailable-to-bound|no-tool-succeeded>
@@ -34,16 +37,20 @@
 #     (TERM, then KILL 1s later, process-group scoped so spawned
 #     descendants are escalated too). TOOL_BUDGET is clamped 1..12s;
 #     worst case 5*(12+1)=65s < 70s, leaving room before the caller's
-#     90s outer bound.
+#     90s outer bound. Failure-path sha256 was REMOVED: it added up to
+#     4 further bounded calls (4*13s worst) on top of the 65s, breaking
+#     the 90s total. Failures now record size only; no caller currently
+#     consumes a failure-path hash (identity of ACCEPTED captures is
+#     established by the size+bytes envelope and CI artifact upload).
 #   DISK: every tool runs in a subshell with `ulimit -f 131072` (512-byte
 #     blocks = 64MiB) covering BOTH the capture output AND the stderr
 #     redirect - a flooding tool dies on SIGXFSZ at the cap. A /tmp free
 #     floor of 384MiB is required before ANY invocation.
 #   EVIDENCE: accepted images are regular files (never symlinks) of
 #     1000..67108864 bytes; rejected/failed output is retained as a
-#     BOUNDED 256KiB excerpt with original size recorded; sha256 is
-#     computed only under the same time bound; symlink outputs are
-#     refused UNREAD and removed.
+#     BOUNDED 256KiB excerpt with original size recorded; no hashing on
+#     failure paths (see TIME); symlink outputs are refused UNREAD and
+#     removed.
 MODE=capture
 if [ "$1" = "CLEANUP" ]; then MODE=cleanup; shift; fi
 OUT="$1"
@@ -101,6 +108,14 @@ for f in $PATHS; do
   if [ -e "$f" ] || [ -L "$f" ]; then echo "XC_RESULT error=stale-removal-failed path=$f"; exit 41; fi
 done
 
+# Unconditional per-tool presence evidence. A skipped branch below is
+# never proof a tool is absent (the ffmpeg branch is a CONJUNCT and can
+# fail on ffmpeg alone), so presence is logged for every tool this
+# script or follow-up diagnostics could use.
+for t in xwd import gnome-screenshot ffmpeg xdpyinfo python3 gdbus dbus-send xprop xwininfo xsetroot; do
+  if command -v "$t" >/dev/null 2>&1; then echo "XC_TOOL $t=present"; else echo "XC_TOOL $t=absent"; fi
+done
+
 run_tool() {
   # $@ = tool command; file-size cap (covers capture output AND stderr
   # via inheritance) + time bound with TERM-then-KILL group escalation.
@@ -108,13 +123,6 @@ run_tool() {
     ulimit -f "$FILE_BLOCKS" 2>/dev/null || exit 126
     exec timeout -k 1 "$TOOL_BUDGET" "$@"
   )
-}
-
-sha() {
-  # time-bounded; never an unbounded read of arbitrarily large output
-  command -v sha256sum >/dev/null 2>&1 || { echo unavailable; return; }
-  h=$(timeout -k 1 "$TOOL_BUDGET" sha256sum "$1" 2>/dev/null) || { echo unavailable; return; }
-  echo "${h%% *}"
 }
 
 keep_excerpt() {
@@ -145,9 +153,8 @@ report_ok() {
     rm -f "$ERR"
     exit 0
   fi
-  s=$(sha "$2")
   keep_excerpt "$1" "$2"
-  echo "XC_ATTEMPT tool=$1 exit=0 rejected-size bytes=$b bounds=$CAP_MIN..$CAP_MAX partial=$OUT.partial-$1 excerpt-max=$EXCERPT origbytes=$b sha256=$s"
+  echo "XC_ATTEMPT tool=$1 exit=0 rejected-size bytes=$b bounds=$CAP_MIN..$CAP_MAX partial=$OUT.partial-$1 excerpt-max=$EXCERPT origbytes=$b"
   return 1
 }
 
@@ -158,9 +165,9 @@ attempt_fail() {
   if [ -L "$3" ]; then
     rm -f "$3"; extra=" symlink-output-refused-unread"
   elif [ -f "$3" ]; then
-    b=$(wc -c < "$3" 2>/dev/null || echo 0); s=$(sha "$3")
+    b=$(wc -c < "$3" 2>/dev/null || echo 0)
     keep_excerpt "$1" "$3"
-    extra=" partial=$OUT.partial-$1 excerpt-max=$EXCERPT origbytes=$b sha256=$s"
+    extra=" partial=$OUT.partial-$1 excerpt-max=$EXCERPT origbytes=$b"
   fi
   echo "XC_ATTEMPT tool=$1 exit=$2 stderr=$e$extra"
 }
