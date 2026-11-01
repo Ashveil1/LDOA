@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       lane:
-        description: 'full = autoenter setup + native + lifecycle + export + harness + KOE; native-only = full minus GNOME autoenter setup and harness (native + lifecycle + export + KOE, unchanged from before); koe-only = ProotKillOnExitTest fixtures alone (focused KOE qualification, no 48-test rerun); virgl-only = MINIMAL setup (VirglRootfsProvisionTest: ubuntu-base + mesa runtime ONLY, NO GNOME install/launch) + VirglServerSmokeTest (host server lifecycle + hostprobe host-EGL renderer) + VirglProbeTest (guest EGL-surfaceless eglprobe renderer proof, arch-selected from the rootfs ELF header; emulator = NOT Adreno)'
+        description: 'full = autoenter setup + native + lifecycle (incl. reentry recovery) + export + harness + virgl-session (P3 real-session qualification) + KOE; native-only = full minus GNOME autoenter setup and harness (native + lifecycle + export + KOE, unchanged from before); koe-only = ProotKillOnExitTest fixtures alone (focused KOE qualification, no 48-test rerun); virgl-only = MINIMAL setup (VirglRootfsProvisionTest: ubuntu-base + mesa runtime ONLY, NO GNOME install/launch) + VirglServerSmokeTest (host server lifecycle + hostprobe host-EGL renderer) + VirglProbeTest (guest EGL-surfaceless eglprobe renderer proof, arch-selected from the rootfs ELF header; emulator = NOT Adreno)'
         default: 'full'
         type: choice
         options: [full, native-only, koe-only, virgl-only]
@@ -128,7 +128,7 @@ jobs:
             # rootfs), always on, independently bounded.
             date -u +"LIFECYCLE start %H:%M:%S"
             # Bound 300->1500 covers the real-GNOME-session fixtures in this arm (lifecycle + reentry); not a product-hang mask.
-            if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then timeout -s KILL 1500 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.GnomeSessionLifecycleTest,dev.phonelinux.proto.OpenDesktopReentryTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-lifecycle.log | tail -8 || echo "LIFECYCLE-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"; else echo "lifecycle SKIPPED (lane=$LANE)" > /tmp/instr-lifecycle.log; fi
+            if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then timeout -s KILL 1500 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.GnomeSessionLifecycleTest,dev.phonelinux.proto.OpenDesktopReentryTest,dev.phonelinux.proto.GnomeFallbackRecoveryTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-lifecycle.log | tail -8 || echo "LIFECYCLE-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"; else echo "lifecycle SKIPPED (lane=$LANE)" > /tmp/instr-lifecycle.log; fi
             if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then grep -q "OK (" /tmp/instr-lifecycle.log || touch /tmp/PHONELINUX_LIFECYCLE_FAILED; fi
             # Bounded VirGL transport proof (dispatch-only lane). MINIMAL
             # setup: ubuntu-base + mesa runtime only - NO GNOME install or
@@ -163,6 +163,18 @@ jobs:
             if [ "$LANE" = full ]; then timeout -s KILL 1500 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.LdoaInputHarnessTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr.log | tail -15 || echo "HARNESS-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"; else echo "harness SKIPPED (lane=$LANE)" > /tmp/instr.log; fi
             if [ "$LANE" = full ]; then grep -q "OK (" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED; fi
             if [ -f /tmp/PHONELINUX_TESTS_FAILED ]; then echo "HARNESS-DIAG survivors at bound:"; adb -s emulator-5554 shell "ps -A -o PID,PPID,ARGS" | grep -E "phonelinux|proot|nautilus|Xlorie|soffice" || true; adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/harness-owned-ledger.txt > harness-owned-ledger.txt 2>/dev/null || echo "LEDGER-PULL-FAILED rc=$? (ledger needs the test-side spawn-ledger patch)"; adb -s emulator-5554 shell am force-stop dev.phonelinux.proto || true; fi
+            # P3 real-session virgl qualification (full lane only: needs the
+            # provisioned GNOME from autoenter setup; starts its OWN opted-in
+            # session and tears it down itself, so KOE still sees a clean
+            # world). Placement after the harness arms, before KOE.
+            date -u +"VIRGL-SESSION start %H:%M:%S (lane=$LANE)"
+            if [ "$LANE" = full ]; then timeout -s KILL 1500 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.VirglGnomeSessionTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl-session.log | tail -15 || echo "VIRGL-SESSION-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"; else echo "virgl-session SKIPPED (lane=$LANE)" > /tmp/instr-virgl-session.log; fi
+            if [ "$LANE" = full ]; then grep -q "OK (" /tmp/instr-virgl-session.log || touch /tmp/PHONELINUX_VIRGL_SESSION_FAILED; fi
+            if [ "$LANE" = full ]; then for f in virgl-session.txt virgl-session-root.xwd; do timeout 60 adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/$f > $f || echo "VIRGL-SESSION-PULL-FAILED $f rc=$?"; done; fi
+            # Report must exist NON-EMPTY; the xwd is required only when the
+            # test captured via xwd (shot-pipeline fallback lands in
+            # screenshots/ instead), so it is pulled but not gated.
+            if [ "$LANE" = full ]; then if [ ! -s virgl-session.txt ] || head -c 40 virgl-session.txt | grep -q "^cat: files/"; then echo "VIRGL-SESSION-EVIDENCE-MISSING virgl-session.txt (absent, empty, or remote cat error captured)"; touch /tmp/PHONELINUX_VIRGL_SESSION_FAILED; fi; fi
             # kill-on-exit + identity-reset + bus-capture fixtures (cheap:
             # toybox-symlink shaped fakes + the REAL vendored libproot.so, no
             # rootfs), always on, independently bounded. Exact count pinned:
@@ -192,7 +204,9 @@ jobs:
             if [ -f /tmp/PHONELINUX_KOE_FAILED ]; then exit 1; fi
             if [ -f /tmp/PHONELINUX_NATIVE_FAILED ]; then exit 1; fi
             if [ -f /tmp/PHONELINUX_EXPORT_FAILED ]; then exit 1; fi
+            if [ -f /tmp/PHONELINUX_VIRGL_SESSION_FAILED ]; then echo "VIRGL-SESSION-FAILED-OR-TIMEOUT"; fi
             if [ -f /tmp/PHONELINUX_VIRGL_FAILED ]; then exit 1; fi
+            if [ -f /tmp/PHONELINUX_VIRGL_SESSION_FAILED ]; then exit 1; fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -223,3 +237,6 @@ jobs:
             virgl-frame-llvmpipe.ppm
             virgl-frame-virgl.ppm
             virgl-server.log
+            virgl-session.txt
+            virgl-session-root.xwd
+            /tmp/instr-virgl-session.log
