@@ -72,9 +72,11 @@ class VirglRootfsProvisionTest {
             // glob over the multiarch dir), before any probe exec: GLVND
             // dispatch + Mesa vendor runtime + vendor json + the dri
             // driver entry used by the surfaceless sw path.
+            // Recursive (bounded depth): dri drivers live at
+            // usr/lib/<multiarch>/dri/*.so, two levels under usr/lib -
+            // a one-level glob misses them (run 41314667337).
             fun glob1(dir: File, name: String): List<File> =
-                (dir.listFiles()?.toList() ?: emptyList())
-                    .flatMap { sub -> (sub.listFiles()?.toList() ?: emptyList()).filter { it.name == name } }
+                dir.walkTopDown().maxDepth(4).filter { it.isFile && it.name == name }.toList()
             val libDir = File(rootfs, "usr/lib")
             val eglLibs = glob1(libDir, "libEGL.so.1")
             val eglMesa = glob1(libDir, "libEGL_mesa.so.0")
@@ -87,7 +89,14 @@ class VirglRootfsProvisionTest {
             assertTrue("libEGL.so.1 (GLVND) missing after mesa install", eglLibs.isNotEmpty())
             assertTrue("libEGL_mesa.so.0 (Mesa EGL vendor runtime) missing after mesa install", eglMesa.isNotEmpty())
             assertTrue("glvnd vendor json missing: " + vendorJson.absolutePath, vendorJson.isFile)
-            assertTrue("swrast_dri.so (mesa dri driver entry) missing after mesa install", driDrivers.isNotEmpty())
+            if (driDrivers.isEmpty()) {
+                // Diagnostics for the next packaging move: dump any dri dirs.
+                File(rootfs, "usr/lib").walkTopDown().maxDepth(3)
+                    .filter { it.isDirectory && it.name == "dri" }
+                    .forEach { dd -> rb.append("dri dir ").append(dd.absolutePath)
+                        .append(": ").append(dd.list()?.toList()).append('\n') }
+            }
+            assertTrue("swrast_dri.so (mesa dri driver entry) missing after mesa install (see virgl-provision.txt)", driDrivers.isNotEmpty())
             // Record the ACTUAL installed versions (never hardcode one:
             // noble moved 24.2.8 -> 25.2.8 backport mid-series).
             val status = File(rootfs, "var/lib/dpkg/status")
@@ -129,9 +138,8 @@ class VirglRootfsProvisionTest {
                 return curf
             }
             fun globPrefix(dir: File, prefix: String): List<File> =
-                (dir.listFiles()?.toList() ?: emptyList())
-                    .flatMap { sub -> (sub.listFiles()?.toList() ?: emptyList())
-                        .filter { it.name.startsWith(prefix) && it.name.contains(".so") } }
+                dir.walkTopDown().maxDepth(4)
+                    .filter { it.isFile && it.name.startsWith(prefix) && it.name.contains(".so") }.toList()
             val needle = ".virgl_test".toByteArray()
             val candidates = (listOfNotNull(eglMesa.firstOrNull(), driDrivers.firstOrNull())
                 .map { resolved(it) } + globPrefix(libDir, "libgallium-")).distinct()
