@@ -314,11 +314,16 @@ object XServer {
      *  unparsable (completeness NOT established). null = enumeration
      *  itself failed (/proc unreadable) -> worker set UNKNOWN. Only
      *  children-empty AND !partial is a proven "no workers". */
-    private class ChildCapture(val children: List<Int>, val partial: Boolean, val unreadable: Int)
+    private class ChildCapture(val children: List<PIdent>, val partial: Boolean, val unreadable: Int)
 
+    /** Identity is captured WITH ancestry in the same pass: ppid+starttime
+     *  come from the SAME stat read (coherent per process), uid from the
+     *  pid dir metadata; a uid read failure makes the capture PARTIAL
+     *  (an unreadable entry could BE a worker - never silently complete).
+     *  Foreign-uid entries are skipped as normal churn (not failures). */
     private fun virglChildrenOf(pid: Int): ChildCapture? {
         val dir = File("/proc").listFiles { f -> f.name.matches(Regex("[0-9]+")) } ?: return null
-        val out = ArrayList<Int>()
+        val out = ArrayList<PIdent>()
         var unreadable = 0
         for (f in dir) {
             val st = try { File(f, "stat").readText() } catch (t: Throwable) { unreadable++; continue }
@@ -326,9 +331,11 @@ object XServer {
             if (close < 0) { unreadable++; continue }
             val rest = try { st.substring(close + 1).trim().split(Regex("\\s+")) } catch (t: Throwable) { unreadable++; continue }
             if (rest.size < 20) { unreadable++; continue }
-            val ppid = rest[1].toIntOrNull()
-            if (ppid == null) { unreadable++; continue }
-            if (ppid == pid) out.add(f.name.toInt())
+            if (rest[1].toIntOrNull() != pid) continue
+            val cpid = f.name.toInt()
+            val uid = try { Os.stat("/proc/" + cpid).st_uid } catch (t: Throwable) { unreadable++; continue }
+            if (uid != android.os.Process.myUid()) continue
+            out.add(PIdent(cpid, rest[19], uid))
         }
         return ChildCapture(out, unreadable > 0, unreadable)
     }
@@ -418,7 +425,22 @@ object XServer {
                         // a lower bound, completeness NOT established.
                         Log.w(TAG, "virgl worker capture PARTIAL (" + cap.unreadable + " unreadable /proc entries could hide a worker); signaling captured+verified identities only (" + reason + ")")
                     }
-                    cap.children.forEach { cp -> identityOf(cp)?.let { targets[cp] = it } }
+                    cap.children.forEach { targets[it.pid] = it }
+                }
+                // The parent can die or change state EXTERNALLY during the
+                // scan: re-verify identity AND frozen state before any
+                // signal. A dead parent means the captured workers are
+                // already orphaned - they are still contained below (each
+                // signal re-verifies pid+starttime+uid). An unfrozen parent
+                // means the frozen-set guarantee ended mid-scan: the
+                // capture is treated as partial either way.
+                val parentOk = stillOurs(ident)
+                val parentState = if (parentOk) stateOf(ident) else null
+                if (!parentOk) {
+                    Log.w(TAG, "virgl parent died during worker capture - containing captured+verified worker identities only (" + reason + ")")
+                    targets.remove(ident.pid)
+                } else if (parentState != "T" && parentState != "t") {
+                    Log.w(TAG, "virgl parent NOT stopped after capture (state=" + parentState + ") - frozen-set guarantee ended mid-scan; capture possibly incomplete (" + reason + ")")
                 }
                 for (t in targets.values) send(t, OsConstants.SIGTERM)
                 send(ident, OsConstants.SIGCONT)
