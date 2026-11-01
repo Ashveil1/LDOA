@@ -176,6 +176,10 @@ object XServer {
                                  val onError: (String) -> Unit,
                                  val onStage: (String) -> Unit)
     @Volatile private var attemptRouting: AttemptRouting? = null
+    // Set by Hide (detachAttemptRouting), cleared by each attempt start and
+    // re-attach: a completion claimed BEFORE Hide still re-checks this at
+    // the open point, so Hide always wins the race against a queued finish.
+    @Volatile private var routingDetached = false
     // Attempt epoch: bumped by each new attempt AND by a completed user
     // Stop, so a stale completion (its session already torn down, or a
     // newer attempt in flight) is dropped - it can never reopen the X
@@ -189,14 +193,19 @@ object XServer {
     /** Simulate a fresh attempt start (regression tests only): same epoch
      *  semantics as the real openDesktop start. Returns the attempt seq. */
     internal fun beginAttemptForTest(): Long = synchronized(ownershipLock) {
-        attemptSeq++; lastStartSeq = attemptSeq; preparing = true; attemptSeq
+        attemptSeq++; lastStartSeq = attemptSeq; preparing = true
+        routingDetached = false
+        attemptSeq
     }
 
     /** Detach the visible caller (overlay "Hide - keep starting"): the
      *  attempt keeps running but its completion stays silent - no
      *  foreground steal; the next Continue/open brings the ready desktop
      *  forward through the reuse path. */
-    internal fun detachAttemptRouting() { attemptRouting = null }
+    internal fun detachAttemptRouting() {
+        attemptRouting = null
+        routingDetached = true
+    }
 
     /** True when a GNOME desktop session for this distro is already alive:
      *  re-entering the desktop then only brings the X11 activity forward
@@ -408,10 +417,12 @@ object XServer {
         deniedBusRolePidsForTest.clear()
         preparing = false
         attemptRouting = null
+        routingDetached = false
         attemptSeq = 0L
         lastStartSeq = 0L
         stopInFlight = false
         lastOpenedXForTest = null
+        beforeOpenHookForTest = null
     }
 
     /** Test-only seam: deny ONLY the session-bus role binding for one
@@ -645,8 +656,10 @@ object XServer {
             // Re-attach, never refuse: follow the in-flight attempt so its
             // stage lines and outcome reach the screen the user is actually
             // looking at. The single-attempt guard stands - no second
-            // session is launched.
+            // session is launched. A visible screen re-subscribes: an
+            // earlier Hide detach is re-armed.
             attemptRouting = AttemptRouting(activity, onError, onStage)
+            routingDetached = false
             onStage("a desktop start is already in progress - following it now")
             return
         }
@@ -655,6 +668,7 @@ object XServer {
             lastStartSeq = attemptSeq
             preparing = true
             attemptRouting = AttemptRouting(activity, onError, onStage)
+            routingDetached = false
             attemptSeq
         }
         thread(name = "xserver-start") {
@@ -897,24 +911,48 @@ object XServer {
                 r = attemptRouting
                 attemptRouting = null
             }
+            // Test seam: injects Stop/Hide INTO the claim->open window.
+            beforeOpenHookForTest?.invoke()
+            // REVOKE RE-CHECK at the open/delivery point: the claim above
+            // is not atomic with the actual UI-thread launch, so a Stop
+            // (epoch bump / stopInFlight) or Hide (routingDetached) that
+            // landed after the claim still revokes the open here. A Stop
+            // landing AFTER this check is a legitimate ordering (the
+            // completion won) - the user then stops from the open desktop.
+            val revokedByStop = synchronized(ownershipLock) {
+                attemptSeqAtStart != attemptSeq || stopInFlight
+            }
             if (launched) {
-                // L1: persistent background notification + manual
-                // wakelock toggle while the session lives (accepted
-                // requirements File v2). Service watches session end.
-                SessionService.start(ctx)
                 val a = r?.activity
-                if (a != null && !a.isFinishing && !a.isDestroyed) {
-                    lastOpenedXForTest = a
-                    a.startActivity(Intent(a, com.termux.x11.MainActivity::class.java))
+                if (revokedByStop) {
+                    gateLog("completion revoked at the open point by Stop - no service, no X view")
                 } else {
-                    gateLog("desktop ready; no attached live screen - next open brings it forward (no forced launch)")
+                    // L1: persistent background notification + manual
+                    // wakelock toggle while the session lives (accepted
+                    // requirements File v2). Service watches session end.
+                    SessionService.start(ctx)
+                    if (a != null && !a.isFinishing && !a.isDestroyed && !routingDetached) {
+                        lastOpenedXForTest = a
+                        a.startActivity(Intent(a, com.termux.x11.MainActivity::class.java))
+                    } else {
+                        gateLog("desktop ready; detached or no attached live screen - next open brings it forward (no forced launch)")
+                    }
                 }
             } else {
-                Log.e(TAG, "desktop open failed-closed: " + failure)
-                r?.onError?.invoke(failure ?: "unknown desktop start failure")
+                if (revokedByStop) {
+                    gateLog("failure outcome dropped at the delivery point (superseded by Stop)")
+                } else {
+                    Log.e(TAG, "desktop open failed-closed: " + failure)
+                    r?.onError?.invoke(failure ?: "unknown desktop start failure")
+                }
             }
         }
     }
+
+    /** Test-only seam: runs inside finishAttempt between the routing claim
+     *  and the open/delivery re-check, so a regression can drive Stop/Hide
+     *  into exactly that window. */
+    @Volatile internal var beforeOpenHookForTest: (() -> Unit)? = null
 
     /** Test observability: the activity a successful completion routed to. */
     @Volatile internal var lastOpenedXForTest: Activity? = null

@@ -187,6 +187,48 @@ class OpenDesktopReentryTest {
     }
 
     @Test
+    fun stopBetweenClaimAndOpenRevokesTheOpen() {
+        val instr = InstrumentationRegistry.getInstrumentation()
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            var seq = 0L
+            scenario.onActivity { a ->
+                Shot.dismissSystemDialogs(device)
+                seq = XServer.beginAttemptForTest()
+                XServer.openDesktop(a, Distros.UBUNTU, onStage = { }, onError = { })
+                // Drive a user Stop INTO the claim->open window: the claim
+                // passes (attempt still valid there), the Stop lands, and
+                // the revoke re-check at the open point must catch it.
+                XServer.beforeOpenHookForTest = { XServer.stopDesktopMode(ctx) }
+            }
+            XServer.finishAttempt(ctx, true, null, seq)
+            instr.waitForIdleSync()
+            assertNull("Stop between claim and open: no X view may open",
+                XServer.lastOpenedXForTest)
+            assertFalse("preparing cleared by the Stop", XServer.preparing)
+        }
+    }
+
+    @Test
+    fun hideBetweenClaimAndOpenRevokesTheOpen() {
+        val instr = InstrumentationRegistry.getInstrumentation()
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            var seq = 0L
+            scenario.onActivity { a ->
+                Shot.dismissSystemDialogs(device)
+                seq = XServer.beginAttemptForTest()
+                XServer.openDesktop(a, Distros.UBUNTU, onStage = { }, onError = { })
+                // Hide lands after the claim but before the actual open.
+                XServer.beforeOpenHookForTest = { XServer.detachAttemptRouting() }
+            }
+            XServer.finishAttempt(ctx, true, null, seq)
+            instr.waitForIdleSync()
+            assertNull("Hide between claim and open: no foreground steal",
+                XServer.lastOpenedXForTest)
+            assertFalse("preparing cleared on completion", XServer.preparing)
+        }
+    }
+
+    @Test
     fun preparingOverlayShowsWorkingEscapeControls() {
         val instr = InstrumentationRegistry.getInstrumentation()
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
