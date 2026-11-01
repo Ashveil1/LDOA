@@ -433,6 +433,11 @@ class VirglGnomeSessionTest {
         val savedE1Flag = if (e1Flag.isFile) e1Flag.readText() else null
         var executed = false
         var checksPassed = false
+        // Arm-scoped launch generation markers, hoisted so the finally
+        // block can scope the E1 outcome to THIS arm's launch (never the
+        // whole append-log: old E1 lines are not the current outcome).
+        var launchBase = -1L
+        var launchGenId: String? = null
         var rendererVerdict = "UNKNOWN (stage not reached)"
         var presentationVerdict = "REVIEWER-VERIFICATION PENDING (stage not reached)"
         var failure: Throwable? = null
@@ -524,6 +529,7 @@ class VirglGnomeSessionTest {
             // File.length() bytes) + the launch-moment uptime for the
             // freshness candidate check (runtime clk_tck, no USER_HZ).
             val base = (if (logFile.isFile) logFile.readText() else "").length.toLong()
+            launchBase = base
             // Boot-relative uptime from the Android runtime - NEVER
             // /proc/uptime (EACCES for apps at targetSdk 34; that read
             // aborted this test's first CI execution before launch).
@@ -540,6 +546,7 @@ class VirglGnomeSessionTest {
                 .append(" (SystemClock.elapsedRealtime, seconds since boot; -1 = unavailable)\n")
             XServer.launchOrReuseGnomeSession(ctx, d, rootfs)
             val launchId = XServer.currentLaunchIdForTest()
+            launchGenId = launchId
             assertNotNull("current launch identity unavailable - cannot bind evidence to THIS launch " +
                 "(failing clearly, not scanning an unbound window)", launchId)
 
@@ -895,22 +902,37 @@ class VirglGnomeSessionTest {
                 out.append("== CLEANUP-ERROR e1-flag restore: ").append(fe.message ?: fe.toString()).append('\n')
                 if (failure == null) failure = fe else failure!!.addSuppressed(fe)
             }
-            // Runtime mode + guest-side mask/rollback outcome: the E1
-            // lines the launch script actually emitted THIS run (ACTIVE /
-            // BLOCKED / PARTIAL / ROLLBACK), copied verbatim and bounded.
+            // Runtime mode + guest-side mask/rollback outcome, scoped to
+            // THIS arm's launch generation (window(launchBase) +
+            // generationSlice(launchGenId) - the same binding the
+            // readiness gate uses). The whole append-log is NEVER read
+            // for this: old E1 lines are not the current outcome. Mode ON
+            // alone is NOT evidence masks installed - only per-mask
+            // ACTIVE lines inside this generation count; rotation fails
+            // closed (UNREADABLE, never silently absent).
             try {
                 out.append("== E1 MODE: ").append(if (e1Requested) "ON (arg ldoaE1=1)"
                            else "OFF (no ldoaE1 arg)").append('\n')
-                val e1Lines = if (logFile.isFile)
-                    logFile.readLines().filter { it.contains("gnome-launch: E1") } else emptyList()
-                if (e1Lines.isEmpty()) {
-                    out.append("== E1 GUEST OUTCOME: no E1 lines in guest log")
-                        .append(if (e1Requested) " (UNEXPECTED - masks may not have run)\n"
-                                else " (expected for a stock launch)\n")
+                val w = if (launchBase >= 0) window(launchBase) else null
+                val slice = if (w != null && launchGenId != null) generationSlice(w, launchGenId) else null
+                if (launchBase < 0 || launchGenId == null) {
+                    out.append("== E1 GUEST OUTCOME: NO-LAUNCH this arm (no generation exists)\n")
+                } else if (slice == null) {
+                    out.append("== E1 GUEST OUTCOME: UNREADABLE - guest log rotated / generation" +
+                        " not found (fail-closed; NOT evidence of absence)\n")
                 } else {
-                    out.append("== E1 GUEST OUTCOME (").append(e1Lines.size.toString())
-                        .append(" lines, verbatim, max 12):\n")
-                    e1Lines.take(12).forEach { out.append("   ").append(it).append('\n') }
+                    val e1Lines = slice.lineSequence()
+                        .filter { it.contains("gnome-launch: E1") }.toList()
+                    if (e1Lines.isEmpty()) {
+                        out.append("== E1 GUEST OUTCOME: no E1 lines in THIS launch generation")
+                            .append(if (e1Requested) " (UNEXPECTED with mode ON - masks NOT proven" +
+                                    " installed; experiment coverage UNKNOWN)\n"
+                                    else " (expected for a stock launch)\n")
+                    } else {
+                        out.append("== E1 GUEST OUTCOME this generation (").append(e1Lines.size.toString())
+                            .append(" lines, verbatim, max 12):\n")
+                        e1Lines.take(12).forEach { out.append("   ").append(it).append('\n') }
+                    }
                 }
             } catch (t: Throwable) {
                 out.append("== E1 GUEST OUTCOME: read failed (auxiliary): ")

@@ -26,7 +26,7 @@ on:
         description: 'E1 session-diet EXPERIMENT: on = pass -e ldoaE1 1 to VirglGnomeSessionTest only (Wwan+Smartcard managed autostart masks for THAT launch; flags restored after); off (DEFAULT) = every lane stays stock. Regression/full runs must keep this off.'
         default: 'off'
         type: choice
-        options: [off, on]
+        options: ['off', 'on']
 
 jobs:
   lorie-mouse-attribution:
