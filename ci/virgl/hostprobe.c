@@ -32,9 +32,13 @@ int main(void) {
     EGLint ctxAttrs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
     EGLContext ctx = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, ctxAttrs);
     if (ctx == EGL_NO_CONTEXT) { fprintf(stderr, "HOSTPROBE-ERROR stage=7 eglCreateContext\n"); return 7; }
+    /* Capability-gated: surfaceless contexts need EGL_KHR_surfaceless_context;
+     * never force an unsupported platform path - fall back to a 1x1 pbuffer. */
+    const char *exts = eglQueryString(dpy, EGL_EXTENSIONS);
+    printf("EGL-DISPLAY-EXTENSIONS: %s\n", exts ? exts : "(null)");
+    int hasSurfaceless = exts && strstr(exts, "EGL_KHR_surfaceless_context");
     EGLSurface surf = EGL_NO_SURFACE;
-    if (!eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)) {
-        /* EGL_KHR_surfaceless_context unavailable: 1x1 pbuffer fallback. */
+    if (!hasSurfaceless || !eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)) {
         EGLint pbAttrs[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
         surf = eglCreatePbufferSurface(dpy, cfg, pbAttrs);
         if (surf == EGL_NO_SURFACE || !eglMakeCurrent(dpy, surf, surf, ctx)) {

@@ -48,22 +48,35 @@ jobs:
           set -e
           sudo apt-get update -qq
           sudo apt-get install -y -qq gcc-aarch64-linux-gnu binutils
-          # Guest probes (run INSIDE proot against the rootfs' glibc): the
-          # rootfs arch follows the device ABI (Distros.UBUNTU: amd64 on
-          # the x86_64 CI emulator, arm64 on phone) - build BOTH; the test
-          # selects from the provisioned rootfs' ELF header.
+          # glibc version contract: the runner MUST be noble (24.04) so the
+          # x86_64 guest probe's glibc symbol versions can never exceed the
+          # noble rootfs' glibc 2.39 (same for the noble cross sysroot).
+          # Fail loudly if ubuntu-latest ever moves past noble.
+          test "$(lsb_release -cs)" = "noble" || { echo "RUNNER-NOT-NOBLE: $(lsb_release -ds) - probe glibc contract unverified"; exit 1; }
+          # Guest probes (run INSIDE proot; proot's loader reads+maps them,
+          # no kernel exec of app-writable files): the rootfs arch follows
+          # the device ABI (Distros.UBUNTU: amd64 on the x86_64 CI
+          # emulator, arm64 on phone) - build BOTH; the test selects from
+          # the provisioned rootfs' ELF header.
           gcc -O2 -Wall -o ci/virgl/eglprobe-x86_64 ci/virgl/eglprobe.c -ldl
           aarch64-linux-gnu-gcc -O2 -Wall -o ci/virgl/eglprobe-aarch64 ci/virgl/eglprobe.c -ldl
-          # Host probes (run OUTSIDE proot in the app's process env,
-          # Android bionic): one per app ABI (arm64-v8a + x86_64).
+          # Host probes (run OUTSIDE proot): packaged as jniLibs
+          # libhostprobe.so per app ABI (arm64-v8a + x86_64) so kernel exec
+          # from nativeLibraryDir is allowed (filesDir exec is SELinux
+          # W^X-denied on targetSdk 34). Written BEFORE the gradle build in
+          # the emulator step so assembleDebug packages them.
           NDK_TC="$ANDROID_HOME/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          "$NDK_TC/x86_64-linux-android26-clang" -O2 -o ci/virgl/hostprobe-x86_64 ci/virgl/hostprobe.c -lEGL -lGLESv2
-          "$NDK_TC/aarch64-linux-android26-clang" -O2 -o ci/virgl/hostprobe-arm64 ci/virgl/hostprobe.c -lEGL -lGLESv2
-          for f in ci/virgl/eglprobe-x86_64 ci/virgl/eglprobe-aarch64 ci/virgl/hostprobe-x86_64 ci/virgl/hostprobe-arm64; do
+          mkdir -p app/src/main/jniLibs/x86_64 app/src/main/jniLibs/arm64-v8a
+          "$NDK_TC/x86_64-linux-android26-clang" -O2 -o app/src/main/jniLibs/x86_64/libhostprobe.so ci/virgl/hostprobe.c -lEGL -lGLESv2
+          "$NDK_TC/aarch64-linux-android26-clang" -O2 -o app/src/main/jniLibs/arm64-v8a/libhostprobe.so ci/virgl/hostprobe.c -lEGL -lGLESv2
+          for f in ci/virgl/eglprobe-x86_64 ci/virgl/eglprobe-aarch64 app/src/main/jniLibs/x86_64/libhostprobe.so app/src/main/jniLibs/arm64-v8a/libhostprobe.so; do
             readelf -h "$f" | grep -E "Class|Machine|Type" || { echo "READELF-FAILED $f"; exit 1; }
             readelf -l "$f" | grep -A1 INTERP | tail -1 || true
           done
-          sha256sum ci/virgl/eglprobe-x86_64 ci/virgl/eglprobe-aarch64 ci/virgl/hostprobe-x86_64 ci/virgl/hostprobe-arm64
+          echo "max GLIBC symbol versions required by the guest probes (must be <= 2.39 = noble):"
+          readelf -V ci/virgl/eglprobe-x86_64 | grep -o "GLIBC_[0-9.]*" | sort -Vu | tail -2
+          readelf -V ci/virgl/eglprobe-aarch64 | grep -o "GLIBC_[0-9.]*" | sort -Vu | tail -2
+          sha256sum ci/virgl/eglprobe-x86_64 ci/virgl/eglprobe-aarch64 app/src/main/jniLibs/x86_64/libhostprobe.so app/src/main/jniLibs/arm64-v8a/libhostprobe.so
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -130,7 +143,7 @@ jobs:
             # - and run 41307671476 lost even that output to tail -10 + a
             # discarded Proot.Result. Full reports are pulled and gated
             # below: a missing/empty report FAILS the lane, never masks.
-            if [ "$LANE" = virgl-only ]; then adb -s emulator-5554 shell mkdir -p /sdcard/Android/data/dev.phonelinux.proto/files && adb -s emulator-5554 push ci/virgl/eglprobe-x86_64 ci/virgl/eglprobe-aarch64 ci/virgl/hostprobe-x86_64 ci/virgl/hostprobe-arm64 /sdcard/Android/data/dev.phonelinux.proto/files/ || { echo "VIRGL-PROBE-PUSH-FAILED - instruments NOT run"; exit 1; }; fi
+            if [ "$LANE" = virgl-only ]; then adb -s emulator-5554 shell mkdir -p /sdcard/Android/data/dev.phonelinux.proto/files && adb -s emulator-5554 push ci/virgl/eglprobe-x86_64 ci/virgl/eglprobe-aarch64 /sdcard/Android/data/dev.phonelinux.proto/files/ || { echo "VIRGL-PROBE-PUSH-FAILED - instruments NOT run"; exit 1; }; fi
             if [ "$LANE" = virgl-only ]; then timeout -s KILL 900 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.VirglRootfsProvisionTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl-provision.log | tail -20 || echo "VIRGL-PROVISION-INSTR-TIMEOUT: outer 900s bound hit - instrument never returned"; else echo "virgl-provision SKIPPED (lane=$LANE)" > /tmp/instr-virgl-provision.log; fi
             if [ "$LANE" = virgl-only ]; then grep -q "OK (" /tmp/instr-virgl-provision.log || touch /tmp/PHONELINUX_VIRGL_FAILED; fi
             if [ "$LANE" = virgl-only ] && [ ! -f /tmp/PHONELINUX_VIRGL_FAILED ]; then timeout -s KILL 900 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.VirglServerSmokeTest,dev.phonelinux.proto.VirglProbeTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl.log | tail -40 || echo "VIRGL-INSTR-TIMEOUT: outer 900s bound hit - instrument never returned"; else echo "virgl SKIPPED (lane=$LANE)" > /tmp/instr-virgl.log; fi

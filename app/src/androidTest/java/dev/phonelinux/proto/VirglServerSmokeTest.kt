@@ -17,7 +17,10 @@ import java.io.File
  *  runs hostprobe (ci/virgl/hostprobe.c): an independent HOST EGL/GLES
  *  renderer measurement in the app's own process environment - the same
  *  host EGL the server renders through - so the host backend is measured
- *  directly, not inferred from the guest string alone. Full evidence
+ *  directly, not inferred from the guest string alone. SCOPE: on the CI
+ *  emulator this measures the emulator's GPU transport (swiftshader or
+ *  host-GPU passthrough), NOT Adreno acceleration - phone numbers need a
+ *  phone run, which this lane does not claim. Full evidence
  *  lands in files/virgl-smoke.txt (cat'ed by the lane); nothing lives
  *  only in an assertion message. */
 @RunWith(AndroidJUnit4::class)
@@ -31,17 +34,19 @@ class VirglServerSmokeTest {
         try { XServer.stopVirglServerForTest("smoke-cleanup") } catch (t: Throwable) { }
     }
 
-    /** Run the lane-built hostprobe for THIS device's primary ABI and
-     *  return its full output (host EGL vendor + GL renderer strings). */
+    /** Run the hostprobe PACKAGED IN THE APK's jniLibs
+     *  (app/src/main/jniLibs/<abi>/libhostprobe.so, built by the lane
+     *  before assembleDebug). Kernel exec from nativeLibraryDir is the
+     *  repo's proven route (libproot.so, libvirgl_test_server.so); an
+     *  app-writable filesDir copy would be SELinux-denied on targetSdk
+     *  34 (W^X) - never exec from there. */
     private fun runHostProbe(rb: StringBuilder) {
-        val abi = android.os.Build.SUPPORTED_ABIS.firstOrNull()
-        val variant = if (abi == "x86_64") "hostprobe-x86_64" else "hostprobe-arm64"
-        val ext = File(ctx.getExternalFilesDir(null), variant)
-        assertTrue(variant + " not pushed by the lane to " + ext.absolutePath, ext.isFile)
-        val local = File(ctx.filesDir, "hostprobe")
-        local.writeBytes(ext.readBytes())
-        android.system.Os.chmod(local.absolutePath, 493) // 0755
-        rb.append("hostprobe: variant=").append(variant).append(" (primary ABI ").append(abi).append(")\n")
+        val local = File(ctx.applicationInfo.nativeLibraryDir, "libhostprobe.so")
+        assertTrue("libhostprobe.so not packaged in nativeLibraryDir " +
+            "(lane build step must write app/src/main/jniLibs/<abi>/ before assembleDebug): " +
+            local.absolutePath, local.isFile)
+        rb.append("hostprobe: ").append(local.absolutePath).append(" (primary ABI ")
+            .append(android.os.Build.SUPPORTED_ABIS.firstOrNull()).append(")\n")
         try {
             val proc = ProcessBuilder(local.absolutePath).redirectErrorStream(true).start()
             val out = proc.inputStream.bufferedReader().readText()

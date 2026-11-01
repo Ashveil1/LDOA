@@ -44,7 +44,7 @@ class VirglProbeTest {
     private val d = Distros.UBUNTU
     private val rootfs get() = DistroInstaller(ctx).rootfsDir(d)
     private val flag get() = File(ctx.filesDir, ".ldoa-virgl-optin")
-    private val probeLocal get() = File(ctx.filesDir, "eglprobe")
+    private val probeLocal get() = File(rootfs, "tmp/eglprobe")
     private val probeReportDefault get() = File(ctx.filesDir, "virgl-probe-default.txt")
     private val probeReportVirgl get() = File(ctx.filesDir, "virgl-probe-virpipe.txt")
 
@@ -83,15 +83,21 @@ class VirglProbeTest {
         val probeMach = elfMachine(ext)
         assertEquals("staged probe ELF machine does not match the rootfs (probe=" +
             probeMach + " rootfs=" + guestMach + ")", guestMach, probeMach)
+        // Stage INSIDE the rootfs: proot executes guest ELFs through its
+        // loader (PROOT_LOADER -> libproot_loader.so from nativeLibraryDir)
+        // which READS and maps the file - no kernel exec of app-writable
+        // files is ever requested (same class as every provisioned rootfs
+        // binary that CI already runs). filesDir ProcessBuilder exec, by
+        // contrast, is SELinux-denied on targetSdk 34 - that route is used
+        // ONLY for jniLibs binaries (hostprobe).
         probeLocal.writeBytes(ext.readBytes())
         android.system.Os.chmod(probeLocal.absolutePath, 493) // 0755
-        assertTrue("eglprobe not executable at " + probeLocal.absolutePath, probeLocal.canExecute())
         return guestArch
     }
 
     private fun runProbeArm(title: String, reportFile: File, virgl: Boolean,
                             holdSecs: Int, sock: File?): Proot.Result {
-        val binds = mutableListOf(ctx.filesDir.absolutePath to "/ldoa-probe")
+        val binds = mutableListOf<Pair<String, String>>()
         if (virgl) {
             assertNotNull("virgl socket missing for probe bind (server not up?)", sock)
             assertTrue("virgl socket file missing: " + sock!!.absolutePath, sock.exists())
@@ -99,7 +105,7 @@ class VirglProbeTest {
         }
         val env = mutableMapOf("EGL_PLATFORM" to "surfaceless")
         if (virgl) env["GALLIUM_DRIVER"] = "virpipe"
-        val cmd = mutableListOf("/ldoa-probe/eglprobe")
+        val cmd = mutableListOf("/tmp/eglprobe")
         if (holdSecs > 0) cmd.addAll(listOf("--hold", holdSecs.toString()))
         val result = Proot.runGuest(ctx, rootfs, cmd, extraBinds = binds, extraEnv = env,
             fakeRoot = false, timeoutMs = (holdSecs * 1000L) + 120_000L)
@@ -181,9 +187,9 @@ class VirglProbeTest {
                 armBReason = "completed"
                 VirglTestCommon.writeProbeReport(probeReportVirgl,
                     "virpipe (opt-in, vtest socket bound, GALLIUM_DRIVER=virpipe)",
-                    listOf("/ldoa-probe/eglprobe", "--hold", "25"),
+                    listOf("/tmp/eglprobe", "--hold", "25"),
                     mapOf("EGL_PLATFORM" to "surfaceless", "GALLIUM_DRIVER" to "virpipe"),
-                    listOf(ctx.filesDir.absolutePath to "/ldoa-probe", sock.absolutePath to "/tmp/.virgl_test"),
+                    listOf(sock.absolutePath to "/tmp/.virgl_test"),
                     virglResult,
                     extra = "baseline-classification: " + baseClass + " renderer=[" + baseline + "]\n" +
                         "host-classification: " + hostClass + "\n" +

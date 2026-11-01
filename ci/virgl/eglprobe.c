@@ -9,9 +9,15 @@
  * SERVER's renderer (lorie epoxy/GLESv2), never the guest driver's.
  *
  * Runtime deps live in the guest rootfs (dlopen'ed): libEGL.so.1 and
- * libGLESv2.so.2 (Ubuntu noble mesa, already provisioned with GNOME).
- * Build (CI, host cross toolchain):
- *   aarch64-linux-gnu-gcc -O2 -Wall -o eglprobe ci/virgl/eglprobe.c -ldl
+ * libGLESv2.so.2 (noble mesa: libegl1 GLVND dispatch + libegl-mesa0
+ * vendor + libgl1-mesa-dri megadriver, provisioned by
+ * VirglRootfsProvisionTest). Build (CI lane; runner gate: noble only,
+ * so glibc symbol versions never exceed the rootfs' 2.39):
+ *   gcc -O2 -Wall -o eglprobe-x86_64 ci/virgl/eglprobe.c -ldl
+ *   aarch64-linux-gnu-gcc -O2 -Wall -o eglprobe-aarch64 ci/virgl/eglprobe.c -ldl
+ * The probe runs INSIDE proot: proot's loader (libproot_loader.so from
+ * nativeLibraryDir) reads and maps the guest ELF, so the app-writable
+ * rootfs path needs no kernel exec permission.
  *
  * Usage: eglprobe [--hold SECONDS]
  *   Prints EGL-VENDOR / EGL-VERSION / GL-VENDOR / GL-RENDERER /
