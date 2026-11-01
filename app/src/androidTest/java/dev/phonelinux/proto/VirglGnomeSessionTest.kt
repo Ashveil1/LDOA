@@ -376,12 +376,27 @@ class VirglGnomeSessionTest {
         // Clear stale artifacts: an unreached stage must never leave a
         // previous run's image or summary looking current.
         report.delete(); xwd.delete()
+        // The census is THIS arm's artifact: delete any stale copy so an
+        // unreached stage can never present a previous run's census as
+        // current. (phantom-snapshots.log/-raw.log are append-only across
+        // arms BY DESIGN - in the full lane the harness arm's samples
+        // precede this arm; deleting them here would destroy that
+        // evidence. This arm's samples are delimited by labeled boundary
+        // beats instead.)
+        val censusFile = File(ctx.filesDir, "ldoa-session-census.txt")
+        censusFile.delete()
         val savedFlag = if (flag.isFile) flag.readText() else null
         var executed = false
         var checksPassed = false
         var rendererVerdict = "UNKNOWN (stage not reached)"
         var presentationVerdict = "REVIEWER-VERIFICATION PENDING (stage not reached)"
         var failure: Throwable? = null
+        val uiDevice = androidx.test.uiautomator.UiDevice.getInstance(
+            InstrumentationRegistry.getInstrumentation())
+        // Sampler lifecycle lives OUTSIDE try so finally can stop it even
+        // when the body throws before the thread started.
+        val samplerStop = java.util.concurrent.atomic.AtomicBoolean(false)
+        var samplerThread: Thread? = null
         try {
             val installer = DistroInstaller(ctx)
             assertTrue("ubuntu not installed - full-lane autoenter setup must precede this test",
@@ -396,6 +411,51 @@ class VirglGnomeSessionTest {
             SessionReset.trackedWarmup(ctx, d, rootfs) { m -> Log.i(TAG, "warmup: " + m) }
             out.append("pre-launch reset: ")
                 .append(SessionReset.resetForFreshLaunch(ctx, d) { m -> Log.i(TAG, m) }).append('\n')
+
+            // M3 census, PRE-LAUNCH: written incrementally to disk
+            // BEFORE the observed trim window (partial file + TRUNCATED
+            // marker on failure; a stale census was deleted at arm
+            // start). Auxiliary evidence: a census failure is recorded,
+            // never fails the arm.
+            try {
+                SessionCensus.writeCensus(rootfs, censusFile, "ubuntu") { cmd ->
+                    try { uiDevice.executeShellCommand(cmd) } catch (t: Throwable) { null }
+                }
+                out.append("session census: written pre-launch (ldoa-session-census.txt)\n")
+            } catch (t: Throwable) {
+                out.append("session census WRITE FAILED (auxiliary evidence only): ")
+                    .append(t.message ?: t.javaClass.simpleName).append('\n')
+            }
+
+            // Bounded phantom-sampler LIFETIME for this arm: the same
+            // shape the harness arm uses (daemon thread, 5s cadence,
+            // hard end bound inside the 1500s arm bound), started before
+            // launch, stopped and joined in finally. Coverage label:
+            // point beats every 5s from pre-launch to teardown; the
+            // dumpsys global section is 15s-cadence-gated and may SKIP
+            // beats, and its "All Active App Child Processes" section
+            // can be absent on a given build (recorded as unavailable -
+            // global counts are NOT promised). Each sample spawns one
+            // transient marker process, recorded in the sample itself.
+            try {
+                PhantomSampler.sample(uiDevice, "virgl-session-arm-start")
+            } catch (t: Throwable) {
+                out.append("sampler arm-start beat FAILED (auxiliary evidence only): ")
+                    .append(t.message ?: t.javaClass.simpleName).append('\n')
+            }
+            val samplerEnd = System.currentTimeMillis() + 780_000
+            samplerThread = kotlin.concurrent.thread(name = "virgl-session-sampler", isDaemon = true) {
+                var n = 0
+                while (!samplerStop.get() && System.currentTimeMillis() < samplerEnd) {
+                    try {
+                        PhantomSampler.sample(uiDevice, "virgl-session-periodic-" + n)
+                    } catch (t: Throwable) {
+                        Log.i(TAG, "sampler periodic-" + n + " failed: " + (t.message ?: t.javaClass.simpleName))
+                    }
+                    n++
+                    Thread.sleep(5_000)
+                }
+            }
 
             // Opt IN for THIS launch only; the flag is restored in finally.
             flag.writeText("1")
@@ -434,6 +494,18 @@ class VirglGnomeSessionTest {
             out.append("render-server: pid=").append(srvIdent!!.pid).append(" start=").append(srvIdent.start)
                 .append(" uid=").append(srvIdent.uid).append(" sock=")
                 .append(sock?.absolutePath ?: "?").append(" launchId=").append(launchId).append('\n')
+
+            // EARLY ancestry: exact ppid startup chains of this uid's
+            // processes seconds after spawn - the M3 census's runtime
+            // half, captured before the observed trim window.
+            try {
+                SessionCensus.appendAncestrySnapshot(
+                    File(ctx.filesDir, "ldoa-session-census.txt"), "post-launch-early")
+                out.append("ancestry snapshot: post-launch-early appended to census\n")
+            } catch (t: Throwable) {
+                out.append("ancestry snapshot FAILED (auxiliary evidence only): ")
+                    .append(t.message ?: t.javaClass.simpleName).append('\n')
+            }
 
             // READINESS: the LATEST state line inside THIS launch's
             // generation slice decides; an earlier alive never masks a
@@ -476,6 +548,17 @@ class VirglGnomeSessionTest {
             out.append("VERDICT readiness: ")
                 .append(if (ready) "PASS (latest state of this generation = alive)"
                         else "FAIL (" + (died ?: "10min window expired") + ")").append('\n')
+
+            // Second ancestry/env point, POST-READINESS: the immediate
+            // post-launch snapshot can precede the gnome-session spawn.
+            // Auxiliary evidence: recorded, never fails the arm.
+            try {
+                SessionCensus.appendAncestrySnapshot(censusFile, "post-readiness")
+                out.append("ancestry snapshot: post-readiness appended to census\n")
+            } catch (t: Throwable) {
+                out.append("ancestry snapshot post-readiness FAILED (auxiliary evidence only): ")
+                    .append(t.message ?: t.javaClass.simpleName).append('\n')
+            }
             assertTrue("READINESS failed - latest state of THIS generation never reached alive " +
                 "(window tail: " + (window(base)?.takeLast(400) ?: "<rotated>") + ")", ready)
             val gsPid = aliveLine!!.substringAfter("gnome-session alive pid=")
@@ -687,6 +770,36 @@ class VirglGnomeSessionTest {
             out.append("== BODY-FAILURE: ").append(t.message ?: t.toString()).append('\n')
             failure = t
         } finally {
+            // Stop the bounded sampler BEFORE anything else mutates the
+            // process world; join is bounded (a stuck beat never hangs
+            // teardown), then one terminal labeled beat records the
+            // pre-teardown world. Auxiliary: failures recorded, never
+            // fail the arm.
+            try {
+                samplerStop.set(true)
+                samplerThread?.join(15_000)
+                val stillAlive = samplerThread?.isAlive == true
+                if (stillAlive) {
+                    // join(15s) is a WAIT bound, not cancellation: a beat
+                    // stuck inside executeShellCommand (no timeout in that
+                    // API) keeps running. The thread is NOT labeled
+                    // stopped; its lifetime is INCOMPLETE/UNKNOWN; the
+                    // final beat is SKIPPED because two writers must
+                    // never share phantom-snapshots.log. Backstops: the
+                    // thread is a daemon (never blocks JVM exit) and the
+                    // arm's outer 1500s instrument bound kills the
+                    // process.
+                    out.append("sampler thread STILL ALIVE after 15s join bound (likely stuck in" +
+                        " an executeShellCommand beat) - lifetime INCOMPLETE/UNKNOWN, final beat" +
+                        " skipped (no concurrent writers); daemon thread + outer instrument" +
+                        " bound are the backstops\n")
+                } else {
+                    PhantomSampler.sample(uiDevice, "virgl-session-final")
+                }
+            } catch (t: Throwable) {
+                out.append("sampler stop/final FAILED (auxiliary evidence only): ")
+                    .append(t.message ?: t.javaClass.simpleName).append('\n')
+            }
             // Independent attempts - teardown, report persistence, flag
             // restore - each failure FAILS the test (original preserved,
             // later ones suppressed onto it); none is swallowed into a
