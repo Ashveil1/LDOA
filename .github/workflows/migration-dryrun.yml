@@ -1,0 +1,53 @@
+name: migration-dryrun
+# EMULATOR-ONLY migration backup/restore dry run (fixture state, no user data).
+# Dispatch-only: never fires on push. Bounded single run per owner release.
+on:
+  workflow_dispatch:
+
+env:
+  OLD_SHA256: 'a04bbb872f70abde08f2581e52b0e281889c00f388d7acccd4d663fd9329792b'
+  NEW_SHA256: '37f8f7f3f0546fc5df8b428b3867ff647fdda7cd6eb00ee162c501bfa64f1779'
+
+jobs:
+  dryrun:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+      - name: Download pinned old debug APK (artifact 13032733219, run 41176273259, head b4311f4)
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: '13032733219'
+          path: /tmp/apks/old
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download pinned new debug APK f7154ab (artifact 13062898886, run 41257531113)
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: '13062898886'
+          path: /tmp/apks/new
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify pinned APK hashes
+        run: |
+          echo "$OLD_SHA256  /tmp/apks/old/app-debug.apk" | sha256sum -c -
+          echo "$NEW_SHA256  /tmp/apks/new/app-debug.apk" | sha256sum -c -
+      - name: Run migration dry-run on emulator (API 34 x86_64)
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          cores: 4
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+          script: bash ci/migration-dryrun.sh
+      - name: Upload dry-run evidence (fixture-only; no device identifiers/accounts)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-dryrun-evidence
+          path: out/
+          retention-days: 7

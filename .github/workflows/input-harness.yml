@@ -12,6 +12,8 @@ on:
       - '.github/workflows/input-harness.yml'
       - '.github/workflows/apk-export.yml'
       - 'ci/apk-export-request.txt'
+      - '.github/workflows/migration-dryrun.yml'
+      - 'ci/migration-dryrun.sh'
     branches: [gnome/evidence]
   workflow_dispatch:
     inputs:
