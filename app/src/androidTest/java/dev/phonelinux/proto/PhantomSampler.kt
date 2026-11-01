@@ -173,6 +173,7 @@ object PhantomSampler {
         maybeHeader(device, sb)
         sb.append("marker: ").append(markerStatus).append('\n')
         sb.append("app: pid=").append(myPid).append(" uid=").append(myUid).append(" oom_score_adj=").append(appAdj).append('\n')
+        sb.append("memory: ").append(memoryRecord()).append('\n')
         val g = global
         if (g != null) {
             sb.append("global: available=").append(g.available)
@@ -202,6 +203,24 @@ object PhantomSampler {
             Log.w(TAG, "snapshot file write failed: " + t.message)
         }
         return summary
+    }
+
+    /** Memory-pressure record per sample. Each source is independently
+     *  guarded; an unreadable source is recorded as UNKNOWN, NEVER as
+     *  0 - a fabricated zero would masquerade as measured pressure. */
+    private fun memoryRecord(): String {
+        val memAvail: String = try {
+            val line = File("/proc/meminfo").readLines()
+                .firstOrNull { it.startsWith("MemAvailable:") }
+            line?.trim()?.split(Regex("\\s+"))?.getOrNull(1)?.plus(" kB")
+                ?: "UNKNOWN(no MemAvailable line)"
+        } catch (t: Throwable) { "UNKNOWN(" + (t.message ?: t.javaClass.simpleName) + ")" }
+        val psi: String = try {
+            File("/proc/pressure/memory").readText().lineSequence()
+                .firstOrNull { it.startsWith("some ") }?.trim()
+                ?: "UNKNOWN(no some line)"
+        } catch (t: Throwable) { "UNKNOWN(" + (t.message ?: t.javaClass.simpleName) + ")" }
+        return "MemAvailable=" + memAvail + " psi-memory[" + psi + "]"
     }
 
     /** Full bare `dumpsys activity` (no pipes exist to filter it),
