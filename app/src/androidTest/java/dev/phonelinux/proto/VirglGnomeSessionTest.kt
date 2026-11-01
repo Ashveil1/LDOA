@@ -116,10 +116,13 @@ class VirglGnomeSessionTest {
         val deadline = attachAt + 180_000
         while (System.currentTimeMillis() < deadline) {
             if (focusLine.isEmpty()) {
-                val f = device.executeShellCommand(
-                    "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'").trim()
-                focusRawTail = f.replace('\n', ' ').take(300)
-                if (f.contains("com.termux.x11.MainActivity")) focusLine = focusRawTail
+                // executeShellCommand whitespace-splits and execs WITHOUT a
+                // shell: a "| grep" suffix reaches dumpsys as ARGUMENTS
+                // (run 41336836798 focusRaw: "Bad window command, or no
+                // windows match: |"). Full dump, filtered in-process.
+                val f = currentFocusState(device)
+                focusRawTail = f.first
+                if (f.second) focusLine = focusRawTail
             }
             if (rendererLine.isEmpty()) {
                 val r = device.executeShellCommand("logcat -d -v threadtime -t 800 -s gles-renderer:D")
@@ -147,9 +150,7 @@ class VirglGnomeSessionTest {
         // CURRENT-state re-sample immediately before any capture: focus can
         // change during dismissal, the surface can tear down after an
         // earlier bind, the session can die or a new generation can start.
-        val focusNow = device.executeShellCommand(
-            "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'").trim()
-        val focusNowOk = focusNow.contains("com.termux.x11.MainActivity")
+        val focusNowOk = currentFocusState(device).second
         val surfaceNow = latestOwnRendererBind(
             device.executeShellCommand("logcat -d -v threadtime -t 800 -s gles-renderer:D"),
             appPid, attachAt)
@@ -183,6 +184,28 @@ class VirglGnomeSessionTest {
      * teardown (0x0 0 0) or no own fresh event exists. Other processes'
      * renderer lines are excluded by pid match on the threadtime prefix.
      */
+    /** Current Android window-focus excerpt + whether MainActivity holds it.
+     *  UiDevice.executeShellCommand whitespace-splits its argument and execs
+     *  it WITHOUT a shell (run 41336836798: "dumpsys window | grep ..."
+     *  delivered "|" to dumpsys as an argument -> "Bad window command, or
+     *  no windows match: |"), so the full dump is filtered in-process. The
+     *  excerpt preserves the raw focus lines as failure evidence; when no
+     *  focus lines parse, it preserves the dump head instead so a failure
+     *  is never evidence-free. */
+    private fun currentFocusState(device: androidx.test.uiautomator.UiDevice): Pair<String, Boolean> {
+        val raw = try {
+            device.executeShellCommand("dumpsys window")
+        } catch (t: Throwable) {
+            return "(dumpsys window threw: " + t.javaClass.simpleName + ")" to false
+        }
+        val focusLines = raw.lineSequence()
+            .filter { it.contains("mCurrentFocus") || it.contains("mFocusedApp") }
+            .joinToString(" ").replace('\n', ' ').take(300)
+        val excerpt = if (focusLines.isNotEmpty()) focusLines
+            else raw.replace('\n', ' ').take(300)
+        return excerpt to focusLines.contains("com.termux.x11.MainActivity")
+    }
+
     private fun latestOwnRendererBind(dump: String, appPid: Int, sinceMs: Long): String {
         var best: String? = null
         var bestTs = -1L
