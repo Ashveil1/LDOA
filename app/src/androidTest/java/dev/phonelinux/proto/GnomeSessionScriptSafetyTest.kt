@@ -26,6 +26,63 @@ class GnomeSessionScriptSafetyTest {
 
     private val script = GuestUbuntu.gnomeSessionScript()
 
+    /** E1 diet experiment is OPT-IN: masks gated behind
+     *  LDOA_SESSION_DIET_E1 (default 0); flag-off branch rolls back ONLY
+     *  manifest-verified ldoa-managed files; the subset is EXACTLY
+     *  Wwan + Smartcard (census-observed autostart spawns absent from the
+     *  effective RequiredComponents) - NO broad accessibility/power/
+     *  input/audio suppression for a green test. */
+    @Test fun e1DietIsOptInBoundedSubsetWithVerifiedRollback() {
+        val gate = script.indexOf("\${LDOA_SESSION_DIET_E1:-0}")
+        assertTrue("E1 gate must read LDOA_SESSION_DIET_E1 with default 0", gate >= 0)
+        assertTrue("rollback helper must exist", script.contains("ldoa_remove_managed() {"))
+        assertTrue("rollback must verify the manifest sha before removal",
+            script.contains("ROLLBACK-BLOCKED") && script.contains("manifest-verified"))
+        assertTrue("unknown/unmanaged content must be preserved on rollback",
+            script.contains("ROLLBACK-SKIPPED"))
+        assertTrue("E1 masks carry the E1 ownership marker",
+            script.contains("# ldoa-managed E1:"))
+        assertTrue("put must refuse non-E1-marked pre-existing files at E1 paths",
+            script.contains("BLOCKED-E1-OWNERSHIP"))
+        assertTrue("symlinks must never be followed or removed on rollback",
+            script.contains("SYMLINK"))
+        assertTrue("rollback failure must be loud and must not claim stock restored",
+            script.contains("ROLLBACK INCOMPLETE") && script.contains("stock NOT"))
+        assertTrue("flag-off lifetime must be documented (next launch, running session untouched)",
+            script.contains("next launch"))
+        assertTrue("install-side failures must set rc and report PARTIAL/BLOCKED",
+            script.contains("PARTIAL/BLOCKED"))
+        assertTrue("put must reject symlinks and foreign manifests before any content check",
+            script.contains("never followed or overwritten") && script.contains("never trusted"))
+        val e1 = script.substring(gate)
+        val loop = e1.substring(0, e1.indexOf("done"))
+        assertTrue("E1 mask loop covers exactly Wwan + Smartcard",
+            loop.contains("for A in Wwan Smartcard; do"))
+        for (banned in listOf("A11y", "Power", "Keyboard", "Sound", "XSettings",
+                              "MediaKeys", "ScreensaverProxy", "Housekeeping"))
+            assertTrue("E1 must not mask " + banned, !loop.contains(banned))
+    }
+
+    /** Every E1 write target lives under LDOA_AUTO_DIR (user autostart
+     *  masks); stock /etc/xdg and packaged .session files are never
+     *  written by the E1 block. */
+    @Test fun e1WritesOnlyManagedAutostartMasks() {
+        val gate = script.indexOf("\${LDOA_SESSION_DIET_E1:-0}")
+        assertTrue(gate >= 0)
+        val end = script.indexOf("gnome-launch: exclusion-state", gate)
+        assertTrue("exclusion-state marker must follow the E1 block", end > gate)
+        val e1 = script.substring(gate, end)
+        assertTrue("E1 block must derive its target and manifest vars from LDOA_AUTO_DIR",
+            e1.contains("T=\"\$LDOA_AUTO_DIR/") && e1.contains("M=\"\$LDOA_AUTO_DIR/"))
+        for (ln in e1.lineSequence().filter { it.contains("ldoa_put_managed") || it.contains("ldoa_remove_managed") }) {
+            assertTrue("E1 managed-file target must live under LDOA_AUTO_DIR: " + ln.trim(),
+                ln.contains("\$LDOA_AUTO_DIR/") || ln.contains("\"\$T\"") || ln.contains("\"\$M\""))
+        }
+        assertTrue("E1 must not write stock /etc/xdg or packaged session files",
+            !e1.contains("/etc/xdg/") && !e1.contains("/usr/share/gnome-session") &&
+            !e1.contains("/usr/local/share/gnome-session"))
+    }
+
     @Test fun systemBusProbePrecedesAnySocketRemoval() {
         val probe = script.indexOf("sysbus_probe() {")
         val removal = script.indexOf("rm -f \"\$DBUS_RUN_DIR/system_bus_socket\"")

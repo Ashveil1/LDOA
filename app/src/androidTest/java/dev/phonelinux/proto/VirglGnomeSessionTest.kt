@@ -107,6 +107,25 @@ class VirglGnomeSessionTest {
         ctx.startActivity(
             android.content.Intent(ctx, com.termux.x11.MainActivity::class.java)
                 .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+        // Obstruction handling BEFORE the poll, EVIDENCE FIRST: record
+        // the pre-dismissal focus state (and a screenshot when an ANR
+        // signature is present) BEFORE anything is clicked, then dismiss
+        // ONLY verified launcher-ANR dialogs via Shot's narrow path
+        // (allowlisted package in the title + Wait scoped to the title's
+        // own dialog subtree; no watcher registration, no "Allow"
+        // prompts, no "Close app", every click PHONEDIAG-logged first).
+        // Run 41343293710: a launcher ANR at 19:48 left its dialog
+        // holding mCurrentFocus through the whole 180s window.
+        val preDismiss = currentFocusState(device)
+        if (preDismiss.excerpt.contains("Not Responding") || preDismiss.excerpt.contains("isn't responding")) {
+            try {
+                Shot.save("virgl-session-anr-obstruction")
+            } catch (t: Throwable) {
+                Log.i(TAG, "pre-dismissal obstruction screenshot failed (auxiliary): " +
+                    (t.message ?: t.javaClass.simpleName))
+            }
+        }
+        Shot.dismissVerifiedLauncherAnr(device)
         var focusLine = ""
         var rendererLine = ""
         var childCount = -1
@@ -115,6 +134,11 @@ class VirglGnomeSessionTest {
         var rendererRawTail = ""
         val deadline = attachAt + 180_000
         while (System.currentTimeMillis() < deadline) {
+            // A RECURRING verified launcher-ANR dialog is handled within
+            // one beat (narrow path: direct finds, nothing persists).
+            if (focusLine.isEmpty()) {
+                Shot.dismissVerifiedLauncherAnr(device)
+            }
             if (focusLine.isEmpty()) {
                 // executeShellCommand whitespace-splits and execs WITHOUT a
                 // shell: a "| grep" suffix reaches dumpsys as ARGUMENTS
@@ -145,7 +169,17 @@ class VirglGnomeSessionTest {
             if (focusLine.isNotEmpty() && rendererLine.isNotEmpty() && childCount >= 0) break
             Thread.sleep(3_000)
         }
-        Shot.dismissSystemDialogs(device)
+        // Failure evidence BEFORE any dismissal: the actual screen while
+        // identity was missing (auxiliary - never masks the real failure).
+        if (focusLine.isEmpty() || rendererLine.isEmpty() || childCount < 0) {
+            try {
+                Shot.save("virgl-session-identity-blocked")
+            } catch (t: Throwable) {
+                Log.i(TAG, "identity-blocked screenshot failed (auxiliary evidence only): " +
+                    (t.message ?: t.javaClass.simpleName))
+            }
+        }
+        Shot.dismissVerifiedLauncherAnr(device)
         device.waitForIdle(2_000)
         // CURRENT-state re-sample immediately before any capture: focus can
         // change during dismissal, the surface can tear down after an
@@ -386,6 +420,17 @@ class VirglGnomeSessionTest {
         val censusFile = File(ctx.filesDir, "ldoa-session-census.txt")
         censusFile.delete()
         val savedFlag = if (flag.isFile) flag.readText() else null
+        // E1 experiment mode is EXPLICIT: only the instrumentation arg
+        // ldoaE1=1 (dispatch input, never a default) opts this launch in.
+        // With the arg absent a STALE flag is removed so an earlier
+        // experiment run can never silently turn a stock run into E1.
+        // The mode is reported in the verdict file; flags are restored
+        // in finally with INDEPENDENT attempts. Run 41343293710 (E1 off)
+        // is the stock baseline for the count/roster/trim comparison.
+        val e1Requested = InstrumentationRegistry.getInstrumentation()
+            .arguments.getString("ldoaE1") == "1"
+        val e1Flag = File(ctx.filesDir, ".ldoa-session-diet-e1")
+        val savedE1Flag = if (e1Flag.isFile) e1Flag.readText() else null
         var executed = false
         var checksPassed = false
         var rendererVerdict = "UNKNOWN (stage not reached)"
@@ -457,8 +502,22 @@ class VirglGnomeSessionTest {
                 }
             }
 
-            // Opt IN for THIS launch only; the flag is restored in finally.
+            // Opt IN for THIS launch only; flags are restored in finally
+            // (independent attempts). E1 only when explicitly requested.
             flag.writeText("1")
+            if (e1Requested) {
+                e1Flag.writeText("1")
+                out.append("E1 experiment mode: ON (explicit instrumentation arg ldoaE1=1;\n")
+                    .append("  Wwan+Smartcard autostart masks expected ACTIVE this launch)\n")
+            } else {
+                if (e1Flag.isFile) {
+                    e1Flag.delete()
+                    out.append("E1 experiment mode: OFF (no ldoaE1 arg; removed a STALE E1 flag so\n")
+                        .append("  this launch is stock)\n")
+                } else {
+                    out.append("E1 experiment mode: OFF (no ldoaE1 arg; stock launch)\n")
+                }
+            }
 
             XServer.start(ctx)
             // CHAR base from one content snapshot BEFORE launch (never
@@ -811,6 +870,52 @@ class VirglGnomeSessionTest {
                 out.append("== CLEANUP-ERROR teardown: ").append(ce.message ?: ce.toString()).append('\n')
                 if (failure == null) failure = ce else failure!!.addSuppressed(ce)
             }
+            // Flag restores happen BEFORE the report write so their
+            // outcome actually reaches the verdict file. INDEPENDENT
+            // attempts: a failure restoring one never skips the other;
+            // both failures are preserved (second suppressed onto the
+            // first). A delete() that returns false while the file still
+            // exists IS a failure. NOTE: restoring the HOST flag only
+            // gates the NEXT launch - it does NOT remove guest masks from
+            // a session that already ran (guest-side rollback happens at
+            // the next launch's script, manifest-verified).
+            try {
+                if (savedFlag != null) flag.writeText(savedFlag)
+                else if (!flag.delete() && flag.isFile)
+                    throw java.io.IOException("virgl flag delete() returned false and the file still exists")
+            } catch (fe: Throwable) {
+                out.append("== CLEANUP-ERROR virgl-flag restore: ").append(fe.message ?: fe.toString()).append('\n')
+                if (failure == null) failure = fe else failure!!.addSuppressed(fe)
+            }
+            try {
+                if (savedE1Flag != null) e1Flag.writeText(savedE1Flag)
+                else if (!e1Flag.delete() && e1Flag.isFile)
+                    throw java.io.IOException("e1 flag delete() returned false and the file still exists")
+            } catch (fe: Throwable) {
+                out.append("== CLEANUP-ERROR e1-flag restore: ").append(fe.message ?: fe.toString()).append('\n')
+                if (failure == null) failure = fe else failure!!.addSuppressed(fe)
+            }
+            // Runtime mode + guest-side mask/rollback outcome: the E1
+            // lines the launch script actually emitted THIS run (ACTIVE /
+            // BLOCKED / PARTIAL / ROLLBACK), copied verbatim and bounded.
+            try {
+                out.append("== E1 MODE: ").append(if (e1Requested) "ON (arg ldoaE1=1)"
+                           else "OFF (no ldoaE1 arg)").append('\n')
+                val e1Lines = if (logFile.isFile)
+                    logFile.readLines().filter { it.contains("gnome-launch: E1") } else emptyList()
+                if (e1Lines.isEmpty()) {
+                    out.append("== E1 GUEST OUTCOME: no E1 lines in guest log")
+                        .append(if (e1Requested) " (UNEXPECTED - masks may not have run)\n"
+                                else " (expected for a stock launch)\n")
+                } else {
+                    out.append("== E1 GUEST OUTCOME (").append(e1Lines.size.toString())
+                        .append(" lines, verbatim, max 12):\n")
+                    e1Lines.take(12).forEach { out.append("   ").append(it).append('\n') }
+                }
+            } catch (t: Throwable) {
+                out.append("== E1 GUEST OUTCOME: read failed (auxiliary): ")
+                    .append(t.message ?: t.javaClass.simpleName).append('\n')
+            }
             try {
                 out.append(if (executed) "== EXECUTION: complete\n"
                            else "== EXECUTION: ABORTED - partial results above ==\n")
@@ -822,11 +927,6 @@ class VirglGnomeSessionTest {
             } catch (we: Throwable) {
                 System.err.println("virgl-session report write failed: " + we.message)
                 if (failure == null) failure = we else failure!!.addSuppressed(we)
-            }
-            try {
-                if (savedFlag != null) flag.writeText(savedFlag) else flag.delete()
-            } catch (fe: Throwable) {
-                if (failure == null) failure = fe else failure!!.addSuppressed(fe)
             }
         }
         if (failure != null) throw failure!!

@@ -138,14 +138,35 @@ object SessionCensus {
                 sb.append("## session name: ").append(n).append('\n')
                 var candidateMarked = false
                 for (rel in assumedDirs) {
+                    // Errno-aware tri-state (java.io File.exists() swallows
+                    // the errno and would call an EACCES "absent" - that
+                    // bug was caught in review). NO-DIR is claimed ONLY on
+                    // a NoSuchFileException; AccessDeniedException and any
+                    // other failure are UNKNOWN, never absence.
                     val parent = File(rootfs, rel)
-                    val parentListed = try { parent.list() != null } catch (t: Throwable) { false }
+                    val parentState = try {
+                        java.nio.file.Files.newDirectoryStream(parent.toPath()).use { "LISTED" }
+                    } catch (e: java.nio.file.NoSuchFileException) { "NO-DIR" }
+                      catch (e: java.nio.file.AccessDeniedException) { "EACCES" }
+                      catch (t: Throwable) { "UNREADABLE(" + (t.message ?: t.javaClass.simpleName) + ")" }
                     val f = File(rootfs, rel + "/" + n + ".session")
                     val state = when {
-                        !parentListed -> "UNKNOWN (parent dir unreadable - NOT evidence of absence)"
-                        !f.exists() -> "ABSENT (parent listed, name not present)"
-                        !f.isFile -> "NOT-A-FILE"
-                        else -> "EXISTS"
+                        parentState == "NO-DIR" ->
+                            "ABSENT (NoSuchFileException on the directory; ancestry accessible)"
+                        parentState != "LISTED" ->
+                            "UNKNOWN (parent dir " + parentState + " - NOT evidence of absence)"
+                        else -> try {
+                            java.nio.file.Files.readAttributes(f.toPath(),
+                                java.nio.file.attribute.BasicFileAttributes::class.java,
+                                java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                            "EXISTS"
+                        } catch (e: java.nio.file.NoSuchFileException) {
+                            "ABSENT (parent listed, name not present)"
+                        } catch (e: java.nio.file.AccessDeniedException) {
+                            "UNKNOWN (EACCES reading the entry - NOT evidence of absence)"
+                        } catch (t: Throwable) {
+                            "UNKNOWN (read failed: " + (t.message ?: t.javaClass.simpleName) + ")"
+                        }
                     }
                     sb.append("  ").append(rel).append("/").append(n).append(".session: ").append(state)
                     if (state == "EXISTS" && !candidateMarked) {
