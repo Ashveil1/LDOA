@@ -38,7 +38,11 @@ SERIAL="${ANDROID_SERIAL:-emulator-5554}"
 adb -s "$SERIAL" logcat -G 16M || true
 adb -s "$SERIAL" logcat -c || true
 adb -s "$SERIAL" logcat -b main -b system -b crash -v threadtime > logcat-run.txt 2>&1 &
-echo $! > logcat-run.pid
+LP=$!
+# Persist pid AND /proc starttime: the cleanup step re-verifies BOTH plus
+# the exact command before EVERY signal, so a reused PID is never signaled.
+ST=$(sed 's/^.*) //' "/proc/$LP/stat" 2>/dev/null | awk '{print $20}')
+echo "$LP $ST" > logcat-run.pid
 
 adb -s "$SERIAL" shell settings put global anr_show_background 0 || true
 if [ "$(cat ci/launcher-suppression.conf 2>/dev/null || echo on)" = "on" ]; then
@@ -48,9 +52,19 @@ else
   echo "launcher suppression: OFF"
 fi
 mkdir -p screenshots
-./gradlew assembleDebug assembleDebugAndroidTest 2>&1 | tee /tmp/gradle-build.log | tail -40
-adb -s "$SERIAL" install -r -g app/build/outputs/apk/debug/app-debug.apk
-adb -s "$SERIAL" install -r -g app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+# Gate the REAL build/install outcomes before any instrument: without
+# set -e an unguarded failure here would run arms against an invalid or
+# STALE install. The redirect (not a tee pipeline) keeps the gradle rc
+# unmasked; the same full log is still uploaded via /tmp/gradle-build.log.
+# A clear exit here still runs the if:always() cleanup + upload steps.
+if ! ./gradlew assembleDebug assembleDebugAndroidTest > /tmp/gradle-build.log 2>&1; then
+  tail -40 /tmp/gradle-build.log
+  echo "GRADLE-BUILD-FAILED - refusing to instrument against an invalid build"
+  exit 1
+fi
+tail -40 /tmp/gradle-build.log
+adb -s "$SERIAL" install -r -g app/build/outputs/apk/debug/app-debug.apk || { echo "APK-INSTALL-FAILED (app-debug.apk) - refusing to instrument against a stale install"; exit 1; }
+adb -s "$SERIAL" install -r -g app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk || { echo "APK-INSTALL-FAILED (app-debug-androidTest.apk) - refusing to instrument against a stale install"; exit 1; }
 
 # SETUP: cold-first-launch + auto-enter/consent path coverage.
 # The test ends with an OWNED identity teardown (test-owned ordered
