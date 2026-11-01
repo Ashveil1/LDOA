@@ -113,9 +113,25 @@ object Shot {
         return waitBtn
     }
 
-    fun dismissVerifiedLauncherAnr(device: androidx.test.uiautomator.UiDevice): Int {
+    /** Detection-ONLY variant of the verified launcher-ANR chain: resolves
+     *  the full verification chain (system-package title + allowlisted app +
+     *  exact android:id/parentPanel container + in-container Wait) and
+     *  reports presence WITHOUT clicking. Used where the arm's dismissal
+     *  budget is spent and a recurrence must be recorded as EVIDENCE, not
+     *  answered - out-clicking a re-posting dialog manufactures focus. */
+    fun detectVerifiedLauncherAnr(device: androidx.test.uiautomator.UiDevice): Boolean {
+        val present = resolveVerifiedAnrWait(device) != null
+        if (present) {
+            android.util.Log.i("PHONEDIAG", "narrow-detect: verified launcher ANR dialog PRESENT -" +
+                " detection only, NO click (arm dismissal budget spent or reserved)")
+        }
+        return present
+    }
+
+    fun dismissVerifiedLauncherAnr(device: androidx.test.uiautomator.UiDevice,
+                                   maxDismissals: Int = 4): Int {
         var dismissed = 0
-        repeat(4) {
+        repeat(maxDismissals) {
             // Detection pass: full chain, fresh (result discarded - the
             // pre-click pass below is the only one whose object is used).
             resolveVerifiedAnrWait(device) ?: return dismissed

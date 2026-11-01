@@ -35,13 +35,24 @@ import java.io.File
  *    attribution, never an automatic verdict upgrade. Socket
  *    fd-to-inode correlation is reported when readable (net/unix is
  *    EACCES on this emulator, so UNKNOWN is expected here).
- *  - PRESENTATION: mechanical capture only (unique-per-invocation xwd
- *    path with absence-then-freshness binding; else the shot pipeline
- *    gated on capture-target IDENTITY - component/surface/content axes,
- *    content = existence corroboration only - plus the CI-side
- *    artifact-arrival gate). The test asserts only mechanical success;
- *    REVIEWER-VERIFIED presentation stays PENDING until the artifact
- *    image is inspected for the intended X desktop.
+ *  - GUEST-XCONTENT: guest-side X-root image capture (asset script
+ *    probes xwd/import/gnome-screenshot/ffmpeg in that order, unique
+ *    per-launch path, confirmed stale removal, 1KiB..64MiB acceptance
+ *    bounds, partial bytes retained as evidence) gated ONLY on session
+ *    identity (current generation + live session) - Android focus is
+ *    NOT a prerequisite, so a black Android screenshot can never be
+ *    conflated with proof of absent guest X content. A nonblank image
+ *    is NOT automatically a desktop: reviewer pixel inspection decides.
+ *  - PRESENTATION (Android display): shot pipeline gated on
+ *    capture-target IDENTITY - component/surface/content axes, content
+ *    = existence corroboration only - plus the CI-side artifact-arrival
+ *    gate. STRICT and unchanged; REVIEWER-VERIFIED presentation stays
+ *    PENDING until the artifact image is inspected for the intended X
+ *    desktop. ANR handling: at most ONE verified narrow Wait dismissal
+ *    per arm; a recurrence ENDS focus polling early WITH EVIDENCE
+ *    instead of manufacturing focus (run 41348620342: 22 dismissals in
+ *    one window while the wedged launcher re-posted the dialog -
+ *    pathological recovery, never a safety qualification).
  *  - STOP-CLEANUP: structured worker capture on the SESSION's render
  *    server, owned stop, identity-matched stop-return sampling,
  *    tri-state post checks.
@@ -69,6 +80,19 @@ class VirglGnomeSessionTest {
 
     /** Post-base log window, FAIL CLOSED on shrink/rotation. */
     private class CaptureIdentity(val ok: Boolean, val summary: String, val failure: String)
+
+    /** /proc/<pid>/stat field 22 (starttime), parsed AFTER the last ')'
+     *  because comm may contain spaces/parens; null when unreadable. A
+     *  bare /proc/PID directory does not exclude PID reuse - starttime
+     *  revalidation does. */
+    private fun procStartTick(pid: Int): String? {
+        return try {
+            File("/proc/" + pid + "/stat").readText().substringAfterLast(") ").split(" ")[19]
+        } catch (t: Throwable) { null }
+    }
+
+    private fun gsStartMatches(gsPid: Int, recorded: String?): Boolean =
+        recorded != null && procStartTick(gsPid) == recorded
 
     /**
      * Capture-target IDENTITY for the shot-pipeline fallback: make the X
@@ -116,6 +140,18 @@ class VirglGnomeSessionTest {
         // prompts, no "Close app", every click PHONEDIAG-logged first).
         // Run 41343293710: a launcher ANR at 19:48 left its dialog
         // holding mCurrentFocus through the whole 180s window.
+        // Per-arm dismissal budget (run 41348620342: 22 verified narrow
+        // dismissals in one window while the wedged launcher re-posted
+        // the dialog every few seconds - pathological recovery, not a
+        // safety qualification): at most ONE verified dismissal in this
+        // phase; a recurrence ENDS focus polling early WITH EVIDENCE.
+        // The instrumentation-wide ANR watcher (registered on the Shot
+        // pipeline's dialog path) would keep auto-clicking Wait on every
+        // UiAutomator stall and defeat the budget, so it is REMOVED for
+        // this phase - only this narrow path can click, once.
+        device.removeWatcher("phonelinux-anr")
+        android.util.Log.i("PHONEDIAG", "P3 identity: instrumentation ANR watcher removed - arm" +
+            " dismissal budget is ONE verified narrow click; recurrence = fail-fast with evidence")
         val preDismiss = currentFocusState(device)
         if (preDismiss.excerpt.contains("Not Responding") || preDismiss.excerpt.contains("isn't responding")) {
             try {
@@ -125,19 +161,24 @@ class VirglGnomeSessionTest {
                     (t.message ?: t.javaClass.simpleName))
             }
         }
-        Shot.dismissVerifiedLauncherAnr(device)
+        // THE arm's ONE allowed dismissal (budget: 1).
+        val armDismissals = Shot.dismissVerifiedLauncherAnr(device, maxDismissals = 1)
         var focusLine = ""
         var rendererLine = ""
         var childCount = -1
         var treeTail = ""
         var focusRawTail = ""
         var rendererRawTail = ""
+        var anrRecurrence = false
         val deadline = attachAt + 180_000
         while (System.currentTimeMillis() < deadline) {
-            // A RECURRING verified launcher-ANR dialog is handled within
-            // one beat (narrow path: direct finds, nothing persists).
-            if (focusLine.isEmpty()) {
-                Shot.dismissVerifiedLauncherAnr(device)
+            // Recurrence after the arm's ONE allowed dismissal: DETECT
+            // ONLY (no click) and END focus polling early WITH EVIDENCE -
+            // out-clicking a re-posting dialog manufactures focus.
+            if (focusLine.isEmpty() && Shot.detectVerifiedLauncherAnr(device)) {
+                anrRecurrence = true
+                focusRawTail = currentFocusState(device).excerpt
+                break
             }
             if (focusLine.isEmpty()) {
                 // executeShellCommand whitespace-splits and execs WITHOUT a
@@ -179,7 +220,8 @@ class VirglGnomeSessionTest {
                     (t.message ?: t.javaClass.simpleName))
             }
         }
-        Shot.dismissVerifiedLauncherAnr(device)
+        // Budget spent: DETECT ONLY (no click) at the resample point.
+        val anrPresentAtResample = Shot.detectVerifiedLauncherAnr(device)
         device.waitForIdle(2_000)
         // CURRENT-state re-sample immediately before any capture: focus can
         // change during dismissal, the surface can tear down after an
@@ -201,14 +243,17 @@ class VirglGnomeSessionTest {
             " (existence corroboration, not viewability proof)" +
             " | at-capture: focusNow=" + focusNowOk + " surfaceNow=" + surfaceNow.isNotEmpty() +
             " sessionAliveNow=" + sessionAliveNow + " generationNow=" + generationNow +
-            " (attachAt=" + attachAt + ", 180s bound)"
+            " (attachAt=" + attachAt + ", 180s bound; armDismissals=" + armDismissals +
+            " anrRecurrence=" + anrRecurrence + " anrPresentAtResample=" + anrPresentAtResample + ")"
         val failure = "focusEver=" + focusLine.isNotEmpty() +
             " surfaceEver=" + rendererLine.isNotEmpty() +
             " sessionClientWindows=" + childCount +
             " focusNow=" + focusNowOk + "(" + focusNowObs.state + ") surfaceNow=" + surfaceNow.isNotEmpty() +
             " sessionAliveNow=" + sessionAliveNow + " generationNow=" + generationNow +
             " | focusRaw=[" + focusRawTail + "] rendererRaw=[" + rendererRawTail + "]" +
-            " treeTail=[" + treeTail.replace('\n', ' ').take(300) + "]"
+            " treeTail=[" + treeTail.replace('\n', ' ').take(300) + "]" +
+            " anrRecurrence=" + anrRecurrence + " anrPresentAtResample=" + anrPresentAtResample +
+            " (dismissal budget: at most ONE verified narrow click per arm)"
         return CaptureIdentity(ok, summary, failure)
     }
 
@@ -405,11 +450,12 @@ class VirglGnomeSessionTest {
     @Test fun virglGnomeSessionQualification(): Unit = runBlocking {
         val d = Distros.UBUNTU
         val report = File(ctx.filesDir, "virgl-session.txt")
-        val xwd = File(ctx.filesDir, "virgl-session-root.xwd")
+        val xcontent = File(ctx.filesDir, "virgl-session-xcontent.img")
+        val xcontentPartial = File(ctx.filesDir, "virgl-session-xcontent.partial")
         val out = StringBuilder()
         // Clear stale artifacts: an unreached stage must never leave a
         // previous run's image or summary looking current.
-        report.delete(); xwd.delete()
+        report.delete(); xcontent.delete(); xcontentPartial.delete()
         // The census is THIS arm's artifact: delete any stale copy so an
         // unreached stage can never present a previous run's census as
         // current. (phantom-snapshots.log/-raw.log are append-only across
@@ -628,6 +674,13 @@ class VirglGnomeSessionTest {
                 "(window tail: " + (window(base)?.takeLast(400) ?: "<rotated>") + ")", ready)
             val gsPid = aliveLine!!.substringAfter("gnome-session alive pid=")
                 .takeWhile { it.isDigit() }.toInt()
+            // Session OS-identity for later revalidation (guest capture
+            // gate): /proc starttime captured NOW; a later /proc/PID match
+            // with a different starttime means PID reuse, not the session.
+            val gsStartTick = procStartTick(gsPid)
+            assertTrue("session process " + gsPid + " starttime unreadable at capture point " +
+                "(later evidence could not be bound to this session's OS identity)",
+                gsStartTick != null)
 
             // COMPOSITOR evidence, owned-by-this-generation only.
             val scan = findGnomeShell(gsPid, launchUptimeSec, tck)
@@ -728,65 +781,196 @@ class VirglGnomeSessionTest {
             assertTrue("owned this-generation gnome-shell environ lacks GALLIUM_DRIVER=virpipe - " +
                 "compositor was not launched on the virgl route", envProven > 0)
 
-            // PRESENTATION: mechanical capture only; the reviewer verifies.
-            val haveXwd = Proot.runGuest(ctx, rootfs, listOf("/bin/sh", "-c", "command -v xwd"),
-                timeoutMs = 30_000).exitCode == 0
-            if (haveXwd) {
-                // Unique-per-invocation guest path (never a trusted rm of
-                // a fixed name): a collision must be removed with the
-                // removal CONFIRMED, else the test fails before capture.
-                val guestTmp = "/tmp/virgl-session-root-" + launchId + ".xwd"
-                val src = File(rootfs, "tmp/virgl-session-root-" + launchId + ".xwd")
-                if (src.exists()) {
-                    val rm = Proot.runGuest(ctx, rootfs,
-                        listOf("/bin/sh", "-c", "rm -f " + guestTmp + " && test ! -e " + guestTmp),
-                        timeoutMs = 30_000)
-                    assertEquals("stale capture path " + guestTmp + " not confirmed removed " +
-                        "(exit=" + rm.exitCode + ")", 0, rm.exitCode)
-                }
-                val invokeAt = System.currentTimeMillis()
-                val r = Proot.runGuest(ctx, rootfs,
-                    listOf("xwd", "-root", "-silent", "-out", guestTmp),
-                    extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"),
-                    extraEnv = mapOf("DISPLAY" to ":0"), timeoutMs = 60_000)
-                assertEquals("xwd -root capture failed: " + r.stderr.take(200), 0, r.exitCode)
-                // Fresh-bytes binding: the file at the unique path must
-                // exist, be non-trivial, and carry an mtime at/after this
-                // invocation (5s clock-skew slack).
-                assertTrue("xwd output missing/trivial at unique path " + guestTmp,
-                    src.isFile && src.length() > 1000)
-                assertTrue("xwd output predates this invocation (stale capture bound as fresh): mtime=" +
-                    src.lastModified() + " invokedAt=" + invokeAt, src.lastModified() >= invokeAt - 5_000)
-                src.copyTo(xwd, overwrite = true)
-                presentationVerdict = "CAPTURE-MECHANICAL-SUCCESS via xwd -root (unique path " +
-                    guestTmp + ", " + xwd.length() + " bytes, artifact virgl-session-root.xwd);" +
-                    " REVIEWER-VERIFIED presentation: PENDING - inspect the artifact image for the" +
-                    " intended X desktop; black/uniform is sanity only"
-                out.append("VERDICT presentation: ").append(presentationVerdict).append('\n')
-            } else {
-                // xwd absent from the stock GNOME rootfs and installing it
-                // would mutate the provisioned rootfs (out of scope): the
-                // Android-display screencap via the shot pipeline - but ONLY
-                // after capture-target IDENTITY is established. Shot.save is
-                // UiAutomation.takeScreenshot(): the whole display, whatever
-                // is foreground; run 41331931845 captured the Android
-                // LAUNCHER here (suppression off that run + the between-arms
-                // force-stop had removed the X activity) and a structure-only
-                // pixel reading misqualified it. The WORKFLOW still gates
-                // that the screenshot actually lands in the artifact.
-                val ident = establishDesktopCaptureIdentity(launchId!!, rootfs, gsPid)
-                out.append("capture-identity: ").append(ident.summary).append('\n')
-                assertTrue("capture-target identity NOT established - " + ident.failure, ident.ok)
-                Shot.save("virgl-session-desktop")
-                presentationVerdict = "capture via Android-display screencap (shot pipeline, name" +
-                    " virgl-session-desktop) - xwd ABSENT in rootfs, rootfs preserved unmodified;" +
-                    " capture-target identity ESTABLISHED [" + ident.summary + "];" +
-                    " artifact arrival GATED CI-side; REVIEWER-VERIFIED presentation: PENDING" +
-                    " (identity evidence targets component/display/surface/session-windows;" +
-                    " the artifact image must STILL be inspected for the intended X desktop" +
-                    " content - identity is not pixel review)"
-                out.append("VERDICT presentation: ").append(presentationVerdict).append('\n')
+            // GUEST X-CONTENT: guest-side image capture, gated on SESSION
+            // IDENTITY ONLY (Android focus/presentation is NOT a
+            // prerequisite): current launch generation AND the session
+            // process REVALIDATED by /proc starttime against the value
+            // recorded at readiness, before AND after capture - a bare
+            // /proc/PID directory does not exclude PID reuse. Gate or
+            // binding failures are RECORDED (capture skipped / artifact
+            // discarded) and never skip the Android presentation
+            // diagnostics below. Bounds (asset script): EVERY tool call
+            // runs under `timeout` because the runGuest timeout only
+            // SIGKILLs proot itself and ORPHANS the guest-side tool
+            // (Proot.kt bounded path) - the in-guest per-tool budget is
+            // the only reliable bound, and without coreutils timeout the
+            // script refuses to invoke ANY tool; unique per-launch
+            // charset-checked path; confirmed stale removal over exact
+            // allowlisted paths (dangling symlinks included); symlink or
+            // non-regular outputs refused UNREAD; accepted images are
+            // 1KiB..64MiB regular files; rejected/failed output is
+            // retained as BOUNDED 256KiB excerpts with original size +
+            // sha256. A nonblank image is NOT automatically a desktop -
+            // reviewer pixel inspection decides.
+            var guestVerdict: String
+            val genPreCap = XServer.currentLaunchIdForTest()
+            val gateFailure: String? = when {
+                genPreCap != launchId -> "generation changed (was " + launchId + " now " + genPreCap + ")"
+                !File("/proc/" + gsPid).isDirectory -> "session process " + gsPid + " gone"
+                !gsStartMatches(gsPid, gsStartTick) -> "session process " + gsPid +
+                    " starttime mismatch vs readiness capture (PID reuse suspected)"
+                else -> null
             }
+            if (gateFailure != null) {
+                out.append("VERDICT guest-xcontent: GATE-FAILED fail-closed, capture NOT attempted: ")
+                    .append(gateFailure).append('\n')
+            } else {
+                val xcapScript = "ldoa-guest-xcapture-" + launchId + ".sh"
+                val xcapBase = "/tmp/ldoa-xcap-" + launchId
+                File(rootfs, "tmp/" + xcapScript).writeText(
+                    InstrumentationRegistry.getInstrumentation().context.assets
+                        .open("ldoa-guest-xcapture.sh").bufferedReader().readText())
+                try {
+                    val xcapInvokeAt = System.currentTimeMillis()
+                    val xcap = Proot.runGuest(ctx, rootfs,
+                        listOf("/bin/sh", "/tmp/" + xcapScript, xcapBase),
+                        extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"),
+                        extraEnv = mapOf("DISPLAY" to ":0"), timeoutMs = 90_000)
+                    out.append("guest-xcontent probe transcript (RAW, bounded): ")
+                        .append(xcap.stdout.trim().replace('\n', ' ').take(800)).append('\n')
+                    val xcapResult = xcap.stdout.lineSequence()
+                        .lastOrNull { it.startsWith("XC_RESULT ") } ?: ""
+                    val xcapTool = Regex("tool=([a-z0-9-]+)").find(xcapResult)?.groupValues?.get(1) ?: ""
+                    val xcapOut = Regex("out=(\\S+)").find(xcapResult)?.groupValues?.get(1) ?: ""
+                    // Rejected/failed tool output: bounded per-tool
+                    // excerpts (each <=256KiB, at most 4 tools) are
+                    // CONCATENATED with origin headers into the partial
+                    // artifact, so failed output survives even when a
+                    // later fallback succeeds. The copy is free-space
+                    // guarded and never unbounded.
+                    val partialNotes = mutableListOf<String>()
+                    val partOut = java.io.ByteArrayOutputStream()
+                    for (line in xcap.stdout.lineSequence()) {
+                        if (!line.startsWith("XC_ATTEMPT")) continue
+                        val pPath = Regex("partial=(\\S+)").find(line)?.groupValues?.get(1) ?: continue
+                        val pTool = Regex("tool=([a-z0-9-]+)").find(line)?.groupValues?.get(1) ?: "unknown"
+                        val pOrig = Regex("origbytes=(\\d+)").find(line)?.groupValues?.get(1) ?: "?"
+                        val pSha = Regex("sha256=(\\S+)").find(line)?.groupValues?.get(1) ?: "?"
+                        val pf = File(rootfs, pPath.removePrefix("/"))
+                        if (pf.isFile && pf.length() <= 262_144) {
+                            partOut.write(("== PARTIAL tool=" + pTool + " origbytes=" + pOrig +
+                                " sha256=" + pSha + " guest-path=" + pPath +
+                                " excerpt-bytes=" + pf.length() + " ==\n").toByteArray())
+                            partOut.write(pf.readBytes())
+                            partOut.write(10) // newline byte
+                            partialNotes.add(pTool + ":" + pOrig + "B:sha256-" + pSha.take(12))
+                        } else {
+                            partialNotes.add(pTool + ":OMITTED(guest excerpt missing or over the 256KiB bound)")
+                        }
+                    }
+                    if (partOut.size() > 0) {
+                        if (partOut.size() * 2L < ctx.filesDir.usableSpace) {
+                            val partDst = File(ctx.filesDir, "virgl-session-xcontent.partial")
+                            partDst.delete(); partDst.writeBytes(partOut.toByteArray())
+                        } else {
+                            partialNotes.add("partial-copy-skipped:insufficient-free-space")
+                        }
+                    }
+                    guestVerdict = if (xcap.exitCode == 0 &&
+                        xcapResult.startsWith("XC_RESULT tool=") && xcapOut.isNotEmpty()) {
+                        val capSrc = File(rootfs, xcapOut.removePrefix("/"))
+                        val bindFailure: String? = when {
+                            !capSrc.isFile -> "output missing or not a regular file"
+                            capSrc.length() <= 1000 -> "output trivial (" + capSrc.length() + " bytes)"
+                            capSrc.length() > 67_108_864 -> "output over the 64MiB bound (" + capSrc.length() + " bytes)"
+                            capSrc.lastModified() < xcapInvokeAt - 5_000 ->
+                                "output predates this invocation (stale bound as fresh): mtime=" +
+                                    capSrc.lastModified() + " invokedAt=" + xcapInvokeAt
+                            capSrc.length() * 2 > ctx.filesDir.usableSpace ->
+                                "insufficient filesDir free space for a bounded copy"
+                            else -> null
+                        }
+                        if (bindFailure != null) {
+                            "CAPTURE-INVALID (" + bindFailure + "); partials=[" +
+                                partialNotes.joinToString(",") + "] - recorded, NEVER bound as guest content"
+                        } else {
+                            val capDst = File(ctx.filesDir, "virgl-session-xcontent.img")
+                            capDst.delete(); capSrc.copyTo(capDst, overwrite = true)
+                            // Encoded-byte diversity ONLY: distinct 4KiB
+                            // blocks of the ENCODED bytes. Compressed
+                            // formats defeat block-level reading; this is
+                            // NOT pixel-uniformity evidence.
+                            val capBytes = capDst.readBytes()
+                            val blocks = HashSet<Int>()
+                            var bi = 0
+                            while (bi < capBytes.size) {
+                                blocks.add(capBytes.copyOfRange(bi, minOf(bi + 4096, capBytes.size)).contentHashCode())
+                                bi += 4096
+                            }
+                            "CAPTURED tool=" + xcapTool + " bytes=" + capDst.length() +
+                                " format=" + (if (xcapOut.endsWith(".png")) "png" else "xwd") +
+                                " distinct-4KiB-encoded-blocks=" + blocks.size + "/" + (capBytes.size + 4095) / 4096 +
+                                " (encoded-byte diversity ONLY, NOT pixel uniformity); partials=[" +
+                                partialNotes.joinToString(",") + "]; artifact virgl-session-xcontent.img" +
+                                " REQUIRES reviewer pixel inspection - a nonblank scene is not" +
+                                " automatically a desktop"
+                        }
+                    } else {
+                        "NOT-CAPTURED exit=" + xcap.exitCode + " result=[" + xcapResult.take(200) +
+                            "] stderr=[" + xcap.stderr.take(200) + "] partials=[" +
+                            partialNotes.joinToString(",") + "] (concatenated bounded excerpts in" +
+                            " virgl-session-xcontent.partial when non-empty; guest X content" +
+                            " UNMEASURED this run - on-screen pixels say nothing about guest-side" +
+                            " X content either way)"
+                    }
+                    // POST-capture identity revalidation: if the generation
+                    // or the session starttime moved during capture, the
+                    // artifact cannot be bound to THIS launch - discard.
+                    if (XServer.currentLaunchIdForTest() != launchId || !gsStartMatches(gsPid, gsStartTick)) {
+                        File(ctx.filesDir, "virgl-session-xcontent.img").delete()
+                        guestVerdict = "IDENTITY-LOST-DURING-CAPTURE (generation or session starttime" +
+                            " changed; artifact DISCARDED, never bound to this launch); prior verdict: " +
+                            guestVerdict
+                    }
+                    out.append("VERDICT guest-xcontent: ").append(guestVerdict).append('\n')
+                } finally {
+                    // Confirmed cleanup over the EXACT allowlisted guest
+                    // paths (script CLEANUP mode), then the script itself;
+                    // both attempts recorded, neither masks the verdict.
+                    try {
+                        val xcapClean = Proot.runGuest(ctx, rootfs,
+                            listOf("/bin/sh", "/tmp/" + xcapScript, "CLEANUP", xcapBase),
+                            extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"),
+                            extraEnv = mapOf("DISPLAY" to ":0"), timeoutMs = 30_000)
+                        if (xcapClean.exitCode != 0)
+                            out.append("guest-tmp cleanup UNCONFIRMED (leftovers are device-side evidence only): ")
+                                .append(xcapClean.stdout.trim().take(200)).append('\n')
+                    } catch (t: Throwable) {
+                        out.append("guest-tmp cleanup attempt FAILED (auxiliary): ")
+                            .append(t.message ?: t.javaClass.simpleName).append('\n')
+                    }
+                    try {
+                        val scrRm = Proot.runGuest(ctx, rootfs,
+                            listOf("/bin/sh", "-c",
+                                "rm -f /tmp/" + xcapScript + " && test ! -e /tmp/" + xcapScript),
+                            timeoutMs = 30_000)
+                        if (scrRm.exitCode != 0)
+                            out.append("guest capture script removal unconfirmed: exit=")
+                                .append(scrRm.exitCode).append('\n')
+                    } catch (t: Throwable) {
+                        out.append("guest capture script removal attempt FAILED (auxiliary): ")
+                            .append(t.message ?: t.javaClass.simpleName).append('\n')
+                    }
+                }
+            }
+
+            // ANDROID PRESENTATION: STRICT and UNCHANGED - shot pipeline
+            // gated on capture-target IDENTITY (component/surface/content
+            // axes + CURRENT-state resample). Only the ANR handling
+            // changed: at most ONE verified narrow dismissal per arm; a
+            // recurrence ends focus polling early WITH EVIDENCE instead of
+            // manufacturing focus.
+            val ident = establishDesktopCaptureIdentity(launchId!!, rootfs, gsPid)
+            out.append("capture-identity: ").append(ident.summary).append('\n')
+            assertTrue("capture-target identity NOT established - " + ident.failure, ident.ok)
+            Shot.save("virgl-session-desktop")
+            presentationVerdict = "capture via Android-display screencap (shot pipeline, name" +
+                " virgl-session-desktop); capture-target identity ESTABLISHED [" + ident.summary + "];" +
+                " artifact arrival GATED CI-side; REVIEWER-VERIFIED presentation: PENDING" +
+                " (identity evidence targets component/display/surface/session-windows;" +
+                " the artifact image must STILL be inspected for the intended X desktop" +
+                " content - identity is not pixel review)"
+            out.append("VERDICT presentation: ").append(presentationVerdict).append('\n')
 
             // STOP-CLEANUP on the SESSION's render server.
             val sscan = VirglTestCommon.scanChildren(srvIdent.pid)
