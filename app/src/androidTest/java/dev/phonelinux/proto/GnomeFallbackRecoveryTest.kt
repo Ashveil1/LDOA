@@ -102,6 +102,31 @@ class GnomeFallbackRecoveryTest {
         return null
     }
 
+    /** Wait for [needle] appearing AFTER BOTH this launch's exact id
+     *  line AND the crash-injection boundary [afterCharOffset] (a CHAR
+     *  offset into the same log content [base] slices, captured at
+     *  crash-injection time). A marker that precedes the kill never
+     *  counts as recovery FROM that kill, even within the same launch
+     *  generation. Fails closed on rotation. */
+    private fun awaitLineAfter(base: Long, launchId: String, afterCharOffset: Long,
+                               needle: String, timeoutMs: Long, pollMs: Long = 2_000): String? {
+        val end = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < end) {
+            val w = window(base)
+                ?: throw AssertionError("guest-gnome.log rotated/shrank under launch " + launchId +
+                    " - marker binding is void (fail-closed)")
+            val idIdx = w.lastIndexOf("gnome-launch: launch id=" + launchId)
+            if (idIdx >= 0) {
+                val boundary = (afterCharOffset - base).toInt()
+                val from = maxOf(idIdx, boundary).coerceAtMost(w.length)
+                val i = w.indexOf(needle, from)
+                if (i >= 0) return w.substring(i).lineSequence().first().trim()
+            }
+            Thread.sleep(pollMs)
+        }
+        return null
+    }
+
     private fun ourGnomeShellPids(): List<Int> {
         val out = ArrayList<Int>()
         for (f in File("/proc").listFiles { x -> x.name.matches(Regex("[0-9]+")) } ?: return out) {
@@ -199,15 +224,21 @@ class GnomeFallbackRecoveryTest {
         val gsTicks = gsTicksOpt!!
 
         // Unexpected death: session + owned shells gone, script alive,
-        // NO owned stop. The fallback must EXEC and REGISTER.
+        // NO owned stop. The fallback must EXEC and REGISTER. The
+        // crash-injection boundary (CHAR offset at kill time) binds the
+        // recovery markers to AFTER the crash - a fallback line from
+        // before the kill never counts as recovery from it.
+        val crashBoundary = (if (logFile.isFile) logFile.readText() else "").length.toLong()
         assertTrue(killVerified(gsPid, gsTicks, android.system.OsConstants.SIGKILL))
         for (sp in ourGnomeShellPids()) {
             val t = startTicksOf(sp); if (t != null) killVerified(sp, t, android.system.OsConstants.SIGKILL)
         }
-        val fellBack = awaitLine(base, lastLaunchId!!, "falling back to bare gnome-shell", 120_000)
+        val fellBack = awaitLineAfter(base, lastLaunchId!!, crashBoundary,
+            "falling back to bare gnome-shell", 120_000)
         assertTrue("crash recovery must reach the fallback decision without an owned stop: " +
             (window(base)?.takeLast(400) ?: "<rotated>"), fellBack != null)
-        val registered = awaitLine(base, lastLaunchId!!, "fallback shell registered", 150_000)
+        val registered = awaitLineAfter(base, lastLaunchId!!, crashBoundary,
+            "fallback shell registered", 150_000)
         assertTrue("ACTUAL recovery: the fallback shell must exec and register on the bus: " +
             (window(base)?.takeLast(400) ?: "<rotated>"), registered != null)
         assertTrue("the registered fallback shell must be an owned process",
