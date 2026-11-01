@@ -21,9 +21,28 @@ android {
         ndk { abiFilters += setOf("arm64-v8a", "x86_64") }
     }
 
+    // Pinned debug signing: when CI provides keystore properties, debug builds
+    // use one persistent key so delivered APKs update in place. Absent the
+    // properties, behavior is unchanged (AGP's per-environment debug key).
+    val pinnedKeystorePath = providers.gradleProperty("ldoa.keystore.path").orNull
+
+    signingConfigs {
+        if (pinnedKeystorePath != null) {
+            create("pinnedDebug") {
+                storeFile = file(pinnedKeystorePath)
+                storePassword = providers.gradleProperty("ldoa.keystore.password").get()
+                keyAlias = providers.gradleProperty("ldoa.key.alias").get()
+                keyPassword = providers.gradleProperty("ldoa.key.password").get()
+            }
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
+            if (pinnedKeystorePath != null) {
+                signingConfig = signingConfigs.getByName("pinnedDebug")
+            }
         }
         release {
             isMinifyEnabled = true
