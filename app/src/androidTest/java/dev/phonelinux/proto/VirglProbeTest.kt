@@ -139,7 +139,7 @@ class VirglProbeTest {
             try {
                 flag.writeText("1")
                 val sock = XServer.startVirglServerForTest(ctx)
-                assertNotNull("virgl server failed to start (see files/virgl-server.log)", sock)
+                    ?: throw AssertionError("virgl server failed to start (see files/virgl-server.log)")
                 val ident = XServer.virglServerIdentForTest()
                 assertNotNull("virgl server identity not captured (fail-closed stop only)", ident)
                 // Bind the server generation's OWN socket File (returned by
