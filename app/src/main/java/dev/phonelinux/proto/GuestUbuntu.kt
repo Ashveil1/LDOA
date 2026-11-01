@@ -93,30 +93,30 @@ object GuestUbuntu {
             # into glibc (>= 2.35), so no locale-gen or extra package.
             export DISPLAY=:0 HOME=/root XDG_RUNTIME_DIR=/tmp/xdg XDG_CURRENT_DESKTOP=ubuntu:GNOME XDG_SESSION_TYPE=x11 LANG=C.UTF-8 LC_ALL=C.UTF-8
             export PLINUX_SESSION=desktop
-            # Verbose scope for this diagnostic build - NARROW channels only
+            # Verbose scope - NARROW channels only
             # (2026-10-31 privacy review): G_MESSAGES_DEBUG=all would also
             # enable gvfs/gtk/gio debug domains, which can carry document
             # names, URIs and other guest-private content unrelated to
             # session startup, so it is deliberately NOT set. gnome-shell's
             # glib-domain debug stays off for the same reason (its domain
-            # coverage is not verified). Enabled instead:
-            # - GNOME_SESSION_DEBUG=1 (set below): session phase/app
-            #   transitions - this is what produced the GsmManager DEBUG
-            #   lines in existing bundles.
-            # - MUTTER_DEBUG with topic names verified against the vendored
-            #   mutter 46.2 source (src/core/util.c meta_debug_keys):
-            #   backend (backend/renderer setup), dbus (bus registration -
-            #   the org.gnome.Shell registration path), stack (window
-            #   map/stack changes), sm (session management), startup
-            #   (startup notification). No per-frame topics (render/frames):
-            #   per-frame spam would cost CPU in the measured path.
+            # coverage is not verified).
+            # 2026-11-01 narrowing (phone evidence, POCO 25062PC34G, d7fe421):
+            # the shell composites 1080x1957 through Mesa llvmpipe (libLLVM
+            # loaded in the shell process, DRI3 unavailable), and the two
+            # heaviest topics were paying CPU in the measured path on every
+            # frame and restack: backend logs each cogl_onscreen_swap_* call
+            # (per-frame) and stack logs the full MetaStackTracker dump per
+            # window-stack op (1/3 of a 390 KB phone export). Default topics
+            # are now dbus,sm,startup (bus registration, session management,
+            # startup notification - the gate/registration diagnostics that
+            # proved their worth this week). LDOA_MUTTER_DEBUG_TOPICS restores
+            # the full set for a dedicated diagnostic session, e.g.
+            # LDOA_MUTTER_DEBUG_TOPICS=backend,dbus,stack,sm,startup.
             # Remaining exposure: individual lines CAN still contain window
-            #   titles or guest paths (e.g. stack traces name windows); the
-            #   export scrubber removes secret-shaped values only. Log size
-            #   stays capped by the 4 MiB rotation + export budget; verbose
-            #   output costs some CPU in the measured path, so timings here
-            #   are diagnostic-mode timings, not clean-session timings.
-            export MUTTER_DEBUG=backend,dbus,stack,sm,startup
+            # titles or guest paths; the export scrubber removes
+            # secret-shaped values only. Log size stays capped by the 4 MiB
+            # rotation + export budget.
+            export MUTTER_DEBUG="${'$'}{LDOA_MUTTER_DEBUG_TOPICS:-dbus,sm,startup}"
             LAUNCH_ID=$(date +%s)
             echo "gnome-launch: launch id=${'$'}LAUNCH_ID"
             mkdir -p /tmp/xdg
@@ -156,6 +156,30 @@ object GuestUbuntu {
               echo "-- gsd processes --"
               pgrep -a -f gsd 2>&1 || echo "no gsd processes"
               echo "=== gnome-diag end ==="
+            ) &
+            # Per-launch performance config - runs on EVERY launch, so it
+            # reaches the already-installed rootfs without any reinstall.
+            # Phone evidence 2026-11-01 (25062PC34G, d7fe421, llvmpipe):
+            # frame-present intervals 0.5-4.5s during interaction with a
+            # 19.4s stall; Terminal startup 16.3s.
+            ( sleep 20
+              # Under CPU compositing every animated transition becomes a
+              # multi-second frame sequence; disabling animations is the
+              # largest perceived-stutter lever available without a GPU path.
+              timeout 4 gsettings set org.gnome.desktop.interface enable-animations false 2>&1 | head -1 | sed 's/^/gnome-launch: perf-config animations-set: /'
+              echo "gnome-launch: perf-config launch=${'$'}LAUNCH_ID enable-animations=${'$'}(timeout 4 gsettings get org.gnome.desktop.interface enable-animations 2>&1 | head -1)"
+              # tracker miners autostart-index the rootfs in the background
+              # and compete with the compositor on a 2+6-core budget SoC.
+              # Mask per-user (Hidden=true overrides /etc/xdg/autostart);
+              # takes effect from the NEXT session start (already-running
+              # miners are left alone this session).
+              mkdir -p "${'$'}HOME/.config/autostart"
+              for A in tracker-miner-fs-3 tracker-extract-3; do
+                if [ -f "/etc/xdg/autostart/${'$'}A.desktop" ] && [ ! -f "${'$'}HOME/.config/autostart/${'$'}A.desktop" ]; then
+                  { echo "[Desktop Entry]"; echo "Type=Application"; echo "Name=${'$'}A (disabled by LDOA perf config)"; echo "Hidden=true"; } > "${'$'}HOME/.config/autostart/${'$'}A.desktop"
+                  echo "gnome-launch: perf-config masked ${'$'}A launch=${'$'}LAUNCH_ID"
+                fi
+              done
             ) &
             # Same identity fix as the Alpine session: GNOME components call
             # getpwuid(getuid()) and fail for the Android app uid.
@@ -386,6 +410,15 @@ object GuestUbuntu {
                 echo "--- sample ${'$'}i +${'$'}(( ${'$'}(date +%s) - LAUNCH_ID ))s utc=${'$'}(date -u +%FT%TZ) ---"
                 SP=${'$'}(pgrep -x gnome-shell | head -1)
                 echo "shell_pid=${'$'}{SP:-none}"
+                # CPU/memory pressure evidence (2026-11-01 lag diagnosis):
+                # cumulative shell jiffies let sample-to-sample deltas show
+                # compositor CPU burn; loadavg + MemAvailable ground system
+                # contention without any package install.
+                echo "loadavg=${'$'}(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
+                echo "mem_available_kb=${'$'}(awk '/MemAvailable/{print ${'$'}2}' /proc/meminfo 2>/dev/null)"
+                if [ -n "${'$'}SP" ]; then
+                  echo "shell_cpu_jiffies=${'$'}(awk '{print ${'$'}14+${'$'}15}' /proc/${'$'}SP/stat 2>/dev/null) (cumulative utime+stime)"
+                fi
                 OWN=${'$'}(gdbus call --session --timeout 2 --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.NameHasOwner org.gnome.Shell 2>&1 | head -1)
                 echo "bus_owner_org.gnome.Shell=${'$'}{OWN:-query_failed_or_timeout}"
                 case "${'$'}OWN" in
