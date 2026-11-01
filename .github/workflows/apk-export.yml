@@ -29,8 +29,22 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq bison
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;29.0.14206865" "platforms;android-35" >/dev/null
+      - name: Decode pinned debug keystore when the repo secret exists
+        env:
+          LDOA_DEBUG_KEYSTORE_B64: ${{ secrets.LDOA_DEBUG_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$LDOA_DEBUG_KEYSTORE_B64" ]; then
+            umask 077
+            printf '%s' "$LDOA_DEBUG_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/ldoa-debug.keystore"
+            keytool -list -keystore "$RUNNER_TEMP/ldoa-debug.keystore" -storepass android -alias androiddebugkey >/dev/null
+            echo "LDOA_KS_ARGS=-Pldoa.keystore.path=$RUNNER_TEMP/ldoa-debug.keystore -Pldoa.keystore.password=android -Pldoa.key.alias=androiddebugkey -Pldoa.key.password=android" >> "$GITHUB_ENV"
+            echo "pinned signing: ACTIVE (keystore decoded from repo secret)"
+          else
+            echo "LDOA_KS_ARGS=" >> "$GITHUB_ENV"
+            echo "pinned signing: ABSENT (ephemeral per-run debug key)"
+          fi
       - name: Build debug APK
-        run: ./gradlew assembleDebug
+        run: ./gradlew assembleDebug $LDOA_KS_ARGS
       - name: Record APK identity
         run: |
           sha256sum app/build/outputs/apk/debug/app-debug.apk
