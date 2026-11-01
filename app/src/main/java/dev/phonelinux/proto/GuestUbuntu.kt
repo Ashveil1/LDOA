@@ -101,8 +101,10 @@ object GuestUbuntu {
             # glib-domain debug stays off for the same reason (its domain
             # coverage is not verified).
             # 2026-11-01 narrowing (phone evidence, POCO 25062PC34G, d7fe421):
-            # the shell composites 1080x1957 through Mesa llvmpipe (libLLVM
-            # loaded in the shell process, DRI3 unavailable), and the two
+            # frame-present intervals were 0.5-4.5s during interaction (a
+            # presentation-path timing, not isolated render cost; active
+            # renderer identity NOT established - libLLVM loads for any
+            # gallium driver), and the two
             # heaviest topics were paying CPU in the measured path on every
             # frame and restack: backend logs each cogl_onscreen_swap_* call
             # (per-frame) and stack logs the full MetaStackTracker dump per
@@ -156,49 +158,6 @@ object GuestUbuntu {
               echo "-- gsd processes --"
               pgrep -a -f gsd 2>&1 || echo "no gsd processes"
               echo "=== gnome-diag end ==="
-            ) &
-            # Per-launch performance config - runs on EVERY launch, so it
-            # reaches the already-installed rootfs without any reinstall.
-            # Phone evidence 2026-11-01 (25062PC34G, d7fe421): frame-present
-            # intervals 0.5-4.5s during interaction with a 19.4s stall;
-            # Terminal startup 16.3s. (Presentation-path timings; may include
-            # presentation blocking, not pure render cost.)
-            # SCOPE (main todo, 2026-10-31): user overrides/theme/dock must
-            # survive; no blanket Tracker/Color/Keyboard masks. Only a
-            # reversible default where the user has no explicit setting.
-            ( sleep 20
-              # Animations: under software compositing every animated
-              # transition becomes a multi-second frame sequence. Set the
-              # reversible default ONLY when the user has never made an
-              # explicit choice: dconf read prints nothing while only the
-              # schema default (true) is in effect. Any explicit value -
-              # the user's or one this block wrote earlier - is respected.
-              # Explicit-setting detection must never treat failure as
-              # "unset" (main review 2026-11-01): dconf read with its exit
-              # status checked when the binary exists; otherwise the user
-              # dconf database's ABSENCE proves no explicit key was ever
-              # written. Read error, timeout, DBus down, or an existing db
-              # without the tool are all uncertainty -> preserve, no write.
-              CAN_DEFAULT=no
-              if command -v dconf >/dev/null 2>&1; then
-                PREV=${'$'}(timeout 4 dconf read /org/gnome/desktop/interface/enable-animations 2>/dev/null); RC=${'$'}?
-                if [ "${'$'}RC" -eq 0 ]; then
-                  if [ -z "${'$'}PREV" ]; then CAN_DEFAULT=yes; else
-                    echo "gnome-launch: perf-config launch=${'$'}LAUNCH_ID animations preserved=${'$'}PREV (explicit setting respected)"
-                  fi
-                else
-                  echo "gnome-launch: perf-config launch=${'$'}LAUNCH_ID animations preserved=unknown (dconf read rc=${'$'}RC; no write on uncertainty)"
-                fi
-              elif [ ! -f "${'$'}HOME/.config/dconf/user" ]; then
-                CAN_DEFAULT=yes
-                echo "gnome-launch: perf-config launch=${'$'}LAUNCH_ID no dconf binary; user dconf db absent, so no explicit setting exists"
-              else
-                echo "gnome-launch: perf-config launch=${'$'}LAUNCH_ID animations preserved=unknown (no dconf binary, user db present; no write on uncertainty)"
-              fi
-              if [ "${'$'}CAN_DEFAULT" = yes ]; then
-                timeout 4 gsettings set org.gnome.desktop.interface enable-animations false 2>&1 | head -1 | sed 's/^/gnome-launch: perf-config animations-set: /'
-                echo "gnome-launch: perf-config launch=${'$'}LAUNCH_ID animations default-applied=false (no explicit setting; reversible: Settings > Accessibility)"
-              fi
             ) &
             # Same identity fix as the Alpine session: GNOME components call
             # getpwuid(getuid()) and fail for the Android app uid.

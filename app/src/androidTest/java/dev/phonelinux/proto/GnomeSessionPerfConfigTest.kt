@@ -5,18 +5,19 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Per-launch performance config (2026-11-01, POCO 25062PC34G, d7fe421):
+ * Stutter-mitigation scope (2026-11-01, POCO 25062PC34G, d7fe421):
  * with the gate fixed and the desktop reachable, the phone showed severe
  * stutter. Evidence from the 12:02 export: frame-present intervals of
  * 0.5-4.5s during interaction with a 19.4s stall (presentation-path
  * timings, not pure render cost), Terminal startup 16.3s, and 1/3 of the
  * 390 KB guest log was mutter STACK debug spam. Renderer identity is NOT
- * established: libLLVM loading does not distinguish llvmpipe from other
- * gallium drivers, so the probes now capture X extensions and the full
- * DRI/gallium module set before any renderer claim.
- * Scope (main todo): user overrides/theme/dock must survive; no blanket
- * Tracker/Color/Keyboard masks. Animations get a reversible default only
- * when the user has no explicit setting.
+ * established (libLLVM loads for any gallium driver), so the probes now
+ * capture X extensions and the full DRI/gallium module set before any
+ * renderer claim.
+ * Scope (main): reduced debug overhead + bounded read-only diagnostics
+ * ONLY. No user-preference mutation: no animations write (any guard is
+ * unauthoritative without dconf profile/backend grounding), no tracker
+ * miner masks, user overrides/theme/dock survive.
  */
 class GnomeSessionPerfConfigTest {
 
@@ -35,39 +36,11 @@ class GnomeSessionPerfConfigTest {
     }
 
     @Test
-    fun animationsDefaultIsGuardedAndReversible() {
-        assertTrue(
-            "the dconf guard must read the explicit user value before any default is written",
-            script.contains("dconf read /org/gnome/desktop/interface/enable-animations")
+    fun noUserPreferenceMutation() {
+        assertFalse(
+            "the script must never write the animations preference (no guard is authoritative without dconf profile/backend grounding)",
+            script.contains("enable-animations")
         )
-        assertTrue(
-            "the read's exit status must be captured (a failed/missing read is NOT an unset key)",
-            script.contains("RC=")
-        )
-        assertTrue(
-            "the write must be gated on an explicit CAN_DEFAULT flag, never on empty output alone",
-            script.contains("CAN_DEFAULT=no") && script.contains("[ \"\$CAN_DEFAULT\" = yes ]")
-        )
-        assertTrue(
-            "an explicit user setting must be preserved and logged",
-            script.contains("animations preserved=")
-        )
-        assertTrue(
-            "uncertainty (read error / no dconf binary with an existing user db) must preserve without writing",
-            script.contains("no write on uncertainty")
-        )
-        assertTrue(
-            "the user-db-absence fallback proves no explicit setting exists",
-            script.contains(".config/dconf/user")
-        )
-        assertTrue(
-            "the reversible default path must be logged as applied only when no explicit setting exists",
-            script.contains("animations default-applied=false")
-        )
-    }
-
-    @Test
-    fun noTrackerMinerMasking() {
         assertFalse(
             "tracker miner masks are outside approved scope (main todo: no blanket Tracker masks)",
             script.contains("tracker-miner-fs-3")
@@ -76,6 +49,7 @@ class GnomeSessionPerfConfigTest {
             "tracker extract masks are outside approved scope",
             script.contains("tracker-extract-3")
         )
+        assertFalse("dconf must not be invoked (and never installed for this)", script.contains("dconf read"))
     }
 
     @Test
