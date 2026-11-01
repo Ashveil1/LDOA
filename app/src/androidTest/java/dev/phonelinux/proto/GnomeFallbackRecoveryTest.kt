@@ -81,7 +81,18 @@ class GnomeFallbackRecoveryTest {
      *  window (a bare window match can still pick a line that precedes
      *  this launch's id within the same file tail). */
     private fun lineOfThisLaunch(w: String, launchId: String, needle: String): String? {
-        val idIdx = w.lastIndexOf("gnome-launch: launch id=" + launchId)
+        // EXACT id-token match: the character after the id must end the
+        // line, so id "A" never binds to id "AB"'s generation.
+        val idLine = "gnome-launch: launch id=" + launchId
+        var idIdx = -1
+        var from = 0
+        while (true) {
+            val i = w.indexOf(idLine, from)
+            if (i < 0) break
+            val end = i + idLine.length
+            if (end >= w.length || w[end] == '\n' || w[end] == '\r') idIdx = i
+            from = i + 1
+        }
         if (idIdx < 0) return null
         val needleIdx = w.lastIndexOf(needle)
         if (needleIdx < idIdx) return null
@@ -115,7 +126,16 @@ class GnomeFallbackRecoveryTest {
             val w = window(base)
                 ?: throw AssertionError("guest-gnome.log rotated/shrank under launch " + launchId +
                     " - marker binding is void (fail-closed)")
-            val idIdx = w.lastIndexOf("gnome-launch: launch id=" + launchId)
+            val idLine = "gnome-launch: launch id=" + launchId
+            var idIdx = -1
+            var scan = 0
+            while (true) {
+                val i = w.indexOf(idLine, scan)
+                if (i < 0) break
+                val eol = i + idLine.length
+                if (eol >= w.length || w[eol] == '\n' || w[eol] == '\r') idIdx = i
+                scan = i + 1
+            }
             if (idIdx >= 0) {
                 val boundary = (afterCharOffset - base).toInt()
                 val from = maxOf(idIdx, boundary).coerceAtMost(w.length)
