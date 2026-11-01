@@ -80,7 +80,7 @@ class VirglSpikeTest {
             "apt-get install -y mesa-utils >/dev/null 2>&1; DISPLAY=:0 glxinfo -B 2>&1 | grep -E 'OpenGL renderer string|Accelerated'"),
             extraBinds = binds, extraEnv = env, fakeRoot = true,
             onLine = { sb.append(it).append('\n') }, timeoutMs = 300_000)
-        XServer.stopDesktopMode(ctx)
+        if (virgl) stopWithOwnedWorker(binds, env, sb) else XServer.stopDesktopMode(ctx)
         val renderer = sb.lineSequence().firstOrNull { it.contains("OpenGL renderer string") }
         assertNotNull("glxinfo produced no renderer line (virgl=" + virgl + "): " + sb.toString().takeLast(300), renderer)
         Log.i(TAG, "RENDERER virgl=" + virgl + ": " + renderer)
@@ -115,5 +115,56 @@ class VirglSpikeTest {
         } finally {
             if (savedFlag != null) flag.writeText(savedFlag) else flag.delete()
         }
+    }
+
+    /** Stop the virgl session while a client holds the socket open, so the
+     *  server has an OWNED forked worker at Stop (the vtest server forks
+     *  one worker per accepted client). Asserts the identity-verified
+     *  teardown removes the server AND every worker observed at stop. */
+    private fun stopWithOwnedWorker(binds: List<Pair<String, String>>, env: Map<String, String>, sb: StringBuilder) {
+        Proot.runGuest(ctx, rootfs, listOf("sh", "-c",
+            "DISPLAY=:0 GALLIUM_DRIVER=virpipe glxgears >/dev/null 2>&1 & echo glxgears-started"),
+            extraBinds = binds, extraEnv = env, fakeRoot = true,
+            onLine = { sb.append(it).append('\n') }, timeoutMs = 60_000)
+        val ident = XServer.virglServerIdentForTest()
+        assertNotNull("virgl server identity unavailable at stop-with-client step", ident)
+        var workers = childrenOf(ident!!.pid)
+        val end = System.currentTimeMillis() + 15_000
+        while (workers.isEmpty() && System.currentTimeMillis() < end) {
+            Thread.sleep(1_000); workers = childrenOf(ident.pid)
+        }
+        Log.i(TAG, "VIRGL-WORKERS-AT-STOP: " + workers.map { it.pid } + " (parent pid=" + ident.pid + ")")
+        assertTrue("no owned vtest worker observed while glxgears held the socket - the stop-with-worker path was NOT exercised",
+            workers.isNotEmpty())
+        XServer.stopDesktopMode(ctx)
+        assertTrue("virgl server pid still ours after stop (identity-verified teardown failed): pid=" + ident.pid,
+            !aliveAs(ident))
+        for (w in workers) {
+            assertTrue("virgl worker " + w.pid + " still alive with its captured identity after stop", !aliveAs(w))
+        }
+        Log.i(TAG, "VIRGL-STOP-WITH-WORKER-OK workers-cleaned=" + workers.map { it.pid })
+    }
+
+    /** Host-side /proc identities of the vtest server's forked workers.
+     *  Zombies count as gone (kill -0 succeeds on zombies). */
+    private fun childrenOf(pid: Int): List<XServer.PIdent> =
+        try {
+            File("/proc/" + pid + "/task/" + pid + "/children").readText()
+                .trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+                .mapNotNull { it.toIntOrNull() }.mapNotNull { identOf(it) }
+        } catch (t: Throwable) { emptyList() }
+
+    private fun identOf(pid: Int): XServer.PIdent? {
+        val stat = try { File("/proc/" + pid + "/stat").readText() } catch (t: Throwable) { return null }
+        val fields = try { stat.substringAfterLast(')').trim().split(Regex("\\s+")) } catch (t: Throwable) { return null }
+        if (fields.size < 20 || fields[0] == "Z") return null
+        val uid = try { android.system.Os.stat("/proc/" + pid).st_uid } catch (t: Throwable) { return null }
+        if (uid != android.os.Process.myUid()) return null
+        return XServer.PIdent(pid, fields[19], uid)
+    }
+
+    private fun aliveAs(id: XServer.PIdent): Boolean {
+        val cur = identOf(id.pid) ?: return false
+        return cur.start == id.start && cur.uid == id.uid
     }
 }

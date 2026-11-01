@@ -293,16 +293,25 @@ object XServer {
         } catch (t: Throwable) { emptyList() }
 
     /** Stop the opt-in render server with the SAME owned-stop contract as
-     *  the GNOME session stop: the pid+starttime+uid captured at server
-     *  start (existing audited helper identityOf) is re-verified BEFORE
-     *  every signal, so a reused pid is never hit; no ProcessHandle (its
-     *  Android runtime behavior is not grounded). Children are snapshotted
-     *  right before each signal round and the parent is signaled first,
-     *  so no new fork can slip in (forks happen only at client accept).
-     *  Bounded exit; a worker that outlives its client socket exits on
-     *  disconnect; a residual reparented worker after parent death is
-     *  LOGGED, never signaled (identity unverifiable after reparent -
-     *  fail closed). Then delete ONLY our own socket. */
+     *  the GNOME session stop (existing audited helper identityOf):
+     *  pid+starttime+uid re-verified BEFORE every signal, so a reused pid
+     *  is never hit; no ProcessHandle (Android runtime behavior not
+     *  grounded). Worker containment is source-grounded: the ONLY fork in
+     *  vtest 1.3.0 is vtest_server.c:548, one worker per accepted client;
+     *  workers never fork further, so /proc/<pid>/task/<pid>/children is
+     *  the complete worker set (no broad process scan).
+     *
+     *  Ordering: SIGSTOP the identity-verified parent, then CONFIRM it
+     *  actually reached T/t (a send() return is not delivery proof) with
+     *  the same identity before trusting the worker set as frozen. If
+     *  the stopped state is never confirmed, fail safe: SIGCONT (never
+     *  leave our process stopped), signal ONLY the parent identity, and
+     *  log the worker set as UNKNOWN. On every path the parent is either
+     *  terminated or SIGCONTed - nothing is left stopped. Captured worker
+     *  identities stay verifiable AFTER reparenting (pid+starttime+uid
+     *  do not change when ppid does); only UNKNOWN pids are never
+     *  signaled. Stop success is measured by observing the captured
+     *  identities gone - the spike test asserts exactly that. */
     private fun stopVirglServer(reason: String) {
         val srv: Process?
         val sock: File?
@@ -321,33 +330,77 @@ object XServer {
             return
         }
         Log.i(TAG, "stopping virgl render server pid=" + ident.pid + " startTicks=" + ident.start + " (" + reason + ")")
-        fun signalAll(sig: Int) {
-            val targets = LinkedHashMap<Int, PIdent>()
-            targets[ident.pid] = ident
-            virglChildrenOf(ident.pid).forEach { cp -> identityOf(cp)?.let { targets[cp] = it } }
-            for (t in targets.values) {
-                val cur = identityOf(t.pid)
-                if (cur != null && cur.start == t.start && cur.uid == t.uid) {
-                    try { android.os.Process.sendSignal(t.pid, sig) } catch (e: Throwable) { }
-                }
+        fun stateOf(t: PIdent): String? = try {
+            File("/proc/" + t.pid + "/stat").readText().substringAfterLast(')').trim().split(Regex("\\s+"))[0]
+        } catch (e: Throwable) { null }
+        fun stillOurs(t: PIdent): Boolean {
+            val cur = identityOf(t.pid)
+            return cur != null && cur.start == t.start && cur.uid == t.uid
+        }
+        fun send(t: PIdent, sig: Int) {
+            if (stillOurs(t)) {
+                try { android.os.Process.sendSignal(t.pid, sig) } catch (e: Throwable) { }
             }
         }
-        try {
-            signalAll(OsConstants.SIGTERM)
-            var deadline = System.currentTimeMillis() + 3_000
+        fun waitDead(ms: Long) {
+            val deadline = System.currentTimeMillis() + ms
             while (srv.isAlive && System.currentTimeMillis() < deadline) Thread.sleep(100)
-            if (srv.isAlive) {
-                signalAll(OsConstants.SIGKILL)
-                deadline = System.currentTimeMillis() + 2_000
-                while (srv.isAlive && System.currentTimeMillis() < deadline) Thread.sleep(100)
+        }
+        try {
+            send(ident, OsConstants.SIGSTOP)
+            // send() accepted is NOT proof the parent is stopped: confirm
+            // T/t with the same identity, bounded.
+            var stopped = false
+            val sDeadline = System.currentTimeMillis() + 2_000
+            while (System.currentTimeMillis() < sDeadline) {
+                if (!stillOurs(ident)) break
+                val st = stateOf(ident)
+                if (st == "T" || st == "t") { stopped = true; break }
+                Thread.sleep(50)
             }
-            if (srv.isAlive) Log.w(TAG, "virgl server still alive after bounded TERM+KILL (" + reason + ")")
-            val stray = virglChildrenOf(ident.pid)
-            if (stray.isNotEmpty()) {
-                Log.w(TAG, "virgl server stop: workers still listed after stop " + stray +
-                    " - NOT signaled (identity recheck happens next round); they exit on client disconnect (" + reason + ")")
+            if (stopped) {
+                // Worker set frozen: a stopped parent cannot run accept().
+                val targets = LinkedHashMap<Int, PIdent>()
+                targets[ident.pid] = ident
+                virglChildrenOf(ident.pid).forEach { cp -> identityOf(cp)?.let { targets[cp] = it } }
+                for (t in targets.values) send(t, OsConstants.SIGTERM)
+                send(ident, OsConstants.SIGCONT)
+                waitDead(3_000)
+                if (srv.isAlive) { send(ident, OsConstants.SIGKILL); waitDead(2_000) }
+                if (srv.isAlive) Log.w(TAG, "virgl server still alive after bounded TERM+KILL (" + reason + ")")
+                // Workers outliving the parent (reparented): still OUR
+                // captured identities - verify and KILL; unknown pids are
+                // never touched.
+                val surviving = targets.values.filter { it.pid != ident.pid && stillOurs(it) }
+                if (surviving.isNotEmpty()) {
+                    for (t in surviving) send(t, OsConstants.SIGKILL)
+                    val end2 = System.currentTimeMillis() + 2_000
+                    var left = surviving.filter { stillOurs(it) }
+                    while (left.isNotEmpty() && System.currentTimeMillis() < end2) { Thread.sleep(100); left = surviving.filter { stillOurs(it) } }
+                    if (left.isNotEmpty()) Log.w(TAG, "virgl workers still alive after KILL " + left.map { it.pid } + " (" + reason + ")")
+                }
+            } else if (stillOurs(ident)) {
+                // STOP never confirmed: the worker set is NOT known frozen.
+                // Fail safe: resume, then signal ONLY the parent identity.
+                Log.w(TAG, "virgl parent STOP not confirmed - worker set UNKNOWN (not signaled); parent-only stop, workers exit on client disconnect (" + reason + ")")
+                send(ident, OsConstants.SIGCONT)
+                send(ident, OsConstants.SIGTERM)
+                waitDead(3_000)
+                if (srv.isAlive) { send(ident, OsConstants.SIGKILL); waitDead(2_000) }
             }
         } catch (t: Throwable) { Log.w(TAG, "virgl server stop incomplete (" + reason + ")", t) }
+        finally {
+            // Never leave our own server stopped on any exit path.
+            try {
+                if (stillOurs(ident)) {
+                    val st = stateOf(ident)
+                    if (st == "T" || st == "t") {
+                        send(ident, OsConstants.SIGKILL)
+                        send(ident, OsConstants.SIGCONT)
+                    }
+                }
+            } catch (t: Throwable) { }
+        }
         try { sock?.delete() } catch (t: Throwable) { }
         Log.i(TAG, "virgl render server stopped (" + reason + ")")
     }
@@ -361,6 +414,12 @@ object XServer {
             gnomeSession?.let { it.first == distro.id && it.second.isAlive } == true
         }
         val virglSocket = if (reuseLikely) null else startVirglServerOptIn(ctx)
+        // A server started speculatively for a launch that turns out to be
+        // a reuse (or fails) dies AFTER the ownership lock is released:
+        // its bounded stop wait must never extend a lock hold that UI Stop
+        // or lifecycle callbacks wait on.
+        var speculativeStopReason: String? = null
+        try {
         return synchronized(ownershipLock) {
         val current = gnomeSession
         if (current != null && current.first == distro.id && current.second.isAlive) {
@@ -372,8 +431,9 @@ object XServer {
                 " mode while " + (if (requestedVirgl) "VIRGL" else "SOFTWARE") +
                 " was requested - keeping the EXISTING session, mode unchanged (restart the session to switch)")
             // A server started speculatively for a launch that turned out
-            // to be a reuse dies immediately - never shared across worlds.
-            if (virglSocket != null) stopVirglServer("reuse race")
+            // to be a reuse dies immediately after unlock - never shared
+            // across worlds.
+            if (virglSocket != null) speculativeStopReason = "reuse race"
             Log.i(TAG, "GNOME session already running - bringing desktop forward")
             return@synchronized current.second
         }
@@ -383,7 +443,7 @@ object XServer {
             GuestUbuntu.launchGnomeSession(ctx, rootfs, launchId, virglSocket)
         } catch (t: Throwable) {
             // No orphan: the opt-in server dies with the failed launch.
-            if (virglSocket != null) stopVirglServer("launch failed")
+            if (virglSocket != null) speculativeStopReason = "launch failed"
             throw t
         }
         sessionRenderVirgl = virglSocket != null
@@ -404,6 +464,9 @@ object XServer {
                 "GNOME session root identity NOT captured at spawn: any teardown before gate-confirm degrades to tracer-destroy only (guest tree leaks)")
         }
         }
+        } finally {
+            if (speculativeStopReason != null) stopVirglServer(speculativeStopReason!!)
+        }
     }
 
     /** True once the session root's launch-captured identity
@@ -416,6 +479,11 @@ object XServer {
      *  Null when no launch identity exists - callers must fail clearly,
      *  never bind readiness to the latest id line found in a log window. */
     internal fun currentLaunchIdForTest(): String? = synchronized(ownershipLock) { currentLaunchId }
+
+    /** Test-only: identity of the current opt-in virgl render server
+     *  (null when none). Lets the spike test verify the owned worker
+     *  cleanup at Stop. */
+    internal fun virglServerIdentForTest(): PIdent? = synchronized(ownershipLock) { virglServerIdent }
 
     internal class BusIdentRecord(val pid: Int, val startTicks: String, val uid: Int, val nonce: String)
 
