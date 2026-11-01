@@ -40,13 +40,22 @@ class ProotKillOnExitTest {
 
     @After fun cleanup() {
         for (p in spawned) try { p.destroy() } catch (t: Throwable) { }
-        // Restore the bus record file exactly as the fixture found it.
-        val (existed, bytes) = savedRecord
-        val f = busRecordFile()
-        if (existed) { f.parentFile?.mkdirs(); f.writeBytes(bytes) } else f.delete()
-        val (logExisted, logBytes) = savedGnomeLog
-        val lf = gnomeLogFile()
-        if (logExisted) lf.writeBytes(logBytes) else lf.delete()
+        // Restore ONLY what a boundary actually captured: JUnit news the
+        // class per fixture, so fixtures that never snapshotted would
+        // otherwise "restore" the default (absent, empty) and DELETE the
+        // harness phase's guest-gnome.log / bus record - which destroyed
+        // the CI evidence for the gnome-session exit-1 investigation
+        // (logs missing at pull in every run).
+        if (savedRecordTaken) {
+            val (existed, bytes) = savedRecord
+            val f = busRecordFile()
+            if (existed) { f.parentFile?.mkdirs(); f.writeBytes(bytes) } else f.delete()
+        }
+        if (savedGnomeLogTaken) {
+            val (logExisted, logBytes) = savedGnomeLog
+            val lf = gnomeLogFile()
+            if (logExisted) lf.writeBytes(logBytes) else lf.delete()
+        }
         XServer.installBusIdentForTest(null, 0L)
         // Fixture instances share one instrumentation process: the bus
         // ident clear alone left retained/gate/session statics leaking
@@ -56,6 +65,7 @@ class ProotKillOnExitTest {
 
     /** (existed, bytes) of root/.gnome-bus.ident before the fixture ran. */
     private var savedRecord: Pair<Boolean, ByteArray> = false to ByteArray(0)
+    private var savedRecordTaken = false
 
     private fun busRecordFile(): File =
         File(DistroInstaller(ctx).rootfsDir(Distros.UBUNTU), "root/.gnome-bus.ident")
@@ -64,10 +74,22 @@ class ProotKillOnExitTest {
     private fun saveBusRecordBoundary() {
         val f = busRecordFile()
         savedRecord = if (f.isFile) true to f.readBytes() else false to ByteArray(0)
+        savedRecordTaken = true
     }
 
     /** (existed, bytes) of guest-gnome.log before the fixture ran. */
     private var savedGnomeLog: Pair<Boolean, ByteArray> = false to ByteArray(0)
+    private var savedGnomeLogTaken = false
+
+    init {
+        // Uniform evidence boundary for EVERY fixture (JUnit news the
+        // class per fixture, so init runs before each test body):
+        // snapshot the harness phase's bus record + guest-gnome.log so
+        // the guarded @After restores the prior state instead of the
+        // fixture's files leaking or unrelated evidence being deleted.
+        saveBusRecordBoundary()
+        saveGnomeLogBoundary()
+    }
 
     private fun gnomeLogFile(): File = File(ctx.filesDir, "guest-gnome.log")
 
@@ -75,6 +97,7 @@ class ProotKillOnExitTest {
     private fun saveGnomeLogBoundary() {
         val f = gnomeLogFile()
         savedGnomeLog = if (f.isFile) true to f.readBytes() else false to ByteArray(0)
+        savedGnomeLogTaken = true
     }
 
     private fun writeGnomeLog(text: String) = gnomeLogFile().writeText(text)

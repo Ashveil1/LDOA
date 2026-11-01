@@ -119,6 +119,7 @@ jobs:
             grep -q "OK (13 tests)" /tmp/instr-koe.log || touch /tmp/PHONELINUX_KOE_FAILED
             timeout 60 adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/guest-gnome.log > guest-gnome.log || echo "GNOME-LOG-PULL-FAILED rc=$?"
             timeout 60 adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/phantom-snapshots.log > phantom-snapshots.log || echo "PHANTOM-SNAPSHOTS-PULL-FAILED rc=$?"
+            timeout 120 adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/phantom-dumpsys-raw.log > phantom-dumpsys-raw.log || echo "PHANTOM-RAW-PULL-FAILED rc=$?"
             timeout 60 adb -s emulator-5554 logcat -d > /tmp/shotlog.txt || true
             python3 .github/scripts/extract_shots.py /tmp/shotlog.txt screenshots || true
             python3 .github/scripts/extract_shots.py /tmp/instr.log screenshots || true
@@ -141,6 +142,7 @@ jobs:
             guest-gnome.log
             harness-owned-ledger.txt
             phantom-snapshots.log
+            phantom-dumpsys-raw.log
             /tmp/shotlog.txt
             /tmp/instr0.log
             /tmp/instr-native.log

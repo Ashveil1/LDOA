@@ -8,37 +8,73 @@ import java.io.File
 /**
  * Phantom-process pressure sampler (instrumentation only - no product
  * behavior). Every number is labeled with what it IS; unavailable data
- * is recorded as explicit unknowns with the failing rc, never as zero.
+ * is recorded as explicit unknowns, never as zero.
  *
- *  - marker: a sleep process we spawn and then re-observe in the own-uid
- *    /proc scan by REFLECTED PID (no exec -a naming: that scheme was
- *    never observed in any run, likely the emulator sh rejecting the
- *    rename - hypothesis, probed once per run via exec-a-rc). "marker-
- *    verified" calibrates ONLY that the own-uid scan is not silently
- *    empty; it says nothing about the global list.
+ * Execution-model constraints (empirically verified on this emulator,
+ * API 34): UiDevice.executeShellCommand whitespace-splits the command
+ * and execs the tokens directly - there is NO shell, so pipes ("|"),
+ * quoting, semicolons, redirects and `sh -c` payloads all FAIL (observed
+ * live: a "|" token reached dumpsys as an argument -> "Bad activity
+ * command: |"). Every command below is therefore a single bare binary
+ * with single-token arguments; anything needing pipes or filtering is
+ * parsed in Kotlin from the command's full output instead.
+ *
+ *  - marker: a sleep process we spawn and re-observe in the own-uid
+ *    /proc scan by REFLECTED PID. "marker-verified" calibrates ONLY that
+ *    the own-uid scan is not silently empty; it says nothing about the
+ *    global list. (The old exec -a naming scheme was never observed in
+ *    any run and is not expressible without shell quoting, so the probe
+ *    is dropped by design; the marker no longer depends on it.)
  *  - uid-procs: every own-uid /proc entry as pid:ppid:name. Includes
  *    reparented orphans a PPid-walk misses. Count INCLUDES the sampler's
  *    own marker process while alive (+1 transient) - sampler overhead,
  *    recorded so it can be subtracted, never hidden.
- *  - global-phantom-lines: `dumpsys activity | grep -ci phantom` - a
- *    LINE-count proxy over the system phantom section, all uids; it
- *    includes section headers, so it is an upper bound on record count,
- *    not an exact count. Absent section => explicit unknown.
+ *  - global records: a FULL bare `dumpsys activity` captured at most
+ *    once per 15s and parsed in-process: PhantomProcessRecord lines
+ *    between "All Active App Child Processes:" and the zombie section
+ *    (active set), the zombie set likewise; OURS identified two ways -
+ *    uid suffix "/u0a<appId>" and recorded parent pid == app pid (they
+ *    can differ: the recorded parent is the app pid at record creation).
+ *    The raw dump is preserved VERBATIM to files/phantom-dumpsys-raw.log
+ *    (size-capped with an explicit marker) so dead/duplicate/history
+ *    entries can be recounted by hand; the parsed counts are never the
+ *    only artifact.
  *  - app-adj: /proc/self/oom_score_adj of the app process.
- *  - shell commands run under the shell uid, not the app's - they add no
- *    app-attributed phantom processes, only transient host CPU.
- *
- * Detail goes to files/phantom-snapshots.log (pulled into the evidence
- * artifact); logcat gets one short summary line per sample so long
- * sections are never truncated away.
+ *  - `dumpsys activity` runs under the shell uid, not the app's - it
+ *    adds no app-attributed phantom processes, only transient host CPU.
+ *    executeShellCommand offers NO timeout: each call's duration is
+ *    measured and flagged SLOW beyond 12s, and the sampler thread is
+ *    strictly sequential (one sample fully finishes before the next
+ *    starts), so samples can never overlap or backlog; an overrun past
+ *    the 5s cadence is written to the snapshot as explicit skipped
+ *    beats, never silently absorbed.
  */
 object PhantomSampler {
     private const val TAG = "PhantomSampler"
     private const val SNAPSHOT_FILE = "phantom-snapshots.log"
+    private const val RAW_FILE = "phantom-dumpsys-raw.log"
+    private const val GLOBAL_CADENCE_MS = 15_000L
+    private const val RAW_CAP_BYTES = 120L * 1024 * 1024
+    private const val SLOW_GLOBAL_MS = 12_000L
     @Volatile private var headerWritten = false
+    @Volatile private var lastGlobalAtMs = 0L
+    @Volatile private var rawCapped = false
 
     private data class Proc(val pid: Int, val ppid: Int, val name: String)
-    private data class ShellOut(val out: String, val rc: Int)
+
+    private data class GlobalSnap(
+        val available: Boolean,
+        val unavailableReason: String,
+        val activeRecords: Int,
+        val zombieRecords: Int,
+        val oursByUid: Int,
+        val oursByParent: Int,
+        val parentPidCounts: String,
+        val dumpBytes: Int,
+        val durationMs: Long,
+        val rawState: String,
+        val activeSection: String
+    )
 
     fun sample(device: UiDevice, label: String): String {
         val wall = System.currentTimeMillis()
@@ -77,15 +113,14 @@ object PhantomSampler {
         val appAdj = try { File("/proc/self/oom_score_adj").readText().trim() }
             catch (t: Throwable) { "unknown(read-failed)" }
 
-        // Global phantom section, bounded. rc: grep -c returns 1 on zero
-        // matches - a real zero, recorded as 0 with its rc, not unknown.
-        val countShell = shell(device, "timeout 3 dumpsys activity | grep -ci phantom; echo RC=" + "${'$'}?")
-        val globalLines = when {
-            countShell.rc == -1 -> "unknown(shell-failed)"
-            countShell.rc == 0 || countShell.rc == 1 -> countShell.out
-            else -> "unknown(rc=" + countShell.rc + ")"
+        // Global phantom records: cadence-gated full dumpsys, parsed in
+        // Kotlin (no pipes exist under this execution model).
+        val doGlobal = wall - lastGlobalAtMs >= GLOBAL_CADENCE_MS
+        var global: GlobalSnap? = null
+        if (doGlobal) {
+            lastGlobalAtMs = wall
+            global = captureGlobal(device, myUid, myPid, label, wall)
         }
-        val sectionShell = shell(device, "timeout 4 dumpsys activity | grep -i phantom | head -40; echo RC=" + "${'$'}?")
 
         // Marker cleanup, identity-verified before the signal.
         val markerSeen = markerPid > 0 && procs.any { it.pid == markerPid }
@@ -110,26 +145,56 @@ object PhantomSampler {
             else -> "marker-verified"
         }
 
-        val summary = "phantom-sample[" + label + "] wall=" + wall +
-            " " + markerStatus +
-            " uid-procs=" + procs.size + "(+marker if alive)" +
-            " global-phantom-lines=" + globalLines +
-            " app-pid=" + myPid + " app-adj=" + appAdj +
-            " shell-rc=" + countShell.rc + "/" + sectionShell.rc
+        val summary = buildString {
+            append("phantom-sample[").append(label).append("] wall=").append(wall)
+            append(' ').append(markerStatus)
+            append(" uid-procs=").append(procs.size).append("(+marker if alive)")
+            val g = global
+            if (g != null) {
+                append(" global-active=")
+                append(if (g.available) g.activeRecords.toString() else "unavailable(" + g.unavailableReason + ")")
+                append(" global-ours-uid=").append(g.oursByUid)
+                append(" global-ours-parent=").append(g.oursByParent)
+                append(" global-zombie=").append(g.zombieRecords)
+                append(" global-dur-ms=").append(g.durationMs)
+                if (g.durationMs > SLOW_GLOBAL_MS) append(" SLOW-GLOBAL")
+            } else {
+                append(" global=skipped(cadence<15s)")
+            }
+            append(" app-pid=").append(myPid).append(" app-adj=").append(appAdj)
+        }
         Log.i(TAG, summary)
 
         // Full detail block to the snapshot file (survives logcat
-        // truncation and test failure; pulled into the artifact).
+        // truncation and test failure; pulled into the evidence
+        // artifact). The raw dumpsys text goes to its own file.
         val sb = StringBuilder()
         sb.append("=== phantom-sample[").append(label).append("] wall=").append(wall).append(" ===\n")
         maybeHeader(device, sb)
         sb.append("marker: ").append(markerStatus).append('\n')
         sb.append("app: pid=").append(myPid).append(" uid=").append(myUid).append(" oom_score_adj=").append(appAdj).append('\n')
-        sb.append("global-phantom-lines: ").append(globalLines).append(" (grep -ci proxy over all-uids section; upper bound incl. headers)\n")
-        sb.append("global-section(rc=").append(sectionShell.rc).append("):\n").append(sectionShell.outFull).append('\n')
+        val g = global
+        if (g != null) {
+            sb.append("global: available=").append(g.available)
+            if (!g.available) sb.append(" reason=").append(g.unavailableReason)
+            sb.append(" active-records=").append(g.activeRecords)
+                .append(" zombie-records=").append(g.zombieRecords)
+                .append(" ours-by-uid-suffix=").append(g.oursByUid)
+                .append(" ours-by-parent-pid=").append(g.oursByParent)
+                .append(" parent-pids{").append(g.parentPidCounts).append("}")
+                .append(" dump-bytes=").append(g.dumpBytes)
+                .append(" dur-ms=").append(g.durationMs)
+                .append(" raw=").append(g.rawState).append('\n')
+            sb.append("global-active-section:\n").append(g.activeSection).append('\n')
+        } else {
+            sb.append("global: skipped (cadence < ").append(GLOBAL_CADENCE_MS).append("ms)\n")
+        }
         sb.append("uid-procs(count=").append(procs.size).append(", includes sampler marker while alive):\n")
         for (p in procs) sb.append("  ").append(p.pid).append(':').append(p.ppid).append(' ').append(p.name).append('\n')
-        sb.append("sample-end wall=").append(System.currentTimeMillis()).append("\n\n")
+        val dur = System.currentTimeMillis() - wall
+        sb.append("sample-end wall=").append(System.currentTimeMillis()).append(" dur-ms=").append(dur)
+        if (dur > 5_000) sb.append(" OVERRUN(skipped ").append((dur - 1) / 5_000).append(" beat(s) of the 5s cadence - explicit, not absorbed)")
+        sb.append("\n\n")
         try {
             File(InstrumentationRegistry.getInstrumentation().targetContext.filesDir, SNAPSHOT_FILE)
                 .appendText(sb.toString())
@@ -139,35 +204,101 @@ object PhantomSampler {
         return summary
     }
 
-    /** One-time per process: image identity for AOSP source applicability
-     *  and the sh / exec -a probe resolving the old marker failure. */
+    /** Full bare `dumpsys activity` (no pipes exist to filter it),
+     *  parsed in-process. Counts ONLY PhantomProcessRecord lines inside
+     *  the active/zombie sections; the verbatim raw text is preserved
+     *  separately so nothing is lost to parsing assumptions. */
+    private fun captureGlobal(device: UiDevice, myUid: Int, myPid: Int, label: String, wall: Long): GlobalSnap {
+        val t0 = System.currentTimeMillis()
+        val raw: String? = try { device.executeShellCommand("dumpsys activity") }
+            catch (t: Throwable) { null }
+        val durMs = System.currentTimeMillis() - t0
+        if (raw.isNullOrEmpty()) {
+            return GlobalSnap(false,
+                if (raw == null) "executeShellCommand-threw" else "empty-output",
+                0, 0, 0, 0, "", 0, durMs, "none", "")
+        }
+        val activeIdx = raw.indexOf("All Active App Child Processes:")
+        val zombieIdx = raw.indexOf("All Zombie App Child Processes:")
+        val activeEnd = when {
+            activeIdx < 0 -> -1
+            zombieIdx > activeIdx -> zombieIdx
+            else -> raw.length
+        }
+        val activeSection = if (activeIdx >= 0) raw.substring(activeIdx, activeEnd) else ""
+        val zombieSection = if (zombieIdx >= 0) raw.substring(zombieIdx) else ""
+        val activeLines = activeSection.lines().filter { it.contains("PhantomProcessRecord{") }
+        val zombieLines = zombieSection.lines().filter { it.contains("PhantomProcessRecord{") }
+
+        // Ours, two independent identities. Record line shape observed in
+        // prior dumps: "  PhantomProcessRecord{<hash> <pid>:<parentAppPid>:<procName>/u0a<appId>}".
+        val uidSuffix = "/u0a" + (myUid % 100000)
+        val oursUid = activeLines.count { it.contains(uidSuffix) }
+        val pidPair = Regex("(\\d+):(\\d+):")
+        val parentHist = HashMap<Int, Int>()
+        var oursParent = 0
+        for (ln in activeLines) {
+            val m = pidPair.find(ln) ?: continue
+            val parentPid = m.groupValues[2].toIntOrNull() ?: continue
+            parentHist[parentPid] = (parentHist[parentPid] ?: 0) + 1
+            if (parentPid == myPid) oursParent++
+        }
+        val parentStr = parentHist.entries.sortedByDescending { it.value }
+            .take(8).joinToString(",") { "" + it.key + "=" + it.value }
+
+        // Raw preservation, size-capped with an explicit in-file marker.
+        var rawState = "none"
+        try {
+            val f = File(InstrumentationRegistry.getInstrumentation().targetContext.filesDir, RAW_FILE)
+            if (rawCapped) {
+                rawState = "capped-earlier"
+            } else if (f.length() + raw.length + 128 > RAW_CAP_BYTES) {
+                rawCapped = true
+                f.appendText("=== RAW-CAP reached at sample[" + label + "] wall=" + wall +
+                    " - verbatim raw writes stopped here; parsed counts continue per sample ===\n")
+                rawState = "cap-reached-at-this-sample"
+            } else {
+                f.appendText("=== raw-dumpsys[" + label + "] wall=" + wall +
+                    " dur-ms=" + durMs + " chars=" + raw.length + " ===\n")
+                f.appendText(raw)
+                f.appendText("\n=== raw-end[" + label + "] ===\n")
+                rawState = "written(chars=" + raw.length + ")"
+            }
+        } catch (t: Throwable) {
+            rawState = "write-failed(" + (t.message ?: t.javaClass.simpleName) + ")"
+        }
+
+        val avail = activeIdx >= 0
+        return GlobalSnap(avail,
+            if (avail) "" else "no-active-section-header-in-dump",
+            activeLines.size, zombieLines.size, oursUid, oursParent,
+            parentStr, raw.length, durMs, rawState, activeSection.trimEnd())
+    }
+
+    /** One-time per process: exact image identity for AOSP source
+     *  applicability. Single-token getprop calls only (the execution
+     *  model has no shell); an empty value is an explicit unknown. */
     private fun maybeHeader(device: UiDevice, sb: StringBuilder) {
         if (headerWritten) return
         headerWritten = true
-        val fp = shell(device,
-            "getprop ro.build.fingerprint; getprop ro.build.version.release; " +
-            "getprop ro.build.version.sdk; getprop ro.build.display.id; getprop ro.product.model; " +
-            "ls -l /system/bin/sh; readlink -f /system/bin/sh; " +
-            "sh -c 'exec -a plinux_probe_marker sleep 0.2'; echo EXECA_RC=" + "${'$'}?")
-        sb.append("--- run-header ---\n").append(fp.outFull).append("--- header-end ---\n")
-    }
-
-    /** Bounded shell via uiautomator; rc parsed from a trailing RC= line
-     *  (grep -c semantics preserved), -1 when the command itself failed. */
-    private fun shell(device: UiDevice, cmd: String): ShellOut {
-        val raw = try {
-            device.executeShellCommand(cmd) ?: ""
-        } catch (t: Throwable) {
-            return ShellOut("", -1)
+        sb.append("--- run-header ---\n")
+        for (prop in listOf(
+            "ro.build.fingerprint",
+            "ro.build.version.release",
+            "ro.build.version.sdk",
+            "ro.build.display.id",
+            "ro.product.model",
+            "ro.build.version.security_patch"
+        )) {
+            val v = try { device.executeShellCommand("getprop " + prop)?.trim() }
+                catch (t: Throwable) { null }
+            sb.append(prop).append(" = ")
+                .append(if (v.isNullOrEmpty()) "unavailable(empty-or-error)" else v)
+                .append('\n')
         }
-        val lines = raw.trim().lines()
-        val last = lines.lastOrNull()?.trim() ?: ""
-        val rc = if (last.startsWith("RC=")) last.removePrefix("RC=").toIntOrNull() ?: -2 else -2
-        val body = if (last.startsWith("RC=")) lines.dropLast(1).joinToString("\n") else raw.trim()
-        return ShellOut(body.trim(), rc)
+        sb.append("exec-a probe: dropped by design (not expressible without shell quoting; marker no longer depends on it)\n")
+        sb.append("--- header-end ---\n")
     }
-
-    private val ShellOut.outFull: String get() = if (out.isEmpty()) "(empty, rc=" + rc + ")" else out
 
     /** android.jar's java.lang.Process stub has no pid(): reflect. */
     private fun pidOf(p: Process): Int =
