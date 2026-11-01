@@ -338,4 +338,21 @@ class GnomeSessionScriptSafetyTest {
         assertTrue("opt-in unavailable path must still launch untraced",
             script.contains("LDOA_TRACE_ICE=1 but strace unavailable"))
     }
+    /** Frozen parent identity must be captured via the EXPLICIT pid path
+     *  /proc/$$ (reader-independent), never a subprocess's /proc/self -
+     *  that resolved to an ephemeral command-substitution subshell which
+     *  exited before its stat could be read, so ROOT_START logged EMPTY
+     *  on every launch (run 41303335159) and every honor gate was
+     *  silently fail-closed. Capture failure must be LOUD and fail
+     *  closed via the non-empty guards in owned_stop_intent. */
+    @Test fun frozenIdentityUsesExplicitPidPathAndFailsClosedLoudly() {
+        assertTrue("explicit-pid capture must be used",
+            script.contains("/proc/\$\$/stat"))
+        assertFalse("subprocess /proc/self capture is the empty-start bug",
+            script.contains("/proc/self/stat"))
+        assertTrue("capture failure must log UNAVAILABLE and fail closed",
+            script.contains("frozen parent identity UNAVAILABLE"))
+        assertTrue("non-empty guards must gate the honor compare",
+            script.contains("[ -n \"\$ROOT_PID\" ] && [ -n \"\$ROOT_START\" ] || return 1"))
+    }
 }

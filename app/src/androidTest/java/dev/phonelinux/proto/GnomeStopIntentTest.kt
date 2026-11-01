@@ -89,6 +89,15 @@ class GnomeStopIntentTest {
         return try { android.os.Process.sendSignal(pid, sig); true } catch (t: Throwable) { false }
     }
 
+    /** Post-base log window. UNIT DISCIPLINE: [base] is a CHAR offset into
+     *  the file's decoded content (captured from a readText() snapshot at
+     *  launch), never File.length() BYTES - multi-byte UTF-8 in earlier
+     *  output (mutter warnings use curly quotes) makes char count < byte
+     *  count, and a byte base silently mis-slices the window (run
+     *  41303335159: the byte base exceeded the early char length, the
+     *  window fell back to the whole file, and a STALE alive line from
+     *  the previous session matched). Same discipline as
+     *  SessionReset.trackedWarmup. */
     private fun window(base: Long): String {
         if (!logFile.isFile) return ""
         val content = logFile.readText()
@@ -137,29 +146,54 @@ class GnomeStopIntentTest {
         return out
     }
 
-    private fun freshLaunch(): Pair<Process, Long> {
+    /** Alive marker belonging to THIS launch: the alive line must sit
+     *  AFTER the EXACT launch id line this app generated (from
+     *  XServer.currentLaunchIdForTest, never the latest id line found in
+     *  the window) inside one consistent snapshot - a plain substring
+     *  search can match a previous generation's alive line (stale world),
+     *  and log rotation alone does not protect ordering. */
+    private fun aliveOfThisLaunch(w: String, launchId: String): String? {
+        val idIdx = w.lastIndexOf("gnome-launch: launch id=" + launchId)
+        if (idIdx < 0) return null
+        val aliveIdx = w.lastIndexOf("gnome-launch: gnome-session alive pid=")
+        if (aliveIdx < idIdx) return null
+        return w.substring(aliveIdx).lineSequence().first().trim()
+    }
+
+    /** awaitLine with a useful assertion failure instead of a bare !!. */
+    private fun requireLine(base: Long, needle: String, timeoutMs: Long, pollMs: Long = 2_000): String {
+        val line = awaitLine(base, needle, timeoutMs, pollMs)
+        assertTrue("missing '" + needle + "' within " + timeoutMs + "ms: " + window(base).takeLast(400),
+            line != null)
+        return line!!
+    }
+
+    private fun freshLaunch(): Triple<Process, Long, String> {
         SessionReset.resetForFreshLaunch(ctx, d) { Log.i(TAG, it) }
         val leftovers = ourGnomeComponentPids()
         assertTrue("baseline contaminated: owned GNOME components from a prior session survive reset: " + leftovers,
             leftovers.isEmpty())
         XServer.start(ctx)
-        val base = if (logFile.isFile) logFile.length() else 0L
+        // CHAR base from one content snapshot (never File.length() bytes).
+        val base = (if (logFile.isFile) logFile.readText() else "").length.toLong()
         val proc = XServer.launchOrReuseGnomeSession(ctx, d, rootfs)
-        val alive = awaitLine(base, "gnome-launch: gnome-session alive pid=", 6 * 60_000)
-        assertTrue("session did not reach the alive marker: " + window(base).takeLast(400), alive != null)
-        return proc to base
-    }
-
-    private fun launchIdOf(base: Long): String {
-        val line = window(base).lineSequence().lastOrNull { it.contains("gnome-launch: launch id=") }
-        assertTrue("launch id line must exist", line != null)
-        return line!!.substringAfter("gnome-launch: launch id=").trim()
-            .takeWhile { it.isLetterOrDigit() || it == '.' || it == '_' || it == '-' }
+        val launchId = XServer.currentLaunchIdForTest()
+        assertTrue("current launch identity unavailable from app - cannot bind " +
+            "readiness to THIS launch (failing clearly, not scanning the window)",
+            launchId != null)
+        var aliveLine: String? = null
+        val end = System.currentTimeMillis() + 6 * 60_000
+        while (aliveLine == null && System.currentTimeMillis() < end) {
+            aliveLine = aliveOfThisLaunch(window(base), launchId!!)
+            if (aliveLine == null) Thread.sleep(2_000)
+        }
+        assertTrue("session did not reach THIS launch's alive marker: " + window(base).takeLast(400),
+            aliveLine != null)
+        return Triple(proc, base, aliveLine!!)
     }
 
     @Test fun ownedStopAfterParentDeathSuppressesFallback() {
-        val (proc, base) = freshLaunch()
-        val aliveLine = awaitLine(base, "gnome-launch: gnome-session alive pid=", 10_000)!!
+        val (proc, base, aliveLine) = freshLaunch()
         val gsPid = aliveLine.substringAfter("gnome-session alive pid=").takeWhile { it.isDigit() }.toInt()
         val gsTicks = startTicksOf(gsPid)
         assertTrue("need session start ticks", gsTicks != null)
@@ -168,7 +202,7 @@ class GnomeStopIntentTest {
         // FROZEN parent identity must name the app's spawned tracer -
         // if proot inserted an intermediate wrapper this fails loudly
         // instead of "passing" a fixture that never had the P1 shape.
-        val frozen = awaitLine(base, "frozen parent identity pid=", 10_000)!!
+        val frozen = requireLine(base, "frozen parent identity pid=", 10_000)
         val frozenPid = frozen.substringAfter("pid=").takeWhile { it.isDigit() }.toInt()
         val scriptPid = frozen.substringAfter("scriptpid=").takeWhile { it.isDigit() }.toInt()
         val tracerPid = pidOf(proc)
@@ -213,7 +247,10 @@ class GnomeStopIntentTest {
         assertFalse("NO fallback may follow an owned stop of this launch",
             w.lineSequence().any { it.contains("falling back to bare gnome-shell") })
         // The intent file must STILL EXIST after both honors (retention proof).
-        val intent = File(rootfs, "tmp/xdg/ldoa-stop-intent." + launchIdOf(base))
+        val intentLaunchId = XServer.currentLaunchIdForTest()
+        assertTrue("launch identity unavailable from app for the intent-retention check",
+            intentLaunchId != null)
+        val intent = File(rootfs, "tmp/xdg/ldoa-stop-intent." + intentLaunchId)
         assertTrue("intent file must be retained after both readers honored it", intent.isFile)
         // Test-side hygiene only: the product never deletes intent files.
         intent.delete()
@@ -227,10 +264,11 @@ class GnomeStopIntentTest {
     }
 
     @Test fun unexpectedDeathRecoversToRegisteredFallback() {
-        val (proc, base) = freshLaunch()
-        val aliveLine = awaitLine(base, "gnome-launch: gnome-session alive pid=", 10_000)!!
+        val (proc, base, aliveLine) = freshLaunch()
         val gsPid = aliveLine.substringAfter("gnome-session alive pid=").takeWhile { it.isDigit() }.toInt()
-        val gsTicks = startTicksOf(gsPid)!!
+        val gsTicksOpt = startTicksOf(gsPid)
+        assertTrue("session start ticks must be readable", gsTicksOpt != null)
+        val gsTicks = gsTicksOpt!!
 
         // Stale intent from an old world: old id, wrong key, foreign root.
         val stale = File(rootfs, "tmp/xdg/ldoa-stop-intent.9999999999-deadbeef")
@@ -263,10 +301,11 @@ class GnomeStopIntentTest {
     }
 
     @Test fun stopDuringFallbackHitsPostDecisionGate() {
-        val (proc, base) = freshLaunch()
-        val aliveLine = awaitLine(base, "gnome-launch: gnome-session alive pid=", 10_000)!!
+        val (proc, base, aliveLine) = freshLaunch()
         val gsPid = aliveLine.substringAfter("gnome-session alive pid=").takeWhile { it.isDigit() }.toInt()
-        val gsTicks = startTicksOf(gsPid)!!
+        val gsTicksOpt = startTicksOf(gsPid)
+        assertTrue("session start ticks must be readable", gsTicksOpt != null)
+        val gsTicks = gsTicksOpt!!
 
         // Stale intent from an old world: old id, wrong key, foreign root.
         val stale = File(rootfs, "tmp/xdg/ldoa-stop-intent.9999999999-deadbeef")

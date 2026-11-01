@@ -130,9 +130,27 @@ object GuestUbuntu {
             # identity names the same process. STOP_KEY is a control
             # nonce passed in env: compared, never logged.
             STOP_KEY=${'$'}LDOA_STOP_KEY
-            ROOT_PID=${'$'}(sed 's/^[^)]*) //' /proc/self/stat | awk '{print ${'$'}2}')
-            ROOT_START=${'$'}(sed 's/^[^)]*) //' "/proc/${'$'}ROOT_PID/stat" 2>/dev/null | awk '{print ${'$'}20}')
-            echo "gnome-launch: frozen parent identity pid=${'$'}ROOT_PID start=${'$'}ROOT_START scriptpid=${'$'}${'$'}"
+            # Capture path discipline (run 41303335159 root cause): a
+            # subprocess reading /proc/self/stat describes ITSELF (or the
+            # command-substitution subshell), never the launcher shell -
+            # ROOT_PID resolved to an ephemeral subshell pid that exited
+            # before its stat could be read, so ROOT_START logged EMPTY
+            # on every launch and every honor gate silently failed
+            # closed. Read the EXPLICIT pid path /proc/$$ (reader-
+            # independent: any subprocess opening it sees the SHELL's
+            # stat), take ppid from there, then the parent's starttime.
+            # Robust parse: strip through the LAST ')' (comm is
+            # prctl-settable, may contain ')' or spaces).
+            ROOT_PID=${'$'}(sed 's/^.*) //' /proc/${'$'}${'$'}/stat 2>/dev/null | awk '{print ${'$'}2}')
+            ROOT_START=""
+            if [ -n "${'$'}ROOT_PID" ]; then
+              ROOT_START=${'$'}(sed 's/^.*) //' "/proc/${'$'}ROOT_PID/stat" 2>/dev/null | awk '{print ${'$'}20}')
+            fi
+            if [ -z "${'$'}ROOT_PID" ] || [ -z "${'$'}ROOT_START" ]; then
+              echo "gnome-launch: frozen parent identity UNAVAILABLE (rootpid='${'$'}ROOT_PID' rootstart='${'$'}ROOT_START') scriptpid=${'$'}${'$'} - owned-stop honor gates FAIL CLOSED this launch (no empty-match acceptance)"
+            else
+              echo "gnome-launch: frozen parent identity pid=${'$'}ROOT_PID start=${'$'}ROOT_START scriptpid=${'$'}${'$'}"
+            fi
             echo "gnome-launch: launch id=${'$'}LAUNCH_ID"
             mkdir -p /tmp/xdg
             chmod 0700 /tmp/xdg

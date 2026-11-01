@@ -81,8 +81,11 @@ object SessionReset {
      *  handoff can only ever be an UNTRACKED orphan - never teardownable
      *  by identity. Verdict binding: the guest log is APPEND-ONLY across
      *  launches (rotation only past 4MB), so a stale previous verdict
-     *  would pass a naive scan - verdicts are accepted only from bytes
-     *  appended after this launch's recorded offset, and only once THIS
+     *  would pass a naive scan - verdicts are accepted only from chars
+     *  appended after this launch's recorded offset (CHAR base from a
+     *  readText() snapshot, never File.length() BYTES: multi-byte UTF-8
+     *  makes char count < byte count and a byte base silently falls
+     *  back to the whole file, run 41303335159), and only once THIS
      *  launch's id line appears there. Identity: the root identity must
      *  be launch-captured (XServer captures at spawn) before the
      *  teardown, else the Stop degrades to destroy-only and the tree
@@ -90,7 +93,9 @@ object SessionReset {
     fun trackedWarmup(ctx: Context, distro: Distro, rootfs: File, log: (String) -> Unit): String {
         XServer.start(ctx)
         val logFile = File(ctx.filesDir, "guest-gnome.log")
-        val logBase = if (logFile.isFile) logFile.length() else 0L
+        // CHAR base from one content snapshot (never File.length() bytes -
+        // same unit discipline as GnomeStopIntentTest.window).
+        val logBase = (if (logFile.isFile) logFile.readText() else "").length.toLong()
         XServer.launchOrReuseGnomeSession(ctx, distro, rootfs)
         val identCaptured = XServer.hasSessionRootIdentity()
         val deadline = System.currentTimeMillis() + 6 * 60_000

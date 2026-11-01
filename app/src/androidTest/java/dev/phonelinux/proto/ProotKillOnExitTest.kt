@@ -106,7 +106,10 @@ class ProotKillOnExitTest {
      *  end of the guest log, so no stale bus line can ever match. */
     private fun currentGnomeLogLength(): Long {
         val f = java.io.File(ctx.filesDir, "guest-gnome.log")
-        return if (f.isFile) f.length() else 0L
+        // CHAR base: consumers substring a readText() snapshot (production
+        // XServer windows are char-indexed); File.length() BYTES mismatches
+        // once the log holds multi-byte UTF-8 (mutter curly quotes).
+        return if (f.isFile) f.readText().length.toLong() else 0L
     }
 
     /** android.jar's java.lang.Process stub has no pid(): reflect the
