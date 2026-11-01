@@ -1567,7 +1567,8 @@ object GuestUbuntu {
 
     /** Launch the GNOME session: workarounds first, then gnome-shell --x11
      *  as the session leader (exec keeps it proot-root's direct child). */
-    fun launchGnomeSession(ctx: Context, rootfs: File, launchId: String): Process {
+    fun launchGnomeSession(ctx: Context, rootfs: File, launchId: String,
+                           virglSocket: File? = null): Process {
         File(rootfs, "root/gnome-session.sh").writeText(gnomeSessionScript())
         val nd = ctx.applicationInfo.nativeLibraryDir
         val log = File(ctx.filesDir, "guest-gnome.log")
@@ -1579,16 +1580,22 @@ object GuestUbuntu {
             try { prev.delete(); if (!log.renameTo(prev)) Log.w(TAG, "gnome log rotation rename failed") }
             catch (t: Throwable) { Log.w(TAG, "gnome log rotation failed", t) }
         }
-        val pb = ProcessBuilder(
+        val argv = mutableListOf(
             File(nd, "libproot.so").absolutePath,
             "--link2symlink",
             "-0", // fake root: GNOME session components + dbus expect euid 0
             "-r", rootfs.absolutePath,
             "-b", "/dev", "-b", "/proc", "-b", "/sys",
-            "-b", XServer.socketDir(ctx).absolutePath + ":/tmp/.X11-unix",
-            "-w", "/root",
-            "/bin/sh", "/root/gnome-session.sh"
+            "-b", XServer.socketDir(ctx).absolutePath + ":/tmp/.X11-unix"
         )
+        if (virglSocket != null) {
+            // VirGL spike: the host render server's vtest socket, at the
+            // guest mesa's DEFAULT vtest path (/tmp/.virgl_test - verified
+            // in noble libgallium.so + mesa-25.2.8 vtest source).
+            argv.addAll(listOf("-b", virglSocket.absolutePath + ":/tmp/.virgl_test"))
+        }
+        argv.addAll(listOf("-w", "/root", "/bin/sh", "/root/gnome-session.sh"))
+        val pb = ProcessBuilder(argv)
         pb.environment().putAll(mapOf(
             "PROOT_LOADER" to File(nd, "libproot_loader.so").absolutePath,
             "PROOT_LOADER_32" to File(nd, "libproot_loader32.so").absolutePath,
@@ -1599,11 +1606,15 @@ object GuestUbuntu {
             "PROOT_TMP_DIR" to Proot.prootTmpDir(ctx).absolutePath,
             // Same TMPDIR leak as Proot.exec (see there).
             "TMPDIR" to "/tmp",
-            // Owned-stop intent identity (control nonce, never logged):
-            // the script freezes both at launch and honors only an
-            // intent bound to this exact launch.
+            // Launch identity seam: the script stamps this exact id in its
+            // log lines so log windows bind to this launch.
             "LDOA_LAUNCH_ID" to launchId
         ))
+        if (virglSocket != null) {
+            // Guest mesa renders through the vtest socket (virpipe). Opt-in
+            // launches only; the default launch is unmodified (llvmpipe).
+            pb.environment()["GALLIUM_DRIVER"] = "virpipe"
+        }
         pb.redirectErrorStream(true)
         pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))
         Log.i(TAG, "launching GNOME session, log=$log")

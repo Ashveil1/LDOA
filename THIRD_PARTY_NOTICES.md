@@ -43,3 +43,14 @@
 ## Alpine Linux minirootfs (runtime payload, downloaded on-device)
 - Source: https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/{aarch64,x86_64}/
 - Pinned: Alpine 3.21.3 minirootfs, SHA-256 verified per ABI at install time
+
+## virglrenderer (binary, VirGL GPU spike - experiment branch)
+- Source: https://gitlab.freedesktop.org/virgl/virglrenderer
+- Pinned: 1.3.0, SHA-256 56170f8caa1bb642a2624b649e3bcca095ec2834814e5c308efc8a85a709e4ce (tarball verified at build time by ci/virgl/build-virgl.sh)
+- License: MIT (COPYING in the verified tarball; notice retained here and in the built artifact directory)
+- Built for Android with NDK clang, EGL-only (-Dplatforms=egl -Dvenus=false), static libepoxy.
+
+## libepoxy (statically linked into the virgl_test_server artifact)
+- Source: https://github.com/anholt/libepoxy
+- Pinned: 1.5.10, SHA-256 a7ced37f4102b745ac86d6a70a9da399cc139ff168ba6b8002b4d8d43c900c15
+- License: MIT (COPYING in the verified tarball)

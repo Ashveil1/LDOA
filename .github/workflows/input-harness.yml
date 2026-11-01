@@ -18,10 +18,10 @@ on:
   workflow_dispatch:
     inputs:
       lane:
-        description: 'full = autoenter setup + native + lifecycle + export + harness + KOE; native-only = full minus GNOME autoenter setup and harness (native + lifecycle + export + KOE, unchanged from before); koe-only = ProotKillOnExitTest fixtures alone (focused KOE qualification, no 48-test rerun)'
+        description: 'full = autoenter setup + native + lifecycle + export + harness + KOE; native-only = full minus GNOME autoenter setup and harness (native + lifecycle + export + KOE, unchanged from before); koe-only = ProotKillOnExitTest fixtures alone (focused KOE qualification, no 48-test rerun); virgl-only = autoenter setup + VirglSpikeTest alone (bounded VirGL spike measurement: software baseline vs opt-in virgl renderer proof, emulator = NOT Adreno)'
         default: 'full'
         type: choice
-        options: [full, native-only, koe-only]
+        options: [full, native-only, koe-only, virgl-only]
 
 jobs:
   lorie-mouse-attribution:
@@ -74,8 +74,8 @@ jobs:
             # path stays a separate open qualification blocker (run
             # 40840614400: shell maps no UI cold); coverage NOT dropped.
             date -u +"SETUP auto-enter start %H:%M:%S (lane=$LANE)"
-            if [ "$LANE" = full ]; then adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.UbuntuDesktopAutoEnterTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr0.log | tail -8; else echo "autoenter SKIPPED (lane=$LANE)" > /tmp/instr0.log; fi
-            if [ "$LANE" = full ]; then grep -q "OK (" /tmp/instr0.log || touch /tmp/PHONELINUX_SETUP_FAILED; fi
+            if [ "$LANE" = full ] || [ "$LANE" = virgl-only ]; then adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.UbuntuDesktopAutoEnterTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr0.log | tail -8; else echo "autoenter SKIPPED (lane=$LANE)" > /tmp/instr0.log; fi
+            if [ "$LANE" = full ] || [ "$LANE" = virgl-only ]; then grep -q "OK (" /tmp/instr0.log || touch /tmp/PHONELINUX_SETUP_FAILED; fi
             date -u +"SETUP auto-enter end %H:%M:%S"
             if [ -f /tmp/PHONELINUX_SETUP_FAILED ]; then echo "AUTOENTER-SETUP-FAILED - arms not run"; exit 1; fi
             # EVIDENCE-ONLY harness: asserts bootstrap facts, logs/attaches
@@ -95,6 +95,12 @@ jobs:
             # Bound 300->1500 covers the real-GNOME-session fixtures in this arm (lifecycle + reentry); not a product-hang mask.
             if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then timeout -s KILL 1500 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.GnomeSessionLifecycleTest,dev.phonelinux.proto.OpenDesktopReentryTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-lifecycle.log | tail -8 || echo "LIFECYCLE-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"; else echo "lifecycle SKIPPED (lane=$LANE)" > /tmp/instr-lifecycle.log; fi
             if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then grep -q "OK (" /tmp/instr-lifecycle.log || touch /tmp/PHONELINUX_LIFECYCLE_FAILED; fi
+            # Bounded VirGL spike measurement (dispatch-only lane): ONE test
+            # class, two launches (software baseline + opt-in virgl), guest
+            # glxinfo renderer proof; virgl-server.log is archived evidence.
+            if [ "$LANE" = virgl-only ]; then timeout -s KILL 1800 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.VirglSpikeTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl.log | tail -10 || echo "VIRGL-INSTR-TIMEOUT: outer 1800s bound hit - instrument never returned"; else echo "virgl SKIPPED (lane=$LANE)" > /tmp/instr-virgl.log; fi
+            if [ "$LANE" = virgl-only ]; then grep -q "OK (" /tmp/instr-virgl.log || touch /tmp/PHONELINUX_VIRGL_FAILED; fi
+            if [ "$LANE" = virgl-only ]; then adb -s emulator-5554 shell "run-as dev.phonelinux.proto cat files/virgl-server.log 2>/dev/null | tail -30" || true; fi
             # Diagnostics export + reuse-gate health (cheap, rootfs-free,
             # gates the user-facing ZIP export). Full output printed and
             # archived - no tail-only retention for gate classes.
@@ -134,6 +140,7 @@ jobs:
             if [ -f /tmp/PHONELINUX_KOE_FAILED ]; then exit 1; fi
             if [ -f /tmp/PHONELINUX_NATIVE_FAILED ]; then exit 1; fi
             if [ -f /tmp/PHONELINUX_EXPORT_FAILED ]; then exit 1; fi
+            if [ -f /tmp/PHONELINUX_VIRGL_FAILED ]; then exit 1; fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -46,7 +46,6 @@ object XServer {
     private val launchIdRng = java.security.SecureRandom()
     @Volatile private var sessionBusIdent: PIdent? = null
     @Volatile private var gnomeSession: Pair<String, Process>? = null
-
     /** True only while a session whose readiness gate FAILED is retained
      *  for Stop session. openDesktop tears such a session down before
      *  relaunching (retry implies stop): launchOrReuseGnomeSession would
@@ -219,16 +218,178 @@ object XServer {
     fun gnomeSessionActive(d: Distro): Boolean =
         gnomeSession?.let { it.first == d.id && it.second.isAlive } == true
 
+    /** VirGL spike state: the host render server and the render mode the
+     *  CURRENT session was actually launched with. The mode is EVIDENCE,
+     *  not the opt-in flag: a requested-but-failed virgl start means the
+     *  session is SOFTWARE, and every report/label must say so. */
+    private var virglServer: Process? = null
+    private var virglServerIdent: PIdent? = null
+    private var virglSocketFile: File? = null
+    private var sessionRenderVirgl = false
+
+    private fun virglOptedIn(ctx: Context): Boolean =
+        System.getenv("LDOA_VIRGL") == "1" || File(ctx.filesDir, ".ldoa-virgl-optin").isFile
+
+    /** VirGL spike: start the host vtest render server (opt-in only;
+     *  default launches never touch this). Runs WITHOUT holding
+     *  ownershipLock: the exec is instant and the bounded 5s socket wait
+     *  must never block a UI-thread Stop or lifecycle callbacks. Returns
+     *  the socket File only when the server is ALIVE and its socket
+     *  exists; every failure logs LOUDLY and returns null - the caller
+     *  then launches the normal software path, classified as such.
+     *  Socket-ready is NOT GL-context-ready: the guest-side glxinfo
+     *  renderer string is the only accepted proof of the virgl route. */
+    private fun startVirglServerOptIn(ctx: Context): File? {
+        if (!virglOptedIn(ctx)) return null
+        val nd = ctx.applicationInfo.nativeLibraryDir
+        val bin = File(nd, "libvirgl_test_server.so")
+        if (!bin.isFile) { Log.w(TAG, "virgl requested but libvirgl_test_server.so not packaged - SOFTWARE launch (NOT GPU)"); return null }
+        synchronized(ownershipLock) {
+            virglServer?.let { if (it.isAlive) { Log.w(TAG, "virgl server already running - SOFTWARE launch (NOT GPU)"); return null } }
+        }
+        val dir = File(tmpDir(ctx), "virgl")
+        dir.mkdirs()
+        val sock = File(dir, "virgl_test.sock")
+        try { sock.delete() } catch (t: Throwable) { } // clean ONLY our own socket path
+        val log = File(ctx.filesDir, "virgl-server.log")
+        val proc = try {
+            val pb = ProcessBuilder(bin.absolutePath,
+                "--use-egl-surfaceless", "--use-gles", "--socket-path", sock.absolutePath)
+            pb.environment()["LD_LIBRARY_PATH"] = nd
+            pb.redirectErrorStream(true)
+            pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))
+            pb.start()
+        } catch (t: Throwable) { Log.w(TAG, "virgl server failed to exec - SOFTWARE launch (NOT GPU)", t); return null }
+        val pid = pidOf(proc) ?: -1
+        val deadline = System.currentTimeMillis() + 5_000
+        while (System.currentTimeMillis() < deadline) {
+            if (!proc.isAlive) { Log.w(TAG, "virgl server died before creating its socket (see virgl-server.log) - SOFTWARE launch (NOT GPU)"); return null }
+            if (sock.exists()) {
+                synchronized(ownershipLock) {
+                    virglServer = proc
+                    virglServerIdent = if (pid > 0) identityOf(pid) else null
+                    virglSocketFile = sock
+                }
+                if (virglServerIdent == null) {
+                    Log.w(TAG, "virgl server identity capture failed - stop will be destroy()-only, never a bare-pid signal (fail closed)")
+                }
+                Log.i(TAG, "virgl render server up (opt-in) pid=" + pid + " socket=" + sock.absolutePath + " log=" + log)
+                return sock
+            }
+            Thread.sleep(100)
+        }
+        Log.w(TAG, "virgl server socket not ready within 5s - SOFTWARE launch (NOT GPU)")
+        proc.destroy()
+        return null
+    }
+
+    /** Forked render workers of the vtest server: it forks one worker
+     *  per accepted client, and forks happen ONLY at accept, so no new
+     *  worker can appear once the parent is dead. */
+    private fun virglChildrenOf(pid: Int): List<Int> =
+        try {
+            File("/proc/" + pid + "/task/" + pid + "/children").readText()
+                .trim().split(Regex("\\s+")).filter { it.isNotEmpty() }.mapNotNull { it.toIntOrNull() }
+        } catch (t: Throwable) { emptyList() }
+
+    /** Stop the opt-in render server with the SAME owned-stop contract as
+     *  the GNOME session stop: the pid+starttime+uid captured at server
+     *  start (existing audited helper identityOf) is re-verified BEFORE
+     *  every signal, so a reused pid is never hit; no ProcessHandle (its
+     *  Android runtime behavior is not grounded). Children are snapshotted
+     *  right before each signal round and the parent is signaled first,
+     *  so no new fork can slip in (forks happen only at client accept).
+     *  Bounded exit; a worker that outlives its client socket exits on
+     *  disconnect; a residual reparented worker after parent death is
+     *  LOGGED, never signaled (identity unverifiable after reparent -
+     *  fail closed). Then delete ONLY our own socket. */
+    private fun stopVirglServer(reason: String) {
+        val srv: Process?
+        val sock: File?
+        val ident: PIdent?
+        synchronized(ownershipLock) {
+            srv = virglServer; sock = virglSocketFile; ident = virglServerIdent
+            virglServer = null; virglServerIdent = null; virglSocketFile = null
+        }
+        if (srv == null) return
+        if (ident == null) {
+            // Fail closed: destroy() targets our own Process object,
+            // never a pid lookup; no signals without identity.
+            Log.w(TAG, "virgl server identity unknown - destroy()-only stop, no signals (" + reason + ")")
+            try { srv.destroy() } catch (t: Throwable) { }
+            try { sock?.delete() } catch (t: Throwable) { }
+            return
+        }
+        Log.i(TAG, "stopping virgl render server pid=" + ident.pid + " startTicks=" + ident.start + " (" + reason + ")")
+        fun signalAll(sig: Int) {
+            val targets = LinkedHashMap<Int, PIdent>()
+            targets[ident.pid] = ident
+            virglChildrenOf(ident.pid).forEach { cp -> identityOf(cp)?.let { targets[cp] = it } }
+            for (t in targets.values) {
+                val cur = identityOf(t.pid)
+                if (cur != null && cur.start == t.start && cur.uid == t.uid) {
+                    try { android.os.Process.sendSignal(t.pid, sig) } catch (e: Throwable) { }
+                }
+            }
+        }
+        try {
+            signalAll(OsConstants.SIGTERM)
+            var deadline = System.currentTimeMillis() + 3_000
+            while (srv.isAlive && System.currentTimeMillis() < deadline) Thread.sleep(100)
+            if (srv.isAlive) {
+                signalAll(OsConstants.SIGKILL)
+                deadline = System.currentTimeMillis() + 2_000
+                while (srv.isAlive && System.currentTimeMillis() < deadline) Thread.sleep(100)
+            }
+            if (srv.isAlive) Log.w(TAG, "virgl server still alive after bounded TERM+KILL (" + reason + ")")
+            val stray = virglChildrenOf(ident.pid)
+            if (stray.isNotEmpty()) {
+                Log.w(TAG, "virgl server stop: workers still listed after stop " + stray +
+                    " - NOT signaled (identity recheck happens next round); they exit on client disconnect (" + reason + ")")
+            }
+        } catch (t: Throwable) { Log.w(TAG, "virgl server stop incomplete (" + reason + ")", t) }
+        try { sock?.delete() } catch (t: Throwable) { }
+        Log.i(TAG, "virgl render server stopped (" + reason + ")")
+    }
+
     /** Single tracked launch path shared by desktop entry and restart tests. */
-    fun launchOrReuseGnomeSession(ctx: Context, distro: Distro, rootfs: File): Process = synchronized(ownershipLock) {
+    fun launchOrReuseGnomeSession(ctx: Context, distro: Distro, rootfs: File): Process {
+        // Reuse pre-check WITHOUT starting anything: a reused session gets
+        // NO new server (and a fresh launch gets one outside the lock, so
+        // the bounded socket wait never blocks Stop/callbacks).
+        val reuseLikely = synchronized(ownershipLock) {
+            gnomeSession?.let { it.first == distro.id && it.second.isAlive } == true
+        }
+        val virglSocket = if (reuseLikely) null else startVirglServerOptIn(ctx)
+        return synchronized(ownershipLock) {
         val current = gnomeSession
         if (current != null && current.first == distro.id && current.second.isAlive) {
+            // Reuse: render mode must match the request, never silently
+            // attach a software guest to a GPU expectation or vice versa.
+            val requestedVirgl = virglOptedIn(ctx)
+            if (requestedVirgl != sessionRenderVirgl) Log.w(TAG,
+                "reusing session launched in " + (if (sessionRenderVirgl) "VIRGL" else "SOFTWARE") +
+                " mode while " + (if (requestedVirgl) "VIRGL" else "SOFTWARE") +
+                " was requested - keeping the EXISTING session, mode unchanged (restart the session to switch)")
+            // A server started speculatively for a launch that turned out
+            // to be a reuse dies immediately - never shared across worlds.
+            if (virglSocket != null) stopVirglServer("reuse race")
             Log.i(TAG, "GNOME session already running - bringing desktop forward")
             return@synchronized current.second
         }
         Log.i(TAG, "launching GNOME session")
         val launchId = System.currentTimeMillis().toString() + "-" + Integer.toHexString(launchIdRng.nextInt())
-        return@synchronized GuestUbuntu.launchGnomeSession(ctx, rootfs, launchId).also {
+        val launched = try {
+            GuestUbuntu.launchGnomeSession(ctx, rootfs, launchId, virglSocket)
+        } catch (t: Throwable) {
+            // No orphan: the opt-in server dies with the failed launch.
+            if (virglSocket != null) stopVirglServer("launch failed")
+            throw t
+        }
+        sessionRenderVirgl = virglSocket != null
+        if (virglOptedIn(ctx) && virglSocket == null) Log.w(TAG,
+            "virgl was REQUESTED but is NOT active this launch - the session is SOFTWARE (NOT GPU); any smoothness/renderer claim for it is void")
+        return@synchronized launched.also {
             gnomeSession = distro.id to it; gnomeSessionBus = null; ownershipGeneration++
             retainedSessionStarting = false; sessionGatePassed = false; lateWatchFor = null
             // Capture the root identity AT SPAWN: the launcher knows exactly
@@ -241,6 +402,7 @@ object XServer {
             currentLaunchId = launchId
             if (sessionRootIdent == null) Log.w(TAG,
                 "GNOME session root identity NOT captured at spawn: any teardown before gate-confirm degrades to tracer-destroy only (guest tree leaks)")
+        }
         }
     }
 
@@ -1033,6 +1195,9 @@ object XServer {
             busIdent = sessionBusIdent
             rootProc = sessionProcess
         }
+        // VirGL spike server belongs to the session being stopped: no
+        // orphan, no cross-session sharing (identity-verified bounded stop).
+        stopVirglServer("session stop")
         // Val snapshots: the hook may swap the fields (a simulated
         // relaunch); this teardown must proceed on the OLD snapshot, and
         // only vals smart-cast here.
