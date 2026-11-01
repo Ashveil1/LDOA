@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       lane:
-        description: 'full = autoenter setup + native + lifecycle + export + harness + KOE; native-only = full minus GNOME autoenter setup and harness (native + lifecycle + export + KOE, unchanged from before); koe-only = ProotKillOnExitTest fixtures alone (focused KOE qualification, no 48-test rerun); virgl-only = autoenter setup + VirglSpikeTest alone (bounded VirGL spike measurement: software baseline vs opt-in virgl renderer proof, emulator = NOT Adreno)'
+        description: 'full = autoenter setup + native + lifecycle + export + harness + KOE; native-only = full minus GNOME autoenter setup and harness (native + lifecycle + export + KOE, unchanged from before); koe-only = ProotKillOnExitTest fixtures alone (focused KOE qualification, no 48-test rerun); virgl-only = autoenter setup + VirglServerSmokeTest + VirglProbeTest (bounded VirGL transport proof: host vtest server smoke + guest EGL-surfaceless eglprobe renderer proof, NO GNOME launches; glxinfo cannot prove the guest driver on lorie - run 41307671476; emulator = NOT Adreno)'
         default: 'full'
         type: choice
         options: [full, native-only, koe-only, virgl-only]
@@ -42,6 +42,13 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq bison
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;29.0.14206865" "platforms;android-35" >/dev/null
+      - name: Build guest eglprobe (virgl lane only)
+        if: env.LANE == 'virgl-only'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+          aarch64-linux-gnu-gcc -O2 -Wall -o ci/virgl/eglprobe ci/virgl/eglprobe.c -ldl
+          sha256sum ci/virgl/eglprobe
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -95,12 +102,20 @@ jobs:
             # Bound 300->1500 covers the real-GNOME-session fixtures in this arm (lifecycle + reentry); not a product-hang mask.
             if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then timeout -s KILL 1500 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.GnomeSessionLifecycleTest,dev.phonelinux.proto.OpenDesktopReentryTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-lifecycle.log | tail -8 || echo "LIFECYCLE-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"; else echo "lifecycle SKIPPED (lane=$LANE)" > /tmp/instr-lifecycle.log; fi
             if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then grep -q "OK (" /tmp/instr-lifecycle.log || touch /tmp/PHONELINUX_LIFECYCLE_FAILED; fi
-            # Bounded VirGL spike measurement (dispatch-only lane): ONE test
-            # class, two launches (software baseline + opt-in virgl), guest
-            # glxinfo renderer proof; virgl-server.log is archived evidence.
-            if [ "$LANE" = virgl-only ]; then timeout -s KILL 1800 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.VirglSpikeTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl.log | tail -10 || echo "VIRGL-INSTR-TIMEOUT: outer 1800s bound hit - instrument never returned"; else echo "virgl SKIPPED (lane=$LANE)" > /tmp/instr-virgl.log; fi
+            # Bounded VirGL transport proof (dispatch-only lane), NO GNOME
+            # launches: stage 1 = host vtest server smoke (owned start /
+            # identity / stop); stage 2 = guest eglprobe renderer proof on
+            # EGL surfaceless (baseline arm then opt-in virpipe arm with a
+            # holding client so Stop runs with an owned forked worker).
+            # glxinfo was rejected as the probe: lorie GLX is indirect-only
+            # on the emulator (no usable DRI3 device), so it reports the X
+            # SERVER's renderer, never the guest mesa driver - and run
+            # 41307671476 lost even that output to tail -10 + a discarded
+            # Proot.Result. Full reports are pulled below and archived.
+            if [ "$LANE" = virgl-only ]; then adb -s emulator-5554 shell mkdir -p /sdcard/Android/data/dev.phonelinux.proto/files && adb -s emulator-5554 push ci/virgl/eglprobe /sdcard/Android/data/dev.phonelinux.proto/files/eglprobe || touch /tmp/PHONELINUX_VIRGL_FAILED; fi
+            if [ "$LANE" = virgl-only ]; then timeout -s KILL 900 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.VirglServerSmokeTest,dev.phonelinux.proto.VirglProbeTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl.log | tail -40 || echo "VIRGL-INSTR-TIMEOUT: outer 900s bound hit - instrument never returned"; else echo "virgl SKIPPED (lane=$LANE)" > /tmp/instr-virgl.log; fi
             if [ "$LANE" = virgl-only ]; then grep -q "OK (" /tmp/instr-virgl.log || touch /tmp/PHONELINUX_VIRGL_FAILED; fi
-            if [ "$LANE" = virgl-only ]; then adb -s emulator-5554 shell "run-as dev.phonelinux.proto cat files/virgl-server.log 2>/dev/null | tail -30" || true; fi
+            if [ "$LANE" = virgl-only ]; then for f in virgl-smoke.txt virgl-probe-default.txt virgl-probe-virpipe.txt virgl-server.log; do timeout 60 adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/$f > $f || echo "VIRGL-PULL-FAILED $f rc=$?"; done; fi
             # Diagnostics export + reuse-gate health (cheap, rootfs-free,
             # gates the user-facing ZIP export). Full output printed and
             # archived - no tail-only retention for gate classes.
@@ -155,7 +170,12 @@ jobs:
             /tmp/instr0.log
             /tmp/instr-native.log
             /tmp/instr-lifecycle.log
-            /tmp/instr-stopintent.log
+            /tmp/instr-virgl.log
+            /tmp/instr-koe.log
             /tmp/instr-export.log
             /tmp/gradle-build.log
             /tmp/instr.log
+            virgl-smoke.txt
+            virgl-probe-default.txt
+            virgl-probe-virpipe.txt
+            virgl-server.log

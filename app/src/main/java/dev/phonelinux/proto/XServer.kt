@@ -485,6 +485,14 @@ object XServer {
      *  cleanup at Stop. */
     internal fun virglServerIdentForTest(): PIdent? = synchronized(ownershipLock) { virglServerIdent }
 
+    /** VirGL spike test seams: the smoke/probe instrumentation tests drive
+     *  the opt-in server directly (no GNOME launch needed for the
+     *  transport proof). Same start/stop code the product path uses -
+     *  no duplicate logic in tests. */
+    internal fun startVirglServerForTest(ctx: Context): File? = startVirglServerOptIn(ctx)
+    internal fun stopVirglServerForTest(reason: String) = stopVirglServer(reason)
+    internal fun virglSocketPathForTest(ctx: Context): File = File(tmpDir(ctx), "virgl/virgl_test.sock")
+
     internal class BusIdentRecord(val pid: Int, val startTicks: String, val uid: Int, val nonce: String)
 
     /** The creation-time identity record the session script wrote right
