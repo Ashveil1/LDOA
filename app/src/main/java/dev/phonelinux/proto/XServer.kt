@@ -573,10 +573,14 @@ object XServer {
 
     /** Test-only: pid of the server process THIS start() spawned (the
      *  Process handle itself is the ownership proof - never a /proc
-     *  guess). Null when no start this invocation owns is alive. */
+     *  guess). Null when no start this invocation owns is alive (or the
+     *  pid reflection fails - never inferred). Uses the same pidOf
+     *  reflection the shipping stop path uses (java.lang.Process.pid()
+     *  is not in the Android SDK stubs - compileDebugKotlin fails on
+     *  it). */
     internal fun xServerPidForTest(): Int? = synchronized(ownershipLock) {
         val pr = process
-        if (pr != null && pr.isAlive) pr.pid().toInt() else null
+        if (pr != null && pr.isAlive) pidOf(pr) else null
     }
 
     /** Test-only: identity of the current opt-in virgl render server

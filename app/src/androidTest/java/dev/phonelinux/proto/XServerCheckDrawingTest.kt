@@ -50,10 +50,13 @@ import java.io.File
  * NUL-separated tokens), matching UID, and a NONEMPTY starttime read
  * stably (equal reads bracketing the cmdline read). Teardown uses the
  * existing world mechanism (XServer.stopDesktopMode, which destroys
- * the tracked Process handle); "gone" is only /proc absent or a
- * CHANGED starttime - an UNREADABLE starttime is UNKNOWN, never gone,
- * and any teardown failure FAILS the test (a green run can never hide
- * a leaked owned server).
+ * the tracked Process handle); "gone" is decided from the exact
+ * /proc stat read into five distinct categories (ABSENT_REAPED,
+ * DEAD_AWAITING_REAP, STARTTIME_REUSED, ALIVE, UNKNOWN) - an
+ * UNREADABLE stat (EACCES or any other open failure) is UNKNOWN,
+ * never gone, a zombie is recorded as DEAD_AWAITING_REAP and never
+ * labelled absent or reaped, and any teardown failure
+ * FAILS the test (a green run can never hide a leaked owned server).
  */
 class XServerCheckDrawingTest {
     private val ctx get() = InstrumentationRegistry.getInstrumentation().targetContext
@@ -134,8 +137,10 @@ class XServerCheckDrawingTest {
     // Token-EXACT cmdline parse: full NUL-separated tokens, never
     // substring matching. Returns the token list, or null when unreadable.
     private fun cmdlineTokens(pid: Int): List<String>? = try {
-        File("/proc/" + pid + "/cmdline").readBytes()
-            .split(0.toByte()).map { String(it) }.filter { it.isNotEmpty() }
+        // Project-established NUL parse (SessionCensus.kt:418 pattern):
+        // String.split(Char) IS a standard overload; ByteArray.split is NOT.
+        File("/proc/" + pid + "/cmdline").readBytes().toString(Charsets.UTF_8)
+            .split(0.toChar()).filter { it.isNotEmpty() }
     } catch (t: Throwable) { null }
 
     private fun isXServerOnDisplay0(tokens: List<String>): Boolean =
@@ -187,14 +192,53 @@ class XServerCheckDrawingTest {
         return live.start == id.start && live.cmdline == id.cmdline && live.uid == id.uid
     }
 
-    // gone = /proc absent, or present with a READABLE starttime that
-    // CHANGED (pid reused by something else). An UNREADABLE starttime
-    // on a present dir is UNKNOWN (null), never gone.
-    private fun goneState(id: ServerIdent): Boolean? {
-        if (!File("/proc/" + id.pid).isDirectory) return true
-        val s = procStartTick(id.pid)
-        if (s.isEmpty()) return null
-        return s != id.start
+    // Teardown verdict from ONE exact-errno NIO stat read - never
+    // File.isDirectory (folds EACCES into false) and never
+    // FileNotFoundException (Java throws it for EACCES and other open
+    // failures too, not just ENOENT). Five DISTINCT categories, never
+    // collapsed into a GONE boolean:
+    //   ABSENT_REAPED         NoSuchFileException (ENOENT) - the pid is
+    //                         gone from proc, reaping included.
+    //   DEAD_AWAITING_REAP    stat readable, state Z - terminated but
+    //                         still a zombie. This meets ONLY the narrow
+    //                         shutdown expectation that the server
+    //                         process is dead; it does NOT establish
+    //                         fully reaped cleanup (reaping belongs to
+    //                         the parent/init). Recorded separately,
+    //                         never labelled absent or reaped.
+    //   STARTTIME_REUSED      stat readable, live, starttime differs -
+    //                         the pid now belongs to another process;
+    //                         the owned server instance no longer
+    //                         exists. Distinct from absent/reaped.
+    //   ALIVE                 stat readable, same starttime, non-Z -
+    //                         the owned server is still running.
+    //   UNKNOWN               AccessDeniedException (EACCES) or any
+    //                         other open/parse failure - NOT proof of
+    //                         gone; raw evidence is preserved verbatim.
+    // Returns Pair(category, rawEvidence).
+    private fun liveVerdict(id: ServerIdent): Pair<String, String> {
+        val text = try {
+            String(java.nio.file.Files.readAllBytes(
+                java.io.File("/proc/" + id.pid + "/stat").toPath()))
+        } catch (e: java.nio.file.NoSuchFileException) {
+            return Pair("ABSENT_REAPED", "NoSuchFileException: " + e.message)
+        } catch (e: java.nio.file.AccessDeniedException) {
+            return Pair("UNKNOWN", "AccessDeniedException: " + e.message)
+        } catch (t: Throwable) {
+            return Pair("UNKNOWN", t.javaClass.name + ": " + t.message)
+        }
+        val rest = try {
+            text.substringAfterLast(") ").split(" ")
+        } catch (t: Throwable) {
+            return Pair("UNKNOWN", "stat parse failed: " + t.javaClass.name)
+        }
+        val state = rest.getOrNull(0)
+            ?: return Pair("UNKNOWN", "stat missing state field")
+        val start = rest.getOrNull(19)
+            ?: return Pair("UNKNOWN", "stat missing starttime field")
+        val raw = "state=" + state + " starttime=" + start + " expected-starttime=" + id.start
+        if (state == "Z") return Pair("DEAD_AWAITING_REAP", raw)
+        return if (start != id.start) Pair("STARTTIME_REUSED", raw) else Pair("ALIVE", raw)
     }
 
     @Test fun checkDrawingControl(): Unit = runBlocking {
@@ -329,25 +373,40 @@ class XServerCheckDrawingTest {
                 try {
                     if (identityMatches(s)) {
                         XServer.stopDesktopMode(ctx)
-                        var gone: Boolean? = null
+                        var category = "UNKNOWN"
+                        var raw = "no stat read completed"
                         var waits = 0
-                        while (waits < 10 && gone != true) {
+                        while (waits < 10) {
                             Thread.sleep(500)
-                            gone = goneState(s)
+                            val v = liveVerdict(s)
+                            category = v.first
+                            raw = v.second
+                            if (category != "ALIVE" && category != "UNKNOWN") break
                             waits++
                         }
-                        when (gone) {
-                            true -> out.append("control-server teardown: stopDesktopMode; pid=")
-                                .append(s.pid).append(" GONE (proc absent or starttime changed)\n")
-                            false -> {
+                        when (category) {
+                            "ABSENT_REAPED" ->
+                                out.append("control-server teardown: stopDesktopMode; pid=")
+                                    .append(s.pid).append(" ABSENT_REAPED - ").append(raw).append('\n')
+                            "DEAD_AWAITING_REAP" ->
+                                out.append("control-server teardown: stopDesktopMode; pid=")
+                                    .append(s.pid).append(" DEAD_AWAITING_REAP - ").append(raw)
+                                    .append(" - meets ONLY the narrow expectation that the server is")
+                                    .append(" dead; does NOT establish fully reaped cleanup\n")
+                            "STARTTIME_REUSED" ->
+                                out.append("control-server teardown: stopDesktopMode; pid=")
+                                    .append(s.pid).append(" STARTTIME_REUSED - ").append(raw)
+                                    .append(" - owned server instance no longer exists at this pid\n")
+                            "ALIVE" -> {
                                 out.append("control-server teardown: pid=").append(s.pid)
-                                    .append(" STILL ALIVE after stopDesktopMode\n")
+                                    .append(" STILL ALIVE after stopDesktopMode - ").append(raw).append('\n')
                                 teardownFailure = "owned server " + s.pid + " still alive after teardown"
                             }
-                            null -> {
+                            else -> {
                                 out.append("control-server teardown: pid=").append(s.pid)
-                                    .append(" teardown UNVERIFIABLE (starttime unreadable on a present")
-                                    .append(" proc dir - NOT proof of gone)\n")
+                                    .append(" teardown UNVERIFIABLE - ").append(raw)
+                                    .append(" (no exact-errno absence; EACCES/other open failure is")
+                                    .append(" NOT proof of gone)\n")
                                 teardownFailure = "owned server " + s.pid + " teardown unverifiable"
                             }
                         }
