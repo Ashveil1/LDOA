@@ -47,6 +47,7 @@ class VirglProbeTest {
     private val probeLocal get() = File(rootfs, "tmp/eglprobe")
     private val probeReportDefault get() = File(ctx.filesDir, "virgl-probe-default.txt")
     private val probeReportVirgl get() = File(ctx.filesDir, "virgl-probe-virpipe.txt")
+    private val probeReportNofork get() = File(ctx.filesDir, "virgl-probe-nofork.txt")
 
     @After fun cleanup() {
         try { XServer.stopVirglServerForTest("probe-cleanup") } catch (t: Throwable) { }
@@ -320,9 +321,8 @@ class VirglProbeTest {
                 extraEnv = mapOf("VIRGL_LOG_LEVEL" to "warning"),
                 extraArgs = listOf("--no-fork"))
                 ?: throw AssertionError("virgl server (--no-fork) failed to start (see files/virgl-server.log)")
-            val report = File(ctx.filesDir, "virgl-probe-nofork.txt")
             val res = runProbeArm("virpipe no-fork compare (renderer proof only)",
-                report, virgl = true, holdSecs = 0, sock = sock, bootBudgetMs = 30_000L)
+                probeReportNofork, virgl = true, holdSecs = 0, sock = sock, bootBudgetMs = 30_000L)
             XServer.stopVirglServerForTest("nofork-compare-stop")
             val candidate = VirglTestCommon.rendererOf(res)
             assertNotNull("no-fork arm printed no GL-RENDERER (see virgl-probe-nofork.txt)", candidate)
@@ -331,6 +331,14 @@ class VirglProbeTest {
                 candidate!!.contains("virgl ("))
         } finally {
             XServer.stopVirglServerForTest("nofork-compare-cleanup")
+            // Stub-classified like the virpipe arm: absence is a capture
+            // break, never a silent skip. Separate JUnit case with its own
+            // staging/server, so a forked-arm failure cannot skip it.
+            if (!probeReportNofork.isFile) {
+                probeReportNofork.writeText("== no-fork arm NOT COMPLETED ==\n" +
+                    "reason: staging or server start failed before the probe ran -" +
+                    " see the instrument log and files/virgl-server.log\n")
+            }
             if (savedFlag != null) flag.writeText(savedFlag) else flag.delete()
         }
     }

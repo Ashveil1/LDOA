@@ -152,7 +152,7 @@ jobs:
             # Evidence contract: every expected report must exist NON-EMPTY
             # (the tests write stub reports for unreached arms, so absence
             # means capture broke, not that the arm was skipped).
-            if [ "$LANE" = virgl-only ]; then for f in virgl-provision.txt virgl-smoke.txt virgl-probe-default.txt virgl-probe-virpipe.txt; do if [ ! -s "$f" ] || head -c 40 "$f" | grep -q "^cat: files/"; then echo "VIRGL-EVIDENCE-MISSING $f (absent, empty, or remote cat error captured)"; touch /tmp/PHONELINUX_VIRGL_FAILED; fi; done; fi
+            if [ "$LANE" = virgl-only ]; then for f in virgl-provision.txt virgl-smoke.txt virgl-probe-default.txt virgl-probe-virpipe.txt virgl-probe-nofork.txt; do if [ ! -s "$f" ] || head -c 40 "$f" | grep -q "^cat: files/"; then echo "VIRGL-EVIDENCE-MISSING $f (absent, empty, or remote cat error captured)"; touch /tmp/PHONELINUX_VIRGL_FAILED; fi; done; fi
             # Diagnostics export + reuse-gate health (cheap, rootfs-free,
             # gates the user-facing ZIP export). Full output printed and
             # archived - no tail-only retention for gate classes.
