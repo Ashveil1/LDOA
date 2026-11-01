@@ -92,7 +92,7 @@ jobs:
             # window, concurrent stops): cheap (sleep-process fakes, no
             # rootfs), always on, independently bounded.
             date -u +"LIFECYCLE start %H:%M:%S"
-            if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then timeout -s KILL 300 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.GnomeSessionLifecycleTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-lifecycle.log | tail -8 || echo "LIFECYCLE-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"; else echo "lifecycle SKIPPED (lane=$LANE)" > /tmp/instr-lifecycle.log; fi
+            if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then timeout -s KILL 300 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.GnomeSessionLifecycleTest,dev.phonelinux.proto.OpenDesktopReentryTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-lifecycle.log | tail -8 || echo "LIFECYCLE-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"; else echo "lifecycle SKIPPED (lane=$LANE)" > /tmp/instr-lifecycle.log; fi
             if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then grep -q "OK (" /tmp/instr-lifecycle.log || touch /tmp/PHONELINUX_LIFECYCLE_FAILED; fi
             # Diagnostics export + reuse-gate health (cheap, rootfs-free,
             # gates the user-facing ZIP export). Full output printed and

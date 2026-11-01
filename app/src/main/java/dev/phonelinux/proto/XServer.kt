@@ -164,6 +164,18 @@ object XServer {
     @Volatile internal var teardownHookForTest: (() -> Unit)? = null
     @Volatile var preparing = false
         private set
+    // In-flight attempt routing: while a start runs, the VISIBLE caller
+    // RE-ATTACHES (its callbacks replace these) instead of being refused;
+    // completion routes to the latest caller's activity so a recreated
+    // MainActivity still receives the outcome (POCO 2026-11-01: the second
+    // open got "tap ignored", its preparing overlay never cleared, and the
+    // app had no escape - the user was trapped on a spinner).
+    @Volatile private var attemptActivity: Activity? = null
+    @Volatile private var attemptOnError: ((String) -> Unit)? = null
+    @Volatile private var attemptOnStage: ((String) -> Unit)? = null
+
+    /** Simulate an in-flight attempt (regression tests only). */
+    internal fun setPreparingForTest(value: Boolean) { preparing = value }
 
     /** True when a GNOME desktop session for this distro is already alive:
      *  re-entering the desktop then only brings the X11 activity forward
@@ -603,18 +615,31 @@ object XServer {
                     onStage: (String) -> Unit = {},
                     onError: (String) -> Unit = {}) {
         if (preparing) {
-            onStage("desktop start already in progress - tap ignored")
+            // Re-attach, never refuse: follow the in-flight attempt so its
+            // stage lines and outcome reach the screen the user is actually
+            // looking at. The single-attempt guard stands - no second
+            // session is launched.
+            attemptActivity = activity
+            attemptOnError = onError
+            attemptOnStage = onStage
+            onStage("a desktop start is already in progress - following it now")
             return
         }
         preparing = true
+        attemptActivity = activity
+        attemptOnError = onError
+        attemptOnStage = onStage
         thread(name = "xserver-start") {
             val ctx = activity.applicationContext
+            // Stage lines route to the LATEST attached caller, not the
+            // (possibly destroyed) screen that began the attempt.
+            val stage: (String) -> Unit = { s -> attemptOnStage?.invoke(s) }
             var launched = false
             var failure: String? = null
             try {
                 gateLog("openDesktop begin distro=" + distro.id)
                 if (teardownRetainedFailedSession(ctx)) gateLog("tore down retained FAILED session before relaunch")
-                onStage("Starting X server")
+                stage("Starting X server")
                 start(ctx)
                 val installer = DistroInstaller(ctx)
                 if (installer.isInstalled(distro)) {
@@ -622,7 +647,7 @@ object XServer {
                     when (distro.pkgMgr) {
                         PkgMgr.APK -> {
                             if (!GuestDesktop.hasDesktopShell(rootfs)) {
-                                onStage("Installing desktop shell (jwm/pcmanfm/st)")
+                                stage("Installing desktop shell (jwm/pcmanfm/st)")
                                 var add = GuestDesktop.provisionDesktopShell(ctx, rootfs)
                                 if (add.exitCode != 0) {
                                     Thread.sleep(5_000)
@@ -633,7 +658,7 @@ object XServer {
                                     "Desktop shell install failed (exit " + add.exitCode + ")\n" + (add.stdout + add.stderr).takeLast(1200)
                             }
                             if (failure == null && GuestDesktop.hasDesktopShell(rootfs)) {
-                                onStage("Launching desktop session")
+                                stage("Launching desktop session")
                                 val p = GuestDesktop.launchDesktopSession(ctx, rootfs)
                                 // Alpine's session script has no alive
                                 // marker; bounded gate = still alive after
@@ -660,13 +685,13 @@ object XServer {
                             // evidence trail.
                             if (!GuestUbuntu.hasGnome(rootfs)) {
                                 Log.i(TAG, "GNOME not provisioned; apt install gnome-shell et al")
-                                val add = GuestUbuntu.provisionGnome(ctx, rootfs) { line -> onStage(line) }
+                                val add = GuestUbuntu.provisionGnome(ctx, rootfs) { line -> stage(line) }
                                 Log.i(TAG, "gnome provision exit=" + add.exitCode)
                                 if (add.exitCode != 0) failure =
                                     "GNOME package install failed (exit " + add.exitCode + ")\n" + (add.stdout + add.stderr).takeLast(1200)
                             }
                             if (failure == null && GuestUbuntu.hasGnome(rootfs)) {
-                                onStage("Launching GNOME session")
+                                stage("Launching GNOME session")
                                 // Gate on SESSION EVIDENCE, not the spawn
                                 // event: the session script logs its alive
                                 // marker ~20s in; only log lines written
@@ -810,19 +835,38 @@ object XServer {
                 Log.e(TAG, "X server start failed", t)
                 failure = "X server failed: " + (t.message ?: t.javaClass.simpleName)
             }
-            val f = failure
-            Handler(Looper.getMainLooper()).post {
-                preparing = false
-                if (launched) {
-                    // L1: persistent background notification + manual
-                    // wakelock toggle while the session lives (accepted
-                    // requirements File v2). Service watches session end.
-                    SessionService.start(ctx)
-                    activity.startActivity(Intent(activity, com.termux.x11.MainActivity::class.java))
+            finishAttempt(ctx, launched, failure)
+        }
+    }
+
+    /** Attempt completion, routed to the LATEST attached caller (the one
+     *  the user is actually looking at; a recreated MainActivity re-attaches
+     *  through the preparing path above). Extracted for direct regression
+     *  testing. launched=true opens the X view on the attached activity, or
+     *  from the app context with NEW_TASK when that screen is gone - a ready
+     *  desktop is never stranded behind a stale activity reference. */
+    internal fun finishAttempt(ctx: Context, launched: Boolean, failure: String?) {
+        Handler(Looper.getMainLooper()).post {
+            preparing = false
+            val a = attemptActivity
+            val oe = attemptOnError
+            attemptActivity = null
+            attemptOnError = null
+            attemptOnStage = null
+            if (launched) {
+                // L1: persistent background notification + manual
+                // wakelock toggle while the session lives (accepted
+                // requirements File v2). Service watches session end.
+                SessionService.start(ctx)
+                if (a != null && !a.isFinishing && !a.isDestroyed) {
+                    a.startActivity(Intent(a, com.termux.x11.MainActivity::class.java))
                 } else {
-                    Log.e(TAG, "desktop open failed-closed: " + f)
-                    onError(f ?: "unknown desktop start failure")
+                    ctx.startActivity(Intent(ctx, com.termux.x11.MainActivity::class.java)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                 }
+            } else {
+                Log.e(TAG, "desktop open failed-closed: " + failure)
+                oe?.invoke(failure ?: "unknown desktop start failure")
             }
         }
     }

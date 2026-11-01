@@ -129,10 +129,18 @@ object GuestUbuntu {
             find /tmp/xdg -maxdepth 1 -name 'ldoa-owned-tree.*' -mmin +60 -delete 2>/dev/null
             # A stale fail-closed marker from a previous launch must never
             # suppress THIS launch's fallback.
-            # EVIDENCE + BOUNDED FIX ATTEMPT: dump session state, then
-            # explicitly enable the ubuntu dock (enabled-extensions=@as []
-            # in run f81bd1a; wallpaper+top bar already render). Logged so
-            # the settled shot ties the dock's presence to this action.
+            # EVIDENCE + dock recovery: dump session state, then enable the
+            # ubuntu dock ADDITIVELY (enabled-extensions=@as [] in run
+            # f81bd1a; wallpaper+top bar already render). The recovery is
+            # gnome-extensions enable alone: its D-Bus path
+            # (shellDBus.js -> extensionManager.enableExtension) and its
+            # gsettings fallback (settings_list_add) both no-op when the
+            # uuid is present and append it when missing - verified against
+            # gnome-shell 46.0 source, the exact guest package
+            # (46.0-0ubuntu6~24.04.16; Ubuntu noble ships no extensions-tool
+            # patches). The earlier full-array gsettings set was removed
+            # 2026-11-01: it silently dropped any user-added extension on
+            # every launch while adding nothing beyond the additive enable.
             ( sleep 25
               echo "=== gnome-diag begin ==="
               echo "XDG_CURRENT_DESKTOP=${'$'}XDG_CURRENT_DESKTOP"
@@ -145,7 +153,6 @@ object GuestUbuntu {
               echo "-- gnome-extensions list --"
               gnome-extensions list 2>&1
               echo "-- FIX ATTEMPT: enable ubuntu-dock --"
-              gsettings set org.gnome.shell enabled-extensions "['ubuntu-dock@ubuntu.com']" 2>&1; echo "gsettings-set rc=${'$'}?"
               gnome-extensions enable ubuntu-dock@ubuntu.com 2>&1; echo "ext-enable rc=${'$'}?"
               sleep 15
               echo "-- enabled-extensions (after) --"

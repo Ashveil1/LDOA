@@ -52,6 +52,33 @@ class GnomeSessionPerfConfigTest {
         assertFalse("dconf must not be invoked (and never installed for this)", script.contains("dconf read"))
     }
 
+    /**
+     * Script-content coverage only (LIMITED - pins the script shape, not
+     * runtime shell behavior): the dock recovery must be additive. The
+     * pre-2026-11-01 full-array `gsettings set enabled-extensions` write
+     * silently dropped user-added extensions every launch; recovery is
+     * `gnome-extensions enable` alone, whose D-Bus and gsettings fallback
+     * paths are both source-verified additive/no-op-when-present against
+     * the exact guest package (gnome-shell 46.0-0ubuntu6~24.04.16;
+     * shellDBus.js -> extensionManager.enableExtension pushes only when
+     * missing; settings_list_add appends only when missing).
+     */
+    @Test
+    fun dockRecoveryIsAdditiveOnly() {
+        assertFalse(
+            "no full-array enabled-extensions write (it silently dropped user extensions every launch)",
+            script.contains("gsettings set org.gnome.shell enabled-extensions")
+        )
+        assertTrue(
+            "the additive dock recovery must be retained",
+            script.contains("gnome-extensions enable ubuntu-dock@ubuntu.com")
+        )
+        assertTrue(
+            "the enabled-extensions evidence read must be retained",
+            script.contains("gsettings get org.gnome.shell enabled-extensions")
+        )
+    }
+
     @Test
     fun probesCaptureRendererAndPressureEvidence() {
         assertTrue("probes must record loadavg per sample", script.contains("/proc/loadavg"))

@@ -151,7 +151,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private val vm: SpikeViewModel by viewModels()
+    internal val vm: SpikeViewModel by viewModels()
 
     override fun onResume() {
         super.onResume()
@@ -317,6 +317,33 @@ class MainActivity : ComponentActivity() {
                                 Spacer(Modifier.height(10.dp))
                                 Text(vm.desktopStage.take(160), color = TextDim, fontSize = 12.sp,
                                     fontFamily = FontFamily.Monospace)
+                            }
+                            Spacer(Modifier.height(18.dp))
+                            // Escape controls (POCO 2026-11-01 trap: an
+                            // in-flight start + dismissed notification left
+                            // a spinner with no way out). Stop ends the
+                            // session cleanly - files stay on the device.
+                            // Hide leaves the start running; the attempt
+                            // still routes here when it finishes, and
+                            // "Continue to desktop setup" re-attaches.
+                            Row {
+                                TextButton(onClick = {
+                                    vm.log += "[tap] preparing overlay: stop session\n"
+                                    vm.desktopStage = "stopping session..."
+                                    thread(name = "desktop-stop") {
+                                        XServer.stopDesktopMode(applicationContext)
+                                        runOnUiThread { vm.desktopPrep = false; vm.desktopStage = "" }
+                                    }
+                                }, modifier = Modifier.semantics { contentDescription = "preparing-stop-session" }) {
+                                    Text("Stop session", color = Color(0xFFFF7A7A))
+                                }
+                                Spacer(Modifier.width(12.dp))
+                                TextButton(onClick = {
+                                    vm.log += "[tap] preparing overlay: hide (start keeps running)\n"
+                                    vm.desktopPrep = false
+                                }, modifier = Modifier.semantics { contentDescription = "preparing-hide-wait" }) {
+                                    Text("Hide - keep starting", color = TextDim)
+                                }
                             }
                         }
                     } else when (vm.screen) {
