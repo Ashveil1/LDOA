@@ -221,6 +221,34 @@ fi
 # default is OFF everywhere - regression/full/session runs stay stock.
 E1ARG=""
 if [ "$E1" = "on" ]; then E1ARG="-e ldoaE1 1"; fi
+# xmap-pixels helper: CI-built on THIS ubuntu-24.04 runner (noble ABI =
+# the guest rootfs; ci/xmap-pixels/BUILD.md) and pushed for the session
+# arm's bounded root pixel probe. A build/push failure does NOT fail the
+# arm (the test then records window-pixels NO-RECORD) but is logged
+# loudly; the runner-side sha256 is printed for reviewer comparison with
+# the test's recorded device-side sha256 (recorded pair, not a gate).
+if [ "$LANE" = full ] || [ "$LANE" = session ]; then
+  # Stale delivery can never execute: remove any previous device-side
+  # binary FIRST, and after the push VERIFY byte equality (pull back +
+  # runner sha256 compare) - a failed verification removes the device
+  # binary, so a failed/stale build can never run as the helper.
+  timeout 30 adb -s "$SERIAL" shell rm -f /data/local/tmp/ldoa-xmap-pixels || true
+  if sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libx11-dev \
+     && gcc -O2 -Wall -Wextra -o /tmp/ldoa-xmap-pixels ci/xmap-pixels/xmap-pixels.c -lX11; then
+    BUILD_SHA=$(sha256sum /tmp/ldoa-xmap-pixels | cut -d' ' -f1)
+    echo "XMAP-PIXELS-BUILD ok runner-sha256: $BUILD_SHA"
+    if timeout 60 adb -s "$SERIAL" push /tmp/ldoa-xmap-pixels /data/local/tmp/ldoa-xmap-pixels \
+       && timeout 60 adb -s "$SERIAL" pull /data/local/tmp/ldoa-xmap-pixels /tmp/ldoa-xmap-pixels.readback >/dev/null \
+       && [ "$(sha256sum /tmp/ldoa-xmap-pixels.readback | cut -d' ' -f1)" = "$BUILD_SHA" ]; then
+      echo "XMAP-PIXELS-PUSH ok (readback sha256 EQUAL to build)"
+    else
+      timeout 30 adb -s "$SERIAL" shell rm -f /data/local/tmp/ldoa-xmap-pixels || true
+      echo "XMAP-PIXELS-BUILD push/verify FAILED - device binary removed; test will record window-pixels NO-RECORD"
+    fi
+  else
+    echo "XMAP-PIXELS-BUILD FAILED - test will record window-pixels NO-RECORD (arm continues)"
+  fi
+fi
 date -u +"VIRGL-SESSION start %H:%M:%S (lane=$LANE e1=$E1)"
 if [ "$LANE" = full ] || [ "$LANE" = session ]; then
   timeout -s KILL 1500 adb -s "$SERIAL" shell am instrument -w $E1ARG -e class dev.phonelinux.proto.VirglGnomeSessionTest,dev.phonelinux.proto.GnomeSessionScriptSafetyTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl-session.log | tail -15 || echo "VIRGL-SESSION-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"
@@ -234,7 +262,7 @@ if [ "$LANE" = full ] || [ "$LANE" = session ]; then grep -q "OK (" /tmp/instr-v
 # payload REMOVES the target: a harvested file is intact device content or
 # ABSENT, never a masquerading partial/error payload.
 if [ "$LANE" = full ] || [ "$LANE" = session ]; then
-  for f in virgl-session.txt virgl-session-xcontent.img virgl-session-xcontent.partial; do
+  for f in virgl-session.txt virgl-session-xcontent.img virgl-session-xcontent.partial virgl-session-xmap.ppm; do
     pull_or_absent "$f" "$f" 60 "VIRGL-SESSION-HARVEST"
   done
 fi
@@ -256,6 +284,20 @@ fi
 # the FULL 8-byte signature. Absent/invalid = CAPTURE-UNVERIFIED and
 # fails the arm - it never passes as captured guest content. What the
 # image SHOWS is reviewer pixel inspection, never this gate.
+# Pixel-probe artifact validity: HEADER + BOUND CHECK ONLY, never an
+# image decode proof. When the test recorded window-pixels SAMPLED, the
+# PPM must exist, carry the P6 magic, and stay within the bounded-output
+# cap (66000 bytes test-side; 66560 slack here). Absent/invalid fails the
+# arm - it never passes as sampled pixels. What the patches SHOW is
+# reviewer pixel inspection, never this gate.
+if { [ "$LANE" = full ] || [ "$LANE" = session ]; } && [ -s virgl-session.txt ] && grep -q "VERDICT window-pixels: SAMPLED" virgl-session.txt; then
+  if [ -s virgl-session-xmap.ppm ] && [ "$(head -c 2 virgl-session-xmap.ppm)" = "P6" ] && [ "$(stat -c %s virgl-session-xmap.ppm)" -le 66560 ]; then
+    echo "xmap-pixels artifact header OK (P6 magic, bounded size)"
+  else
+    echo "XMAP-PIXELS-HARVEST: SAMPLED recorded but artifact absent or invalid (missing, no P6 magic, or over bounded size)"
+    touch /tmp/PHONELINUX_VIRGL_SESSION_FAILED
+  fi
+fi
 if { [ "$LANE" = full ] || [ "$LANE" = session ]; } && [ -s virgl-session.txt ] && grep -q "VERDICT guest-xcontent: CAPTURED" virgl-session.txt; then
   img_ok=0
   if [ -s virgl-session-xcontent.img ]; then
