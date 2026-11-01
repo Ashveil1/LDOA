@@ -1263,6 +1263,46 @@ object GuestUbuntu {
               echo "${'$'}1 ${'$'}(ldoa_sha "${'$'}1")" >> "${'$'}2"
               return 0
             }
+            # ldoa_remove_managed PATH MANIFEST LABEL - rollback for the
+            # E1 opt-in experiment. Removes ONLY a file that (a) is a
+            # REGULAR file (symlinks rejected: never follow or delete a
+            # foreign link), (b) carries the E1-OWNERSHIP marker
+            # '# ldoa-managed E1:' (a non-E1 ldoa-managed file at the same
+            # path belongs to another feature and is preserved), and
+            # (c) still sha256-matches its entry in a manifest that itself
+            # is a regular non-symlink file. Stock files, user-modified
+            # content, foreign manifests and anything unknown are
+            # PRESERVED (blocked/skipped, logged). Removal failure is a
+            # REAL failure (rc=1, loud log): a mask that could not be
+            # removed may still be ACTIVE - stock is NOT claimed restored.
+            ldoa_remove_managed() {
+              if [ -L "${'$'}1" ]; then
+                echo "gnome-launch: ${'$'}3 ROLLBACK-BLOCKED - ${'$'}1 is a SYMLINK (left untouched)"
+                return 1
+              fi
+              if [ -f "${'$'}1" ]; then
+                if ! grep -q '^# ldoa-managed E1:' "${'$'}1" 2>/dev/null; then
+                  echo "gnome-launch: ${'$'}3 ROLLBACK-SKIPPED - ${'$'}1 not an E1-owned mask (left untouched)"
+                  return 0
+                fi
+                if [ -L "${'$'}2" ] || [ ! -f "${'$'}2" ]; then
+                  echo "gnome-launch: ${'$'}3 ROLLBACK-BLOCKED - manifest ${'$'}2 missing or not a regular file (left untouched)"
+                  return 1
+                fi
+                MS=${'$'}(ldoa_manifest_sha "${'$'}1" "${'$'}2"); CS=${'$'}(ldoa_sha "${'$'}1")
+                if [ -z "${'$'}MS" ] || [ "${'$'}MS" != "${'$'}CS" ]; then
+                  echo "gnome-launch: ${'$'}3 ROLLBACK-BLOCKED - ${'$'}1 changed since manifest (manifest=${'$'}{MS:-none} current=${'$'}CS) - preserving unknown modified content"
+                  return 1
+                fi
+                if rm -f "${'$'}1" 2>/dev/null && [ ! -e "${'$'}1" ]; then
+                  echo "gnome-launch: ${'$'}3 ROLLED-BACK - ${'$'}1 removed (E1-owned, manifest-verified)"
+                  return 0
+                fi
+                echo "gnome-launch: ${'$'}3 ROLLBACK-FAILED - ${'$'}1 removal failed or file still present; mask may remain ACTIVE (stock NOT restored)"
+                return 1
+              fi
+              return 0
+            }
             LDOA_SESS_DIR=/usr/local/share/gnome-session/sessions
             LDOA_AUTO_DIR=/root/.config/autostart
             SESS_STATE=stock
@@ -1289,6 +1329,80 @@ object GuestUbuntu {
                 echo "gnome-launch: gate${'$'}A mask ACTIVE (Hidden=true; stock /etc/xdg file untouched)"
               fi
             done
+            # E1 OPT-IN diet experiment (DEFAULT OFF; explicit
+            # instrumentation arg ldoaE1=1 -> host flag file
+            # .ldoa-session-diet-e1 -> LDOA_SESSION_DIET_E1=1 env).
+            # Subset: Wwan + Smartcard ONLY - the two daemons the M3
+            # census observed SPAWNING via /etc/xdg/autostart while ABSENT
+            # from the candidate RequiredComponents (activation hypothesis
+            # from definitions+spawn correlation, not runtime causality
+            # proof). Mechanism: the same Hidden=true user-autostart mask
+            # as the UsbProtection precedent - stock /etc/xdg files
+            # untouched, no session-file change (the pair is not in the
+            # candidate required list). LIFETIME: this block runs at
+            # session LAUNCH, so flag-off takes effect on the NEXT launch;
+            # a mask written earlier stays active for an already-running
+            # session (never retroactively removed mid-session).
+            # E1-OWNERSHIP: E1 masks carry '# ldoa-managed E1:'; put will
+            # NOT overwrite a pre-existing mask that lacks the E1 marker
+            # (another feature's managed content is preserved), and
+            # rollback removes only E1-marked, manifest-verified files.
+            # Tradeoffs (feature, not measured impact): no modem
+            # integration and no smartcard/pkcs11 integration in the
+            # guest session while masked; accessibility/power/input/audio
+            # are NOT touched by E1.
+            E1_RC=0
+            if [ "${'$'}{LDOA_SESSION_DIET_E1:-0}" = "1" ]; then
+              for A in Wwan Smartcard; do
+                T="${'$'}LDOA_AUTO_DIR/org.gnome.SettingsDaemon.${'$'}A.desktop"
+                M="${'$'}LDOA_AUTO_DIR/.ldoa-manifest"
+                # Symlinks are rejected BEFORE any content check: -e and
+                # grep FOLLOW links (and -e misses dangling ones); a link
+                # is never our file regardless of what it points at.
+                if [ -L "${'$'}T" ]; then
+                  echo "gnome-launch: E1 gate${'$'}A mask BLOCKED-E1-OWNERSHIP - ${'$'}T is a SYMLINK (never followed or overwritten) - left untouched"
+                  E1_RC=1
+                  continue
+                fi
+                if [ -L "${'$'}M" ]; then
+                  echo "gnome-launch: E1 gate${'$'}A mask BLOCKED-E1-OWNERSHIP - manifest ${'$'}M is a SYMLINK (foreign manifest; never trusted) - left untouched"
+                  E1_RC=1
+                  continue
+                fi
+                if [ -e "${'$'}T" ] && ! grep -q '^# ldoa-managed E1:' "${'$'}T" 2>/dev/null; then
+                  echo "gnome-launch: E1 gate${'$'}A mask BLOCKED-E1-OWNERSHIP - ${'$'}T exists without the E1 marker (another feature's or unknown content) - left untouched"
+                  E1_RC=1
+                  continue
+                fi
+                if [ -e "${'$'}T" ]; then
+                  # Existing regular E1-marked target: manifest-verified
+                  # sha match is REQUIRED before overwrite - unknown
+                  # modified content is never clobbered.
+                  MS=${'$'}(ldoa_manifest_sha "${'$'}T" "${'$'}M"); CS=${'$'}(ldoa_sha "${'$'}T")
+                  if [ -z "${'$'}MS" ] || [ "${'$'}MS" != "${'$'}CS" ]; then
+                    echo "gnome-launch: E1 gate${'$'}A mask BLOCKED-E1-OWNERSHIP - ${'$'}T changed since manifest (manifest=${'$'}{MS:-none} current=${'$'}CS) - preserving unknown modified content"
+                    E1_RC=1
+                    continue
+                  fi
+                fi
+                if printf '# ldoa-managed E1: Hidden mask for gsd %s (opt-in experiment; revert: flag off - removed at next launch, manifest-verified)\n[Desktop Entry]\nType=Application\nName=org.gnome.SettingsDaemon.%s (ldoa-disabled, E1)\nHidden=true\n' "${'$'}A" "${'$'}A" | \
+                   ldoa_put_managed "${'$'}T" "${'$'}M" "E1 gate${'$'}A mask"; then
+                  echo "gnome-launch: E1 gate${'$'}A mask ACTIVE (opt-in experiment; Hidden=true; stock /etc/xdg file untouched)"
+                else
+                  E1_RC=1
+                fi
+              done
+              if [ "${'$'}E1_RC" -ne 0 ]; then
+                echo "gnome-launch: E1 experiment PARTIAL/BLOCKED (rc=${'$'}E1_RC) - one or more masks NOT installed this launch; experiment coverage INCOMPLETE"
+              fi
+            else
+              for A in Wwan Smartcard; do
+                ldoa_remove_managed "${'$'}LDOA_AUTO_DIR/org.gnome.SettingsDaemon.${'$'}A.desktop" "${'$'}LDOA_AUTO_DIR/.ldoa-manifest" "E1 gate${'$'}A mask" || E1_RC=1
+              done
+              if [ "${'$'}E1_RC" -ne 0 ]; then
+                echo "gnome-launch: E1 ROLLBACK INCOMPLETE (rc=${'$'}E1_RC) - one or more masks may remain ACTIVE; stock NOT claimed restored"
+              fi
+            fi
             echo "gnome-launch: exclusion-state session=${'$'}SESS_STATE XDG_DATA_DIRS='${'$'}XDG_DATA_DIRS' (unset = glib default, /usr/local/share before /usr/share)"
             echo "gnome-launch: trying gnome-session --session=ubuntu (top bar + ubuntu-dock + yaru)"
             # Syscall-level ICE evidence (run 41192498450): the link probe
@@ -1614,6 +1728,14 @@ object GuestUbuntu {
             // Guest mesa renders through the vtest socket (virpipe). Opt-in
             // launches only; the default launch is unmodified (llvmpipe).
             pb.environment()["GALLIUM_DRIVER"] = "virpipe"
+        }
+        // E1 opt-in session-diet experiment (DEFAULT OFF): the host flag
+        // file gates the guest script's Wwan+Smartcard autostart masks.
+        // Same flag-file pattern as .ldoa-virgl-optin; with no flag the
+        // launch is byte-identical to stock and the script rolls back
+        // only its own manifest-verified mask files.
+        if (File(ctx.filesDir, ".ldoa-session-diet-e1").isFile) {
+            pb.environment()["LDOA_SESSION_DIET_E1"] = "1"
         }
         pb.redirectErrorStream(true)
         pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))
