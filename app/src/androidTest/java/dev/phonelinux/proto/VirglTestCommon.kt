@@ -38,6 +38,36 @@ internal object VirglTestCommon {
         val viaPpidScan: List<ProcObs>,
         val scanError: String?)
 
+    /** Tri-state observation of ONE pid against a CAPTURED identity:
+     *  GONE = the pid dir is absent (exited), or the current
+     *  (starttime, uid) differs from the capture (exit+reuse or never
+     *  ours); ALIVE = identity matches, state carried verbatim (a
+     *  zombie is ALIVE with state Z: exited, still visible);
+     *  UNKNOWN = the pid dir exists but stat/identity could NOT be
+     *  established (read/parse failure) - never collapsed into GONE. */
+    enum class ObsVerdict { GONE, ALIVE, UNKNOWN }
+    data class IdObs(val verdict: ObsVerdict, val state: String?, val note: String?)
+
+    fun obsAs(pid: Int, start: String, uid: Int): IdObs {
+        val dir = File("/proc/" + pid)
+        if (!dir.isDirectory) return IdObs(ObsVerdict.GONE, null, "no-proc-dir")
+        val statText = try { File(dir, "stat").readText() } catch (t: Throwable) {
+            // Mid-exit race reads as gone only if the dir vanished too.
+            return if (!dir.isDirectory) IdObs(ObsVerdict.GONE, null, "vanished-mid-read")
+                   else IdObs(ObsVerdict.UNKNOWN, null, "stat-unreadable:" + t.javaClass.simpleName)
+        }
+        val fields = try { statText.substringAfterLast(')').trim().split(Regex("\\s+")) } catch (t: Throwable) {
+            return IdObs(ObsVerdict.UNKNOWN, null, "stat-unparsable")
+        }
+        if (fields.size < 20) return IdObs(ObsVerdict.UNKNOWN, null, "stat-short")
+        val curUid = try { android.system.Os.stat(dir.path).st_uid } catch (t: Throwable) {
+            return IdObs(ObsVerdict.UNKNOWN, null, "uid-unreadable:" + t.javaClass.simpleName)
+        }
+        if (fields[19] != start || curUid != uid)
+            return IdObs(ObsVerdict.GONE, null, "identity-mismatch(exit+reuse or never ours)")
+        return IdObs(ObsVerdict.ALIVE, fields[0], null)
+    }
+
     fun obsOf(pid: Int): ProcObs? {
         val stat = try { File("/proc/" + pid + "/stat").readText() } catch (t: Throwable) { return null }
         val fields = try { stat.substringAfterLast(')').trim().split(Regex("\\s+")) } catch (t: Throwable) { return null }
