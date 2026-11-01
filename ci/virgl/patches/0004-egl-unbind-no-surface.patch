@@ -1,0 +1,17 @@
+--- a/src/vrend/vrend_winsys_egl.c
++++ b/src/vrend/vrend_winsys_egl.c
+@@ -672,7 +672,13 @@
+ int virgl_egl_make_context_current(struct virgl_egl *egl, virgl_renderer_gl_context virglctx)
+ {
+    EGLContext egl_ctx = (EGLContext)virglctx;
+-   EGLSurface surf = egl->egl_surf ? egl->egl_surf : EGL_NO_SURFACE;
++   /* An unbind (egl_ctx == EGL_NO_CONTEXT) requires EGL_NO_SURFACE for
++    * draw/read: pairing a surface with EGL_NO_CONTEXT fails with
++    * EGL_BAD_MATCH per the EGL 1.4 spec (the vrend sync thread unbinds
++    * this way at exit, vrend_renderer.c:7398 - the EGL_BAD_MATCH
++    * observed in LDOA CI run 41320469908). Real binds keep the pbuffer. */
++   EGLSurface surf = (egl->egl_surf && egl_ctx != EGL_NO_CONTEXT) ?
++                     egl->egl_surf : EGL_NO_SURFACE;
+ 
+    return eglMakeCurrent(egl->egl_display, surf, surf,
+                          egl_ctx) ? 0 : -1;

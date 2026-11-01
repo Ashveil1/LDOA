@@ -296,12 +296,18 @@ object XServer {
 
     /** Forked render workers of the vtest server: it forks one worker
      *  per accepted client, and forks happen ONLY at accept, so no new
-     *  worker can appear once the parent is dead. */
+     *  worker can appear once the parent is dead.
+     *  Discovery is a PPid scan (the audited scanProc helper), NOT
+     *  /proc/<pid>/task/<pid>/children: that file does not exist on
+     *  every kernel (measured ENOENT on the CI emulator, run
+     *  41320469908 - a file-based capture silently returned an empty
+     *  set and leaked worker 6957). The caller runs this while the
+     *  parent is SIGSTOP-confirmed, so the parent is alive (no
+     *  reparenting) and frozen (no new forks): ancestry is provable.
+     *  Each captured pid is identity-verified by the caller before
+     *  any signal. */
     private fun virglChildrenOf(pid: Int): List<Int> =
-        try {
-            File("/proc/" + pid + "/task/" + pid + "/children").readText()
-                .trim().split(Regex("\\s+")).filter { it.isNotEmpty() }.mapNotNull { it.toIntOrNull() }
-        } catch (t: Throwable) { emptyList() }
+        scanProc().filterValues { it.ppid == pid }.keys.toList()
 
     /** Stop the opt-in render server with the SAME owned-stop contract as
      *  the GNOME session stop (existing audited helper identityOf):
@@ -309,8 +315,11 @@ object XServer {
      *  is never hit; no ProcessHandle (Android runtime behavior not
      *  grounded). Worker containment is source-grounded: the ONLY fork in
      *  vtest 1.3.0 is vtest_server.c:548, one worker per accepted client;
-     *  workers never fork further, so /proc/<pid>/task/<pid>/children is
-     *  the complete worker set (no broad process scan).
+     *  workers never fork further. The worker set is captured by a PPid
+     *  scan over /proc (virglChildrenOf) WHILE the parent is
+     *  SIGSTOP-confirmed - alive, so nothing reparents, and frozen, so
+     *  no new worker can appear. The /proc children file is not used:
+     *  it is absent on some kernels (measured ENOENT, run 41320469908).
      *
      *  Ordering: SIGSTOP the identity-verified parent, then CONFIRM it
      *  actually reached T/t (a send() return is not delivery proof) with

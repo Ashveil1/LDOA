@@ -101,6 +101,16 @@ tar xzf vr.tar.gz
 #     EGL_KHR_surfaceless_context (Android emulator SwiftShader case,
 #     measured by ci/virgl/hostprobe.c); EGL_KHR_create_context stays
 #     required; non-surfaceless callers are unchanged.
+#   0003-egl-pbuffer-fail-cleanup.patch - own (same MIT terms): destroy
+#     the context and terminate the display when the fallback pbuffer
+#     creation fails, instead of leaking both on the error path.
+#   0004-egl-unbind-no-surface.patch - own (same MIT terms): an unbind
+#     (EGL_NO_CONTEXT) must pair with EGL_NO_SURFACE for draw/read -
+#     the EGL 1.4 spec fails surface+EGL_NO_CONTEXT with EGL_BAD_MATCH
+#     (the vrend sync thread unbinds this way at exit,
+#     vrend_renderer.c:7398; observed in CI run 41320469908). Real
+#     context binds still use the pbuffer; surfaceless-capable builds
+#     are unchanged.
 for p in "$OLDPWD/ci/virgl/patches/"*.patch; do
   echo "== applying $(basename "$p")"
   patch -d "virglrenderer-virglrenderer-$VR_VERSION" -p1 < "$p"

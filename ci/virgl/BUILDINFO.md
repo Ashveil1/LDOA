@@ -25,7 +25,13 @@
   destroy the context and terminate the display before returning NULL
   (upstream's shared fail label only frees the struct); error is preserved,
   no success mislabel.
-- Rebuilt 2026-11-01 with the above patches (twice: 0003 added in the second pass); compile-level validation on the
+  0004-egl-unbind-no-surface.patch - own: unbind (EGL_NO_CONTEXT) pairs with
+  EGL_NO_SURFACE for draw/read - pairing the fallback pbuffer with
+  EGL_NO_CONTEXT fails with EGL_BAD_MATCH per the EGL 1.4 spec (the vrend
+  sync thread unbinds this way at exit, vrend_renderer.c:7398; observed in
+  CI run 41320469908). Real context binds keep the pbuffer; the
+  surfaceless-capable path is unchanged.
+- Rebuilt 2026-11-01 with the above patches (three passes: 0003 added in the second, 0004 in the third); compile-level validation on the
   build tree: config.h has HAVE_EPOXY_EGL_H defined and ENABLE_GBM undefined;
   libvirglrenderer.a exports virgl_egl_init / virgl_egl_make_context_current;
   vrend_winsys.c.o calls virgl_egl_init (PLT32 relocation) and contains no
