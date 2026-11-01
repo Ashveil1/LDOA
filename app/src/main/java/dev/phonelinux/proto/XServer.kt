@@ -306,12 +306,31 @@ object XServer {
      *  reparenting) and frozen (no new forks): ancestry is provable.
      *  Each captured pid is identity-verified by the caller before
      *  any signal.
-     *  FAIL-CLOSED: null means the capture FAILED (/proc unreadable) -
-     *  the caller must treat the worker set as UNKNOWN, never as "no
-     *  workers". An empty list means a complete scan found none. */
-    private fun virglChildrenOf(pid: Int): List<Int>? {
-        if (File("/proc").listFiles { f -> f.name.matches(Regex("[0-9]+")) } == null) return null
-        return scanProc().filterValues { it.ppid == pid }.keys.toList()
+     *  FAIL-CLOSED, ONE structured capture: a successful /proc listing
+     *  does NOT prove the scan completed - each entry's stat read can
+     *  still fail (exit race, EACCES) and such an entry could BE a
+     *  worker. ChildCapture therefore carries per-entry failure
+     *  accounting: partial=true whenever ANY entry was unreadable or
+     *  unparsable (completeness NOT established). null = enumeration
+     *  itself failed (/proc unreadable) -> worker set UNKNOWN. Only
+     *  children-empty AND !partial is a proven "no workers". */
+    private class ChildCapture(val children: List<Int>, val partial: Boolean, val unreadable: Int)
+
+    private fun virglChildrenOf(pid: Int): ChildCapture? {
+        val dir = File("/proc").listFiles { f -> f.name.matches(Regex("[0-9]+")) } ?: return null
+        val out = ArrayList<Int>()
+        var unreadable = 0
+        for (f in dir) {
+            val st = try { File(f, "stat").readText() } catch (t: Throwable) { unreadable++; continue }
+            val close = st.lastIndexOf(')')
+            if (close < 0) { unreadable++; continue }
+            val rest = try { st.substring(close + 1).trim().split(Regex("\\s+")) } catch (t: Throwable) { unreadable++; continue }
+            if (rest.size < 20) { unreadable++; continue }
+            val ppid = rest[1].toIntOrNull()
+            if (ppid == null) { unreadable++; continue }
+            if (ppid == pid) out.add(f.name.toInt())
+        }
+        return ChildCapture(out, unreadable > 0, unreadable)
     }
 
     /** Stop the opt-in render server with the SAME owned-stop contract as
@@ -387,13 +406,19 @@ object XServer {
                 // Worker set frozen: a stopped parent cannot run accept().
                 val targets = LinkedHashMap<Int, PIdent>()
                 targets[ident.pid] = ident
-                val kids = virglChildrenOf(ident.pid)
-                if (kids == null) {
-                    // Capture FAILED: worker set UNKNOWN - signal ONLY
+                val cap = virglChildrenOf(ident.pid)
+                if (cap == null) {
+                    // Enumeration FAILED: worker set UNKNOWN - signal ONLY
                     // the parent identity (never a guess), log loudly.
-                    Log.w(TAG, "virgl worker capture FAILED (/proc unreadable) - worker set UNKNOWN; parent-only signals (" + reason + ")")
+                    Log.w(TAG, "virgl worker capture FAILED (/proc enumeration unreadable) - worker set UNKNOWN; parent-only signals (" + reason + ")")
                 } else {
-                    kids.forEach { cp -> identityOf(cp)?.let { targets[cp] = it } }
+                    if (cap.partial) {
+                        // Some /proc entries could not be read/parsed; any
+                        // of them could BE a worker - the captured set is
+                        // a lower bound, completeness NOT established.
+                        Log.w(TAG, "virgl worker capture PARTIAL (" + cap.unreadable + " unreadable /proc entries could hide a worker); signaling captured+verified identities only (" + reason + ")")
+                    }
+                    cap.children.forEach { cp -> identityOf(cp)?.let { targets[cp] = it } }
                 }
                 for (t in targets.values) send(t, OsConstants.SIGTERM)
                 send(ident, OsConstants.SIGCONT)
