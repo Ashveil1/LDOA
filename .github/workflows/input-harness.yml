@@ -163,5 +163,6 @@ jobs:
             virgl-session.txt
             virgl-session-root.xwd
             gnome-recovery-evidence.txt
+            ldoa-session-census.txt
             /tmp/instr-virgl-session.log
             logcat-run.txt

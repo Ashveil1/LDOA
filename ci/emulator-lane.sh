@@ -30,6 +30,28 @@
 
 SERIAL="${ANDROID_SERIAL:-emulator-5554}"
 
+# pull_or_absent <device-files/name> <host-target> <timeout-s> <LABEL>
+# Common harvest contract for EVERY device pull: intact device content or
+# ABSENT - never a masquerading partial/error payload. adb exec-out can
+# return rc=0 while the remote cat fails (its error text lands in the
+# redirect target - observed as the 60-byte phantom-snapshots.log payload
+# in run 41340609906), and a nonzero pull can still leave partial bytes.
+# ANY nonzero exit, empty result, or "^cat: files/" error body REMOVES the
+# target. ABSENT = no record harvested; it is NEVER proof the event or
+# file never existed on device.
+pull_or_absent() {
+  _src="$1"; _dst="$2"; _tmo="$3"; _lbl="$4"
+  _rc=0
+  timeout "$_tmo" adb -s "$SERIAL" exec-out run-as dev.phonelinux.proto cat "files/$_src" > "$_dst" || _rc=$?
+  if [ "$_rc" -ne 0 ]; then
+    rm -f "$_dst"
+    echo "$_lbl: $_src pull FAILED rc=$_rc - target removed (partial bytes are not evidence); classified ABSENT (no record, not proof the file never existed)"
+  elif [ ! -s "$_dst" ] || head -c 40 "$_dst" | grep -q "^cat: files/"; then
+    rm -f "$_dst"
+    echo "$_lbl: $_src ABSENT on device (or error payload masquerading as content) - removed; classified NO-RECORD (not proof the file never existed)"
+  fi
+}
+
 # Bounded logcat capture for THIS run's instrument window: started here,
 # pid persisted to logcat-run.pid, stopped+flushed by the EXPLICIT
 # if:always() cleanup step in the workflow (no traps: the old per-line model
@@ -144,7 +166,7 @@ fi
 if [ "$LANE" = virgl-only ]; then grep -q "OK (" /tmp/instr-virgl.log || touch /tmp/PHONELINUX_VIRGL_FAILED; fi
 if [ "$LANE" = virgl-only ]; then
   for f in virgl-provision.txt virgl-smoke.txt virgl-probe-default.txt virgl-probe-virpipe.txt virgl-probe-nofork.txt virgl-server.log virgl-visual-bench.txt virgl-visual-scratch.txt virgl-frame-llvmpipe.ppm virgl-frame-virgl.ppm; do
-    timeout 60 adb -s "$SERIAL" exec-out run-as dev.phonelinux.proto cat "files/$f" > "$f" || echo "VIRGL-PULL-FAILED $f rc=$?"
+    pull_or_absent "$f" "$f" 60 "VIRGL-HARVEST"
   done
 fi
 # Evidence contract: every expected report must exist NON-EMPTY (the tests
@@ -180,7 +202,7 @@ if [ "$LANE" = full ]; then grep -q "OK (" /tmp/instr.log || touch /tmp/PHONELIN
 if [ -f /tmp/PHONELINUX_TESTS_FAILED ]; then
   echo "HARNESS-DIAG survivors at bound:"
   adb -s "$SERIAL" shell "ps -A -o PID,PPID,ARGS" | grep -E "phonelinux|proot|nautilus|Xlorie|soffice" || true
-  adb -s "$SERIAL" exec-out run-as dev.phonelinux.proto cat files/harness-owned-ledger.txt > harness-owned-ledger.txt 2>/dev/null || echo "LEDGER-PULL-FAILED rc=$? (ledger needs the test-side spawn-ledger patch)"
+  pull_or_absent harness-owned-ledger.txt harness-owned-ledger.txt 60 "LEDGER-HARVEST (ledger needs the test-side spawn-ledger patch)"
   adb -s "$SERIAL" shell am force-stop dev.phonelinux.proto || true
 fi
 
@@ -206,15 +228,7 @@ if [ "$LANE" = full ] || [ "$LANE" = session ]; then grep -q "OK (" /tmp/instr-v
 # ABSENT, never a masquerading partial/error payload.
 if [ "$LANE" = full ] || [ "$LANE" = session ]; then
   for f in virgl-session.txt virgl-session-root.xwd; do
-    rc=0
-    timeout 60 adb -s "$SERIAL" exec-out run-as dev.phonelinux.proto cat "files/$f" > "$f" || rc=$?
-    if [ "$rc" -ne 0 ]; then
-      rm -f "$f"
-      echo "VIRGL-SESSION-HARVEST: $f pull FAILED rc=$rc - target removed (partial bytes are not evidence); classified ABSENT"
-    elif [ ! -s "$f" ] || head -c 40 "$f" | grep -q "^cat: files/"; then
-      rm -f "$f"
-      echo "VIRGL-SESSION-HARVEST: $f ABSENT on device (or error payload) - removed; classified as NO-CAPTURE, never evidence"
-    fi
+    pull_or_absent "$f" "$f" 60 "VIRGL-SESSION-HARVEST"
   done
 fi
 # Report must exist NON-EMPTY; the xwd is required only when the test
@@ -252,18 +266,11 @@ date -u +"KOE-FIXTURES start %H:%M:%S"
 timeout -s KILL 300 adb -s "$SERIAL" shell am instrument -w -e class dev.phonelinux.proto.ProotKillOnExitTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-koe.log | tail -10 || echo "KOE-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"
 grep -q "OK (13 tests)" /tmp/instr-koe.log || touch /tmp/PHONELINUX_KOE_FAILED
 
-timeout 60 adb -s "$SERIAL" exec-out run-as dev.phonelinux.proto cat files/guest-gnome.log > guest-gnome.log || echo "GNOME-LOG-PULL-FAILED rc=$?"
-rc=0
-timeout 60 adb -s "$SERIAL" exec-out run-as dev.phonelinux.proto cat files/gnome-recovery-evidence.txt > gnome-recovery-evidence.txt || rc=$?
-if [ "$rc" -ne 0 ]; then
-  rm -f gnome-recovery-evidence.txt
-  echo "RECOVERY-EVIDENCE-HARVEST: pull FAILED rc=$rc - partial removed; ABSENT = no evidence recovered (harvest failed; NOT proof recovery never failed)"
-elif [ ! -s gnome-recovery-evidence.txt ] || head -c 40 gnome-recovery-evidence.txt | grep -q "^cat: files/"; then
-  rm -f gnome-recovery-evidence.txt
-  echo "RECOVERY-EVIDENCE-HARVEST: ABSENT on device - the test wrote no recovery-failure evidence (NOT proof recovery never failed)"
-fi
-timeout 60 adb -s "$SERIAL" exec-out run-as dev.phonelinux.proto cat files/phantom-snapshots.log > phantom-snapshots.log || echo "PHANTOM-SNAPSHOTS-PULL-FAILED rc=$?"
-timeout 120 adb -s "$SERIAL" exec-out run-as dev.phonelinux.proto cat files/phantom-dumpsys-raw.log > phantom-dumpsys-raw.log || echo "PHANTOM-RAW-PULL-FAILED rc=$?"
+pull_or_absent guest-gnome.log guest-gnome.log 60 "GNOME-LOG-HARVEST"
+pull_or_absent gnome-recovery-evidence.txt gnome-recovery-evidence.txt 60 "RECOVERY-EVIDENCE-HARVEST (ABSENT = the test wrote no recovery-failure evidence, or harvest failed; NOT proof recovery never failed)"
+pull_or_absent ldoa-session-census.txt ldoa-session-census.txt 60 "SESSION-CENSUS-HARVEST (written pre-launch; ABSENT = the census never ran - arm skipped, write failed, or pre-this-instrumentation build)"
+pull_or_absent phantom-snapshots.log phantom-snapshots.log 60 "PHANTOM-SNAPSHOTS-HARVEST"
+pull_or_absent phantom-dumpsys-raw.log phantom-dumpsys-raw.log 120 "PHANTOM-RAW-HARVEST"
 
 timeout 60 adb -s "$SERIAL" logcat -d > /tmp/shotlog.txt || true
 python3 .github/scripts/extract_shots.py /tmp/shotlog.txt screenshots || true
