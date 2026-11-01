@@ -66,6 +66,103 @@ class VirglGnomeSessionTest {
     private val logFile get() = File(ctx.filesDir, "guest-gnome.log")
 
     /** Post-base log window, FAIL CLOSED on shrink/rotation. */
+    private class CaptureIdentity(val ok: Boolean, val summary: String, val failure: String)
+
+    /**
+     * Capture-target IDENTITY for the shot-pipeline fallback: make the X
+     * view foreground and PROVE the display shows THIS session's desktop on
+     * three independent axes before any capture:
+     *   component: the focused window is com.termux.x11.MainActivity
+     *     (component-level, not package: the same package could be showing
+     *     a loading or error screen);
+     *   surface: the Lorie renderer has bound a real window at/after this
+     *     attach (gles-renderer "rendererSetWindow 0x<nonzero> W H" with
+     *     W,H > 0 - the bind/teardown marker observed in this lane, run
+     *     41331931845: bind 17:51:55.801, teardown 17:54:22.362);
+     *   content: THIS generation's X display :0 answers and has mapped
+     *     client windows (xwininfo -root -children via the guest, same
+     *     socket bind the harness uses) - an Android-side loading/error
+     *     screen has no such windows.
+     * Grounded activity behavior (vendored MainActivity.java onCreate):
+     * the activity is VIEW-ONLY - it spawns no X server and no session
+     * (the server is XServer.start's app_process CmdEntryPoint; the
+     * session is launchOrReuseGnomeSession) - so attaching it preserves
+     * the current session generation; this function never calls
+     * launchOrReuseGnomeSession. Fails closed with the missing element
+     * named; all raw evidence is recorded in the summary either way.
+     */
+    private fun establishDesktopCaptureIdentity(launchId: String, rootfs: File): CaptureIdentity {
+        val instr = InstrumentationRegistry.getInstrumentation()
+        val device = androidx.test.uiautomator.UiDevice.getInstance(instr)
+        val attachAt = System.currentTimeMillis()
+        ctx.startActivity(
+            android.content.Intent(ctx, com.termux.x11.MainActivity::class.java)
+                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+        var focusLine = ""
+        var rendererLine = ""
+        var childCount = -1
+        var treeTail = ""
+        val deadline = attachAt + 180_000
+        while (System.currentTimeMillis() < deadline) {
+            if (focusLine.isEmpty()) {
+                val f = device.executeShellCommand(
+                    "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'").trim()
+                if (f.contains("com.termux.x11.MainActivity")) focusLine = f.replace('\n', ' ').take(300)
+            }
+            if (rendererLine.isEmpty()) {
+                val r = device.executeShellCommand("logcat -d -v threadtime -t 800 -s gles-renderer:D")
+                rendererLine = r.lineSequence().mapNotNull { line ->
+                    val m = Regex("""rendererSetWindow 0x([0-9a-f]+) (\d+) (\d+)""").find(line)
+                    val ts = parseLogcatThreadtimeTs(line)
+                    if (m != null && ts != null && m.groupValues[1] != "0" &&
+                        m.groupValues[2].toInt() > 0 && m.groupValues[3].toInt() > 0 &&
+                        ts >= attachAt - 2_000) line.trim() else null
+                }.lastOrNull() ?: ""
+            }
+            if (childCount < 0) {
+                val t = Proot.runGuest(ctx, rootfs,
+                    listOf("/bin/sh", "-c", "export DISPLAY=:0; xwininfo -root -children 2>/dev/null | tail -25"),
+                    extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"),
+                    timeoutMs = 60_000)
+                treeTail = t.stdout.trim()
+                // Header lines start with "xwininfo:"/"Root"/"Parent"; only
+                // mapped CLIENT window lines start (after indent) with 0x.
+                val children = treeTail.lineSequence()
+                    .count { it.trimStart().startsWith("0x") }
+                if (t.exitCode == 0 && children >= 1) childCount = children
+            }
+            if (focusLine.isNotEmpty() && rendererLine.isNotEmpty() && childCount >= 0) break
+            Thread.sleep(3_000)
+        }
+        Shot.dismissSystemDialogs(device)
+        device.waitForIdle(2_000)
+        val ok = focusLine.isNotEmpty() && rendererLine.isNotEmpty() && childCount >= 0
+        val summary = "launchId=" + launchId +
+            " focus=[" + (if (focusLine.isEmpty()) "MISSING" else focusLine) + "]" +
+            " surface=[" + (if (rendererLine.isEmpty()) "MISSING" else rendererLine.take(200)) + "]" +
+            " sessionWindows=" + (if (childCount < 0) "MISSING" else childCount.toString()) +
+            " (attachAt=" + attachAt + ", 180s bound)"
+        val failure = "focusFound=" + focusLine.isNotEmpty() +
+            " surfaceBound=" + rendererLine.isNotEmpty() +
+            " sessionWindows=" + childCount +
+            " treeTail=[" + treeTail.replace('\n', ' ').take(300) + "]"
+        return CaptureIdentity(ok, summary, failure)
+    }
+
+    private fun parseLogcatThreadtimeTs(line: String): Long? {
+        // threadtime prefix: "MM-DD HH:MM:SS.mmm" (device local, no year)
+        val m = Regex("""^(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)\.(\d\d\d)""").find(line)
+            ?: return null
+        val cal = java.util.Calendar.getInstance()
+        cal.set(java.util.Calendar.MONTH, m.groupValues[1].toInt() - 1)
+        cal.set(java.util.Calendar.DAY_OF_MONTH, m.groupValues[2].toInt())
+        cal.set(java.util.Calendar.HOUR_OF_DAY, m.groupValues[3].toInt())
+        cal.set(java.util.Calendar.MINUTE, m.groupValues[4].toInt())
+        cal.set(java.util.Calendar.SECOND, m.groupValues[5].toInt())
+        cal.set(java.util.Calendar.MILLISECOND, m.groupValues[6].toInt())
+        return cal.timeInMillis
+    }
+
     private fun window(base: Long): String? {
         if (!logFile.isFile) return ""
         val content = logFile.readText()
@@ -422,15 +519,25 @@ class VirglGnomeSessionTest {
             } else {
                 // xwd absent from the stock GNOME rootfs and installing it
                 // would mutate the provisioned rootfs (out of scope): the
-                // Android-display screencap via the shot pipeline. The
-                // WORKFLOW gates that the screenshot actually lands in the
-                // artifact when this fallback was used - CAPTURED is never
-                // marked on the Shot.save call alone.
+                // Android-display screencap via the shot pipeline - but ONLY
+                // after capture-target IDENTITY is established. Shot.save is
+                // UiAutomation.takeScreenshot(): the whole display, whatever
+                // is foreground; run 41331931845 captured the Android
+                // LAUNCHER here (suppression off that run + the between-arms
+                // force-stop had removed the X activity) and a structure-only
+                // pixel reading misqualified it. The WORKFLOW still gates
+                // that the screenshot actually lands in the artifact.
+                val ident = establishDesktopCaptureIdentity(launchId!!, rootfs)
+                out.append("capture-identity: ").append(ident.summary).append('\n')
+                assertTrue("capture-target identity NOT established - " + ident.failure, ident.ok)
                 Shot.save("virgl-session-desktop")
-                presentationVerdict = "capture attempted via Android-display screencap (shot pipeline," +
-                    " name virgl-session-desktop) - xwd ABSENT in rootfs, rootfs preserved unmodified;" +
-                    " artifact arrival GATED CI-side; REVIEWER-VERIFIED presentation: PENDING (must" +
-                    " show the intended X desktop, not another activity)"
+                presentationVerdict = "capture via Android-display screencap (shot pipeline, name" +
+                    " virgl-session-desktop) - xwd ABSENT in rootfs, rootfs preserved unmodified;" +
+                    " capture-target identity ESTABLISHED [" + ident.summary + "];" +
+                    " artifact arrival GATED CI-side; REVIEWER-VERIFIED presentation: PENDING" +
+                    " (identity evidence targets component/display/surface/session-windows;" +
+                    " the artifact image must STILL be inspected for the intended X desktop" +
+                    " content - identity is not pixel review)"
                 out.append("VERDICT presentation: ").append(presentationVerdict).append('\n')
             }
 

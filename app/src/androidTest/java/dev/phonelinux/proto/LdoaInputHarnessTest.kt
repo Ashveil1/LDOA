@@ -177,6 +177,22 @@ class LdoaInputHarnessTest {
         val readyDeadline = System.currentTimeMillis() + 240_000
         var shellWins = 0
         while (System.currentTimeMillis() < readyDeadline) {
+            // LIVENESS fail-fast: between the render-window assert and the
+            // Files-window assert a killed session used to surface only as
+            // 240s+180s of futile polling and the ambiguous "Files window
+            // did not open" (run 41331931845: AMS "Trimming phantom
+            // processes" at 17:54:22 killed the proot tree mid-poll; the
+            // harness asserted 6+ min later). Fail NOW with the death as
+            // the named cause; the window-tree evidence at death is logged
+            // BEFORE the assert so the original failure evidence survives.
+            if (!proc.isAlive) {
+                Log.i(TAG, "harness: gnome session process DIED during the desktop readiness poll" +
+                    " (shellWins so far=" + shellWins + "); window tree at death: " +
+                    xwinEarly("xwininfo -root -children 2>/dev/null | tail -8 || true").replace("\n", " | "))
+                assertTrue("gnome session died during the desktop readiness poll (session-tree" +
+                    " death, not a readiness shortfall - death evidence logged above; check" +
+                    " PhantomSampler samples + AMS phantom-trim records)", proc.isAlive)
+            }
             shellWins = xwinEarly("xwininfo -root -tree 2>/dev/null | grep -ciE 'gnome.shell|gnome-shell' || true")
                 .trim().toIntOrNull() ?: 0
             if (shellWins >= 3) break
@@ -278,6 +294,19 @@ class LdoaInputHarnessTest {
         xwin("( nautilus >/root/harness-nautilus-setup.log 2>&1 & echo ${'$'}! > /root/harness-nautilus-setup.pid )")
         val setupOpenDeadline = System.currentTimeMillis() + 180_000
         while (System.currentTimeMillis() < setupOpenDeadline) {
+            // LIVENESS fail-fast (same rationale as the readiness poll
+            // above): a dead session makes every remaining poll futile and
+            // its only symptom "Files window did not open". Name the death
+            // and log the window tree + nautilus pid-state BEFORE failing.
+            if (!proc.isAlive) {
+                Log.i(TAG, "harness: gnome session process DIED during assisted-setup nautilus poll" +
+                    "; window tree at death: " +
+                    xwin("xwininfo -root -children 2>/dev/null | tail -8 || true").replace("\n", " | ") +
+                    "; nautilus pid-state=" +
+                    xwin("NP=${'$'}(cat /root/harness-nautilus-setup.pid 2>/dev/null); if kill -0 ${'$'}NP 2>/dev/null; then echo alive; else echo dead; fi").trim())
+                assertTrue("gnome session died during assisted-setup (session-tree death, not a" +
+                    " Files-window failure - death evidence logged above)", proc.isAlive)
+            }
             val vis = nauVisible()
             if (vis != null && vis.id !in beforeIds) { nauWid = vis.id; break }
             Thread.sleep(3_000)
