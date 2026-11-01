@@ -48,6 +48,10 @@ class ProotKillOnExitTest {
         val lf = gnomeLogFile()
         if (logExisted) lf.writeBytes(logBytes) else lf.delete()
         XServer.installBusIdentForTest(null, 0L)
+        // Fixture instances share one instrumentation process: the bus
+        // ident clear alone left retained/gate/session statics leaking
+        // into the next fixture.
+        XServer.resetOwnershipStateForTest()
     }
 
     /** (existed, bytes) of root/.gnome-bus.ident before the fixture ran. */
@@ -199,11 +203,12 @@ class ProotKillOnExitTest {
     }
 
     @Test fun untrackedWorldFailsClosedAndIsNotKilled() {
-        val fake = ProcessBuilder("/system/bin/sh", "-c", "exec -a gnome-session-binary sleep 124")
-            .start().also { spawned.add(it) }
+        val fake = spawnShapedSleep("gnome-session-binary", 124)
+        assertShapedFakeAlive(fake, "gnome-session-binary")
         Thread.sleep(500)
         val worlds = SessionReset.scanUntrackedGnomeWorlds()
-        assertTrue("detection scan must see the fake world", worlds.values.any { it.contains("gnome-session-binary") })
+        assertTrue("detection scan must see the fake world " + procSnapshot(fake, "fake-world"),
+            worlds.values.any { it.contains("gnome-session-binary") })
         var threw = false
         try {
             SessionReset.failClosedOnUntracked(mapOf(424242 to "gnome-session-binary sleep 1"))
@@ -217,11 +222,73 @@ class ProotKillOnExitTest {
 
     // ---- captureSessionBusIdentityForTest record-binding fixtures ----
 
+    /** A long-lived fake whose /proc cmdline CONTAINS [needleDir]. NOT
+     *  `sh -c "exec -a '<shape>' sleep N"`: /system/bin/sleep is the
+     *  toybox MULTICALL binary on Android 14, and toybox resolves the
+     *  applet from basename(argv[0]) - a fake argv0 ("dbus-daemon ...",
+     *  "gnome-session-binary") is no applet, so toybox prints "Unknown
+     *  command" and exits 127 immediately (toybox 0.8.9 main.c
+     *  toybox_main/unknown; AOSP android-14 README lists sleep as
+     *  toybox). Every exec-a fake died within milliseconds; the sh -c
+     *  wrapper's own cmdline transiently contains the needle, so
+     *  waitUntil raced a dying wrapper. The shape here comes from a
+     *  DIRECTORY NAME instead: argv[0]'s basename stays a real applet
+     *  ("sleep") while the PATH carries the needle, so the fake truly
+     *  lives. stderr/stdout go to a per-shape log for diagnostics. */
+    private fun spawnShapedSleep(needleDir: String, sleepSecs: Int): Process {
+        val dir = File(ctx.cacheDir, needleDir)
+        dir.mkdirs()
+        val link = File(dir, "sleep")
+        link.delete()
+        android.system.Os.symlink("/system/bin/sleep", link.absolutePath)
+        val out = File(ctx.cacheDir, "koe-fake-" + needleDir.replace(Regex("[^A-Za-z0-9]+"), "_") + ".log")
+        out.delete()
+        val pb = ProcessBuilder(link.absolutePath, sleepSecs.toString())
+        pb.redirectErrorStream(true)
+        pb.redirectOutput(ProcessBuilder.Redirect.appendTo(out))
+        return pb.start().also { spawned.add(it) }
+    }
+
     private fun spawnFakeBus(sleepSecs: Int): Process =
-        // argv0 carries the full dbus-daemon session shape after NUL
-        // normalization; mksh exec -a sets argv[0] only.
-        ProcessBuilder("/system/bin/sh", "-c",
-            "exec -a 'dbus-daemon --fork --session' sleep " + sleepSecs).start().also { spawned.add(it) }
+        spawnShapedSleep("dbus-daemon --fork --session", sleepSecs)
+
+    /** Bounded diagnostic snapshot of ONE fixture-owned process (never a
+     *  scan of others): pid, liveness/exit, uid, start ticks, cmdline. */
+    private fun procSnapshot(p: Process, tag: String): String {
+        val pid = pidOf(p)
+        val cmd = try { File("/proc/" + pid + "/cmdline").readText().replace('\u0000', ' ').trim() }
+            catch (t: Throwable) { "(unreadable: " + t.javaClass.simpleName + ")" }
+        val stat = try { File("/proc/" + pid + "/stat").readText() }
+            catch (t: Throwable) { "" }
+        val ticks = if (stat.isEmpty()) "?" else {
+            val rest = stat.substringAfterLast(')').trim().split(Regex("\\s+"))
+            if (rest.size >= 20) rest[19] else "?"
+        }
+        val uid = try { android.system.Os.stat("/proc/" + pid).st_uid.toString() } catch (t: Throwable) { "?" }
+        val state = if (p.isAlive) "alive" else "exited rc=" + try { p.exitValue().toString() } catch (t: Throwable) { "?" }
+        return "[" + tag + " pid=" + pid + " " + state + " uid=" + uid + " (mine " + android.os.Process.myUid() + ") ticks=" + ticks + " cmd=" + cmd + "]"
+    }
+
+    private fun rejection(): String = " rejection=" + (XServer.lastBusCaptureRejection ?: "(none)")
+
+    /** Positive control for a shaped fake, verified on THE Process this
+     *  fixture spawned (never a wrapper race): its own /proc/<pid>/
+     *  cmdline has argv0 basename "sleep" (a real toybox applet, so the
+     *  process actually lives), the full cmdline carries [needleDir] via
+     *  the directory name, and it is still alive 2s after spawn - a
+     *  dying sh -c wrapper can transiently contain the needle; a
+     *  2-second-old sleep cannot. */
+    private fun assertShapedFakeAlive(p: Process, needleDir: String) {
+        val pid = pidOf(p)
+        Thread.sleep(2_000)
+        val cmd = try { File("/proc/" + pid + "/cmdline").readText().replace('\u0000', ' ').trim() }
+            catch (t: Throwable) { "" }
+        assertTrue("shaped fake must be alive 2s after spawn " + procSnapshot(p, "fake"), p.isAlive)
+        assertTrue("argv0 basename must be the real sleep applet, not a faked argv0: " + cmd,
+            cmd.split(' ').firstOrNull()?.substringAfterLast('/') == "sleep")
+        assertTrue("cmdline must carry the shape via the directory name: " + cmd,
+            cmd.contains(needleDir))
+    }
 
     private fun liveStartTicks(pid: Int): String {
         val stat = File("/proc/" + pid + "/stat").readText()
@@ -244,9 +311,20 @@ class ProotKillOnExitTest {
 
     @Test fun busCaptureRejectsMissingRecord() {
         saveBusRecordBoundary()
+        // Positive control FIRST: a live valid bus with a valid record
+        // CAPTURES - so the rejection below is the missing record alone.
+        val fake = spawnFakeBus(129)
+        assertShapedFakeAlive(fake, "dbus-daemon --fork --session")
+        validRecordFor(fake, "nonce-control")
+        assertTrue("positive control: valid record + live fake must capture " + procSnapshot(fake, "control") + rejection(),
+            XServer.captureSessionBusIdentityForTest(ctx, "nonce-control"))
+        // Mutation: remove ONLY our own record (same pid/ticks/uid/nonce
+        // stay valid). The saved boundary restores any pre-existing file
+        // after the fixture.
         busRecordFile().delete()
-        assertFalse("no creation record, no capture - never adopt any bus",
-            XServer.captureSessionBusIdentityForTest(ctx, "any-nonce"))
+        assertFalse("no creation record, no capture - never adopt any bus." + rejection(),
+            XServer.captureSessionBusIdentityForTest(ctx, "nonce-control"))
+        assertTrue("rejected bus must survive " + procSnapshot(fake, "fake"), fake.isAlive)
     }
 
     @Test fun busCaptureRejectsTickMismatchReuseInWindow() {
@@ -256,13 +334,18 @@ class ProotKillOnExitTest {
         // only the exact creation ticks expose the replacement.
         saveBusRecordBoundary()
         val fake = spawnFakeBus(130)
-        assertTrue(waitUntil(10_000) { findByCmdline("dbus-daemon --fork --session").isNotEmpty() })
+        assertShapedFakeAlive(fake, "dbus-daemon --fork --session")
         val pid = pidOf(fake)
+        // Positive control: exact live ticks + own uid + role + matching
+        // nonce MUST capture - otherwise the rejection below is vacuous.
+        validRecordFor(fake, "nonce-reuse")
+        assertTrue("positive control: launch-owned record must capture " + procSnapshot(fake, "control") + rejection(),
+            XServer.captureSessionBusIdentityForTest(ctx, "nonce-reuse"))
         val wrongTicks = (liveStartTicks(pid).toLong() + 1).toString()
         writeBusRecord(pid, wrongTicks, android.os.Process.myUid(), "nonce-reuse")
-        assertFalse("live ticks != creation record ticks: a reused pid is never adopted",
+        assertFalse("live ticks != creation record ticks: a reused pid is never adopted." + rejection(),
             XServer.captureSessionBusIdentityForTest(ctx, "nonce-reuse"))
-        assertTrue("rejected reused pid must survive (preserve, never kill)", fake.isAlive)
+        assertTrue("rejected reused pid must survive (preserve, never kill) " + procSnapshot(fake, "fake"), fake.isAlive)
     }
 
     @Test fun busCaptureRejectsNonceFromAnotherLaunch() {
@@ -270,30 +353,59 @@ class ProotKillOnExitTest {
         // but the caller's own launch logged a different nonce.
         saveBusRecordBoundary()
         val fake = spawnFakeBus(131)
-        assertTrue(waitUntil(10_000) { findByCmdline("dbus-daemon --fork --session").isNotEmpty() })
+        assertShapedFakeAlive(fake, "dbus-daemon --fork --session")
         validRecordFor(fake, "nonce-other-launch")
-        assertFalse("a record whose nonce is not THIS launch's is never adopted",
+        // Positive control: the record's OWN nonce captures - the
+        // rejection below must then be the nonce difference alone.
+        assertTrue("positive control: matching nonce must capture " + procSnapshot(fake, "control") + rejection(),
+            XServer.captureSessionBusIdentityForTest(ctx, "nonce-other-launch"))
+        assertFalse("a record whose nonce is not THIS launch's is never adopted." + rejection(),
             XServer.captureSessionBusIdentityForTest(ctx, "nonce-this-launch"))
-        assertTrue("rejected other-launch bus must survive", fake.isAlive)
+        assertTrue("rejected other-launch bus must survive " + procSnapshot(fake, "fake"), fake.isAlive)
     }
 
     @Test fun busCaptureRejectsNonBusRole() {
         saveBusRecordBoundary()
-        val fake = ProcessBuilder("/system/bin/sh", "-c", "sleep 133").start().also { spawned.add(it) }
-        Thread.sleep(500)
+        // Positive control FIRST: the SAME pid/record/ticks/uid/nonce
+        // with a valid bus role CAPTURES.
+        val fake = spawnFakeBus(133)
+        assertShapedFakeAlive(fake, "dbus-daemon --fork --session")
         validRecordFor(fake, "nonce-role")
-        assertFalse("an own-uid process without the dbus-daemon --session shape is not the session bus",
+        assertTrue("positive control: live valid bus must capture " + procSnapshot(fake, "control") + rejection(),
             XServer.captureSessionBusIdentityForTest(ctx, "nonce-role"))
-        assertTrue("rejected non-bus process must survive", fake.isAlive)
+        // Mutation A: deny ONLY the session-bus role binding for that
+        // same pid via the test seam - every other field stays valid.
+        XServer.denyBusRoleForTest(pidOf(fake))
+        assertFalse("a process denied the session-bus role is never adopted." + rejection(),
+            XServer.captureSessionBusIdentityForTest(ctx, "nonce-role"))
+        assertTrue("mutation A rejection must come from the seam: " + rejection(),
+            XServer.lastBusCaptureRejection?.contains("test seam") == true)
+        assertTrue("seam-rejected process must survive " + procSnapshot(fake, "fake"), fake.isAlive)
+        // Subcase B (the REAL cmdline parser, no seam): a plain live
+        // own-uid sleep with an otherwise-valid record - alive, exact
+        // live ticks, own uid, matching nonce; only the role shape is
+        // wrong. The seam above can never detect a broken real role
+        // check; this one must be rejected by the actual parser.
+        val plain = spawnShapedSleep("not-a-bus", 137)
+        assertShapedFakeAlive(plain, "not-a-bus")
+        validRecordFor(plain, "nonce-plain")
+        assertFalse("a live own-uid process without the session-bus shape is never adopted." + rejection(),
+            XServer.captureSessionBusIdentityForTest(ctx, "nonce-plain"))
+        assertTrue("subcase B rejection must come from the real role parser: " + rejection(),
+            XServer.lastBusCaptureRejection?.contains("session-bus shape") == true)
+        assertTrue("rejected plain process must survive " + procSnapshot(plain, "plain"), plain.isAlive)
     }
 
     @Test fun busCaptureOlderGenerationNeverOverwritesNewerWorld() {
         saveBusRecordBoundary()
         val fakeA = spawnFakeBus(134)
         val fakeB = spawnFakeBus(135)
-        assertTrue(waitUntil(10_000) { findByCmdline("dbus-daemon --fork --session").size >= 2 })
+        assertShapedFakeAlive(fakeA, "dbus-daemon --fork --session")
+        assertShapedFakeAlive(fakeB, "dbus-daemon --fork --session")
+        assertTrue("both fake buses must coexist " + procSnapshot(fakeA, "fakeA") + procSnapshot(fakeB, "fakeB"),
+            findByCmdline("dbus-daemon --fork --session").size >= 2)
         validRecordFor(fakeA, "nonce-a")
-        assertTrue("launch-owned record must capture",
+        assertTrue("launch-owned record must capture " + procSnapshot(fakeA, "fakeA") + rejection(),
             XServer.captureSessionBusIdentityForTest(ctx, "nonce-a"))
         // A NEWER world (generation far ahead) already holds bus B.
         val bIdent = XServer.PIdent(pidOf(fakeB), liveStartTicks(pidOf(fakeB)),
@@ -319,7 +431,7 @@ class ProotKillOnExitTest {
         val fake = spawnFakeBus(136)
         assertTrue(waitUntil(10_000) { findByCmdline("dbus-daemon --fork --session").isNotEmpty() })
         validRecordFor(fake, "nonce-owned")
-        assertTrue("a launch-owned record (exact live ticks, own uid, role, matching nonce) must capture",
+        assertTrue("a launch-owned record (exact live ticks, own uid, role, matching nonce) must capture " + procSnapshot(fake, "fake") + rejection(),
             XServer.captureSessionBusIdentityForTest(ctx, "nonce-owned"))
         // The identity-verified Stop must end the captured bus even with
         // no session root tracked (bus-ident-only teardown branch)...
@@ -353,7 +465,7 @@ class ProotKillOnExitTest {
         // the bus identity binds.
         XServer.mergeLaunchConfirmBusIdent(ctx, 0L, reused = true)
         val owned = "session_bus_ident=pid=" + pidOf(fake) + " "
-        assertTrue("originating-window confirm must bind the reused session's bus",
+        assertTrue("originating-window confirm must bind the reused session's bus " + procSnapshot(fake, "fake") + rejection(),
             XServer.diagnosticSnapshot(ctx).contains(owned))
         // The NEXT reuse call's own window holds no new launch: the
         // null capture must KEEP the retained identity.

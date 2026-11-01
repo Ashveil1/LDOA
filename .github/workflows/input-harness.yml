@@ -16,10 +16,10 @@ on:
   workflow_dispatch:
     inputs:
       lane:
-        description: 'full = autoenter setup + native + harness; native-only = skip GNOME setup, run NativeTerminalFakeRootTest alone'
+        description: 'full = autoenter setup + native + lifecycle + export + harness + KOE; native-only = full minus GNOME autoenter setup and harness (native + lifecycle + export + KOE, unchanged from before); koe-only = ProotKillOnExitTest fixtures alone (focused KOE qualification, no 48-test rerun)'
         default: 'full'
         type: choice
-        options: [full, native-only]
+        options: [full, native-only, koe-only]
 
 jobs:
   lorie-mouse-attribution:
@@ -83,29 +83,29 @@ jobs:
             # never completed in any run (blocked behind the harness stall); a
             # later harness wedge must not leave it unmeasured again.
             date -u +"NATIVE-FAKEROOT start %H:%M:%S"
-            timeout -s KILL 1500 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.NativeTerminalFakeRootTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-native.log | tail -15 || echo "NATIVE-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"
-            grep -q "OK (" /tmp/instr-native.log || touch /tmp/PHONELINUX_NATIVE_FAILED
+            if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then timeout -s KILL 1500 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.NativeTerminalFakeRootTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-native.log | tail -15 || echo "NATIVE-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"; else echo "native SKIPPED (lane=$LANE)" > /tmp/instr-native.log; fi
+            if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then grep -q "OK (" /tmp/instr-native.log || touch /tmp/PHONELINUX_NATIVE_FAILED; fi
             if [ -f /tmp/PHONELINUX_NATIVE_FAILED ]; then echo "NATIVE-DIAG survivors at bound:"; adb -s emulator-5554 shell "ps -A -o PID,PPID,ARGS" | grep -E "phonelinux|proot|bash|Xlorie" || true; adb -s emulator-5554 shell am force-stop dev.phonelinux.proto || true; fi
             # GNOME session lifecycle regression (retry-implies-stop, clobber
             # window, concurrent stops): cheap (sleep-process fakes, no
             # rootfs), always on, independently bounded.
             date -u +"LIFECYCLE start %H:%M:%S"
-            timeout -s KILL 300 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.GnomeSessionLifecycleTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-lifecycle.log | tail -8 || echo "LIFECYCLE-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"
-            grep -q "OK (" /tmp/instr-lifecycle.log || touch /tmp/PHONELINUX_LIFECYCLE_FAILED
+            if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then timeout -s KILL 300 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.GnomeSessionLifecycleTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-lifecycle.log | tail -8 || echo "LIFECYCLE-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"; else echo "lifecycle SKIPPED (lane=$LANE)" > /tmp/instr-lifecycle.log; fi
+            if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then grep -q "OK (" /tmp/instr-lifecycle.log || touch /tmp/PHONELINUX_LIFECYCLE_FAILED; fi
             # Diagnostics export + reuse-gate health (cheap, rootfs-free,
             # gates the user-facing ZIP export). Full output printed and
             # archived - no tail-only retention for gate classes.
             date -u +"EXPORT/REUSEGATE start %H:%M:%S"
-            timeout -s KILL 300 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.DiagnosticsExportTest,dev.phonelinux.proto.ReuseGateHealthTest,dev.phonelinux.proto.GnomeSessionScriptSafetyTest,dev.phonelinux.proto.GnomeRetryGateTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-export.log || echo "EXPORT-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"
-            grep -q "OK (" /tmp/instr-export.log || touch /tmp/PHONELINUX_EXPORT_FAILED
+            if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then timeout -s KILL 300 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.DiagnosticsExportTest,dev.phonelinux.proto.ReuseGateHealthTest,dev.phonelinux.proto.GnomeSessionScriptSafetyTest,dev.phonelinux.proto.GnomeRetryGateTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-export.log || echo "EXPORT-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"; else echo "export SKIPPED (lane=$LANE)" > /tmp/instr-export.log; fi
+            if [ "$LANE" = full ] || [ "$LANE" = native-only ]; then grep -q "OK (" /tmp/instr-export.log || touch /tmp/PHONELINUX_EXPORT_FAILED; fi
             date -u +"HARNESS arms start %H:%M:%S (lane=$LANE)"
             if [ "$LANE" = full ]; then timeout -s KILL 1500 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.LdoaInputHarnessTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr.log | tail -15 || echo "HARNESS-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"; else echo "harness SKIPPED (lane=$LANE)" > /tmp/instr.log; fi
             if [ "$LANE" = full ]; then grep -q "OK (" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED; fi
             if [ -f /tmp/PHONELINUX_TESTS_FAILED ]; then echo "HARNESS-DIAG survivors at bound:"; adb -s emulator-5554 shell "ps -A -o PID,PPID,ARGS" | grep -E "phonelinux|proot|nautilus|Xlorie|soffice" || true; adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/harness-owned-ledger.txt > harness-owned-ledger.txt 2>/dev/null || echo "LEDGER-PULL-FAILED rc=$? (ledger needs the test-side spawn-ledger patch)"; adb -s emulator-5554 shell am force-stop dev.phonelinux.proto || true; fi
             # kill-on-exit + identity-reset + bus-capture fixtures (cheap:
-            # /system/bin/sh fakes under the REAL vendored libproot.so, no
+            # toybox-symlink shaped fakes + the REAL vendored libproot.so, no
             # rootfs), always on, independently bounded. Exact count pinned:
-            # the class has 12 tests; a drift fails loudly here, never
+            # the class has 13 tests; a drift fails loudly here, never
             # silently passes.
             # PLACEMENT: after the harness arms. am instrument force-stops
             # the app per invocation (AOSP 14 AMS startInstrumentation), so

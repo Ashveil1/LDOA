@@ -234,14 +234,23 @@ object XServer {
      *  signal, so a replacement between capture and signal is never
      *  signaled. Never a by-name adoption of any bus. */
     private fun validatedSessionBusIdent(ctx: Context): PIdent? {
-        val rec = busIdentRecord(ctx) ?: return null
-        if (rec.uid != android.os.Process.myUid()) return null
-        val ident = identityOf(rec.pid) ?: return null
-        if (ident.start != rec.startTicks) return null
+        val rec = busIdentRecord(ctx)
+            ?: return null.also { lastBusCaptureRejection = "creation record missing or unparseable" }
+        if (rec.uid != android.os.Process.myUid())
+            return null.also { lastBusCaptureRejection = "record uid is not ours" }
+        val ident = identityOf(rec.pid)
+            ?: return null.also { lastBusCaptureRejection = "no live own-uid identity for the record pid" }
+        if (ident.start != rec.startTicks)
+            return null.also { lastBusCaptureRejection = "live start ticks differ from the creation record (pid reuse)" }
+        if (synchronized(ownershipLock) { deniedBusRolePidsForTest.contains(rec.pid) })
+            return null.also { lastBusCaptureRejection = "session-bus role denied by the test seam" }
         val cmd = try {
             File("/proc/" + rec.pid + "/cmdline").readText().replace('\u0000', ' ')
-        } catch (t: Throwable) { return null }
-        if (!(cmd.contains("dbus-daemon") && cmd.contains("--session"))) return null
+        } catch (t: Throwable) {
+            return null.also { lastBusCaptureRejection = "live cmdline unreadable" }
+        }
+        if (!(cmd.contains("dbus-daemon") && cmd.contains("--session")))
+            return null.also { lastBusCaptureRejection = "live cmdline is not the session-bus shape" }
         return ident
     }
 
@@ -270,10 +279,17 @@ object XServer {
      *  OWN logged nonce. Null - preserve, never kill - when the launch's
      *  nonce is unknown or any binding fails. */
     private fun captureOwnLaunchBusIdent(ctx: Context, logBase: Long): PIdent? {
-        val nonce = ownLaunchBusNonce(ctx, logBase) ?: return null
-        val rec = busIdentRecord(ctx) ?: return null
-        if (rec.nonce != nonce) return null
-        return validatedSessionBusIdent(ctx)
+        lastBusCaptureRejection = null
+        val nonce = ownLaunchBusNonce(ctx, logBase)
+            ?: return null.also { lastBusCaptureRejection = "no own-launch bus nonce line in window (base=" + logBase + ")" }
+        val rec = busIdentRecord(ctx)
+            ?: return null.also { lastBusCaptureRejection = "creation record missing or unparseable" }
+        if (rec.nonce != nonce)
+            return null.also { lastBusCaptureRejection = "record nonce does not match the launch-window nonce" }
+        val validated = validatedSessionBusIdent(ctx)
+        if (validated == null && lastBusCaptureRejection == null)
+            lastBusCaptureRejection = "record/live binding failed (uid, liveness, ticks, or bus role)"
+        return validated
     }
 
     /** Launch-confirm bus-identity merge: the capture is bound to the
@@ -324,18 +340,60 @@ object XServer {
      *  missing/ambiguous record, nonce mismatch, or reused pid = NOT
      *  captured (preserve, never kill). */
     internal fun captureSessionBusIdentityForTest(ctx: Context, expectedNonce: String): Boolean {
-        if (expectedNonce.isEmpty()) return false
+        lastBusCaptureRejection = null
+        if (expectedNonce.isEmpty()) return false.also { lastBusCaptureRejection = "empty expected nonce" }
         val genAtEntry = synchronized(ownershipLock) { ownershipGeneration }
-        val rec = busIdentRecord(ctx) ?: return false
-        if (rec.nonce != expectedNonce) return false
-        return assignBusIdentGuarded(validatedSessionBusIdent(ctx), genAtEntry)
+        val rec = busIdentRecord(ctx)
+            ?: return false.also { lastBusCaptureRejection = "creation record missing or unparseable" }
+        if (rec.nonce != expectedNonce)
+            return false.also { lastBusCaptureRejection = "record nonce does not match the expected nonce" }
+        val validated = validatedSessionBusIdent(ctx)
+        if (validated == null) {
+            if (lastBusCaptureRejection == null)
+                lastBusCaptureRejection = "record/live binding failed (uid, liveness, ticks, or bus role)"
+            return false
+        }
+        return assignBusIdentGuarded(validated, genAtEntry)
+            .also { if (!it) lastBusCaptureRejection = "generation guard: an older-generation capture never overwrites a newer world" }
     }
+
+    /** Test-only FULL ownership-state reset: the bus-ident @After clear
+     *  alone left retainedSessionFailed/sessionProcess/root identity/
+     *  gate flags leaking across fixture instances (shared statics in
+     *  one instrumentation process). App code never calls this. */
+    internal fun resetOwnershipStateForTest() = synchronized(ownershipLock) {
+        retainedSessionFailed = false
+        retainedSessionStarting = false
+        sessionGatePassed = false
+        lateWatchFor = null
+        sessionProcess = null
+        sessionRootIdent = null
+        sessionBusIdent = null
+        busIdentGeneration = 0L
+        sessionGateLogBase = 0L
+        lastBusCaptureRejection = null
+        deniedBusRolePidsForTest.clear()
+    }
+
+    /** Test-only seam: deny ONLY the session-bus role binding for one
+     *  pid, so the non-bus-role fixture mutates exactly one field of an
+     *  otherwise-valid capture (same pid, record, ticks, uid, nonce).
+     *  App code never calls this. */
+    private val deniedBusRolePidsForTest = mutableSetOf<Int>()
+    internal fun denyBusRoleForTest(pid: Int) =
+        synchronized(ownershipLock) { deniedBusRolePidsForTest.add(pid) }
 
     /** Test-only seam: set the STILL-STARTING retention flag directly
      *  (fixtures that simulate a retained starting session). App code
      *  never calls this. */
     internal fun setRetainedSessionStartingForTest(value: Boolean) =
         synchronized(ownershipLock) { retainedSessionStarting = value }
+
+    /** Test-only diagnostics: WHY the last bus-capture attempt rejected
+     *  (never WHAT to adopt - the binding rules above own that). Read by
+     *  the ProotKillOnExitTest fixtures to make rejection assertions
+     *  carry their actual reason. App code never reads this. */
+    @Volatile internal var lastBusCaptureRejection: String? = null
 
     /** Test-only seam: install a bus identity at an explicit generation
      *  (a simulated newer world) so the assignment guard can be exercised.
