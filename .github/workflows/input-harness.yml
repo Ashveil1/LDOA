@@ -74,8 +74,8 @@ jobs:
             # path stays a separate open qualification blocker (run
             # 40840614400: shell maps no UI cold); coverage NOT dropped.
             date -u +"SETUP auto-enter start %H:%M:%S (lane=$LANE)"
-            if [ "$LANE" = full ]; then adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.UbuntuDesktopAutoEnterTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr0.log | tail -8; else echo "autoenter SKIPPED (lane=$LANE)" > /tmp/instr0.log; fi
-            if [ "$LANE" = full ]; then grep -q "OK (" /tmp/instr0.log || touch /tmp/PHONELINUX_SETUP_FAILED; fi
+            if [ "$LANE" = full ] || [ "$LANE" = stop-intent-only ]; then adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.UbuntuDesktopAutoEnterTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr0.log | tail -8; else echo "autoenter SKIPPED (lane=$LANE)" > /tmp/instr0.log; fi
+            if [ "$LANE" = full ] || [ "$LANE" = stop-intent-only ]; then grep -q "OK (" /tmp/instr0.log || touch /tmp/PHONELINUX_SETUP_FAILED; fi
             date -u +"SETUP auto-enter end %H:%M:%S"
             if [ -f /tmp/PHONELINUX_SETUP_FAILED ]; then echo "AUTOENTER-SETUP-FAILED - arms not run"; exit 1; fi
             # EVIDENCE-ONLY harness: asserts bootstrap facts, logs/attaches

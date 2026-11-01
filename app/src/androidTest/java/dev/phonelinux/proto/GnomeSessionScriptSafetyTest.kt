@@ -298,10 +298,11 @@ class GnomeSessionScriptSafetyTest {
             script.contains("rm -f \"/tmp/xdg/ldoa-stop-intent"))
         assertTrue("retained-intent rationale must be documented in the script",
             script.contains("NO reader ever deletes the intent file"))
-        assertFalse("the observer join must be bounded - a bare wait could sit up to the 600s observer cap",
-            script.contains("wait \$WATCHDOG_PID"))
-        assertTrue("bounded observer join must exist",
-            script.contains("Bounded observer join"))
+        val honorFn = script.substringAfter("honor_owned_stop() {").substringBefore("\n}")
+        assertFalse("the honor path must not bare-wait the observer (could sit up to the 600s cap)",
+            honorFn.contains("wait \$WATCHDOG_PID"))
+        assertTrue("bounded observer join must exist in the honor path",
+            honorFn.contains("Bounded observer join"))
     }
 
     /** The control nonce is compared, never logged, and the check binds
