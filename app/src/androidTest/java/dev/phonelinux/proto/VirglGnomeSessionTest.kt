@@ -37,9 +37,11 @@ import java.io.File
  *    EACCES on this emulator, so UNKNOWN is expected here).
  *  - PRESENTATION: mechanical capture only (unique-per-invocation xwd
  *    path with absence-then-freshness binding; else the shot pipeline
- *    with the CI-side artifact-arrival gate). The test asserts only
- *    mechanical success; REVIEWER-VERIFIED presentation stays PENDING
- *    until the artifact image is inspected for the intended X desktop.
+ *    gated on capture-target IDENTITY - component/surface/content axes,
+ *    content = existence corroboration only - plus the CI-side
+ *    artifact-arrival gate). The test asserts only mechanical success;
+ *    REVIEWER-VERIFIED presentation stays PENDING until the artifact
+ *    image is inspected for the intended X desktop.
  *  - STOP-CLEANUP: structured worker capture on the SESSION's render
  *    server, owned stop, identity-matched stop-return sampling,
  *    tri-state post checks.
@@ -70,30 +72,37 @@ class VirglGnomeSessionTest {
 
     /**
      * Capture-target IDENTITY for the shot-pipeline fallback: make the X
-     * view foreground and PROVE the display shows THIS session's desktop on
-     * three independent axes before any capture:
+     * view foreground and PROVE the display shows THIS session's desktop
+     * before any capture, on three axes with INDEPENDENT failure modes:
      *   component: the focused window is com.termux.x11.MainActivity
      *     (component-level, not package: the same package could be showing
      *     a loading or error screen);
-     *   surface: the Lorie renderer has bound a real window at/after this
-     *     attach (gles-renderer "rendererSetWindow 0x<nonzero> W H" with
-     *     W,H > 0 - the bind/teardown marker observed in this lane, run
-     *     41331931845: bind 17:51:55.801, teardown 17:54:22.362);
-     *   content: THIS generation's X display :0 answers and has mapped
-     *     client windows (xwininfo -root -children via the guest, same
-     *     socket bind the harness uses) - an Android-side loading/error
-     *     screen has no such windows.
-     * Grounded activity behavior (vendored MainActivity.java onCreate):
-     * the activity is VIEW-ONLY - it spawns no X server and no session
-     * (the server is XServer.start's app_process CmdEntryPoint; the
-     * session is launchOrReuseGnomeSession) - so attaching it preserves
-     * the current session generation; this function never calls
-     * launchOrReuseGnomeSession. Fails closed with the missing element
-     * named; all raw evidence is recorded in the summary either way.
+     *   surface: the LATEST gles-renderer rendererSetWindow event FOR THIS
+     *     APP PROCESS at/after this attach is a real bind (0x<nonzero>,
+     *     W,H > 0) - a later 0x0 teardown invalidates an earlier bind, and
+     *     another process's renderer lines never qualify (the lane's
+     *     observed bind/teardown marker: run 41331931845 bind 17:51:55.801,
+     *     teardown 17:54:22.362);
+     *   content: THIS generation's :0 answers xwininfo -root -children and
+     *     has client windows - EXISTENCE corroboration ONLY, never
+     *     mapped/viewable proof; the reviewer pixel inspection stays the
+     *     decisive presentation check.
+     * Independently cached positives can drift apart, so CURRENT focus,
+     * CURRENT surface state and CURRENT session liveness/generation are
+     * re-sampled after dialog dismissal, immediately before the capture;
+     * every raw dump tail is preserved in the failure evidence on
+     * timeout/failure. Grounded activity behavior (vendored
+     * MainActivity.java onCreate): the activity is VIEW-ONLY - it spawns
+     * no X server and no session (server = XServer.start's app_process
+     * CmdEntryPoint; session = launchOrReuseGnomeSession) - and this
+     * helper never calls launchOrReuseGnomeSession, so the current
+     * session generation is untouched. Fails closed with the missing
+     * element named.
      */
-    private fun establishDesktopCaptureIdentity(launchId: String, rootfs: File): CaptureIdentity {
+    private fun establishDesktopCaptureIdentity(launchId: String, rootfs: File, gsPid: Int): CaptureIdentity {
         val instr = InstrumentationRegistry.getInstrumentation()
         val device = androidx.test.uiautomator.UiDevice.getInstance(instr)
+        val appPid = android.os.Process.myPid()
         val attachAt = System.currentTimeMillis()
         ctx.startActivity(
             android.content.Intent(ctx, com.termux.x11.MainActivity::class.java)
@@ -102,22 +111,20 @@ class VirglGnomeSessionTest {
         var rendererLine = ""
         var childCount = -1
         var treeTail = ""
+        var focusRawTail = ""
+        var rendererRawTail = ""
         val deadline = attachAt + 180_000
         while (System.currentTimeMillis() < deadline) {
             if (focusLine.isEmpty()) {
                 val f = device.executeShellCommand(
                     "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'").trim()
-                if (f.contains("com.termux.x11.MainActivity")) focusLine = f.replace('\n', ' ').take(300)
+                focusRawTail = f.replace('\n', ' ').take(300)
+                if (f.contains("com.termux.x11.MainActivity")) focusLine = focusRawTail
             }
             if (rendererLine.isEmpty()) {
                 val r = device.executeShellCommand("logcat -d -v threadtime -t 800 -s gles-renderer:D")
-                rendererLine = r.lineSequence().mapNotNull { line ->
-                    val m = Regex("""rendererSetWindow 0x([0-9a-f]+) (\d+) (\d+)""").find(line)
-                    val ts = parseLogcatThreadtimeTs(line)
-                    if (m != null && ts != null && m.groupValues[1] != "0" &&
-                        m.groupValues[2].toInt() > 0 && m.groupValues[3].toInt() > 0 &&
-                        ts >= attachAt - 2_000) line.trim() else null
-                }.lastOrNull() ?: ""
+                rendererRawTail = r.lineSequence().toList().takeLast(3).joinToString(" | ").take(300)
+                rendererLine = latestOwnRendererBind(r, appPid, attachAt)
             }
             if (childCount < 0) {
                 val t = Proot.runGuest(ctx, rootfs,
@@ -126,7 +133,8 @@ class VirglGnomeSessionTest {
                     timeoutMs = 60_000)
                 treeTail = t.stdout.trim()
                 // Header lines start with "xwininfo:"/"Root"/"Parent"; only
-                // mapped CLIENT window lines start (after indent) with 0x.
+                // CLIENT window lines start (after indent) with 0x.
+                // Existence corroboration only - NOT mapped/viewable proof.
                 val children = treeTail.lineSequence()
                     .count { it.trimStart().startsWith("0x") }
                 if (t.exitCode == 0 && children >= 1) childCount = children
@@ -136,17 +144,63 @@ class VirglGnomeSessionTest {
         }
         Shot.dismissSystemDialogs(device)
         device.waitForIdle(2_000)
-        val ok = focusLine.isNotEmpty() && rendererLine.isNotEmpty() && childCount >= 0
+        // CURRENT-state re-sample immediately before any capture: focus can
+        // change during dismissal, the surface can tear down after an
+        // earlier bind, the session can die or a new generation can start.
+        val focusNow = device.executeShellCommand(
+            "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'").trim()
+        val focusNowOk = focusNow.contains("com.termux.x11.MainActivity")
+        val surfaceNow = latestOwnRendererBind(
+            device.executeShellCommand("logcat -d -v threadtime -t 800 -s gles-renderer:D"),
+            appPid, attachAt)
+        val sessionAliveNow = File("/proc/" + gsPid).isDirectory
+        val generationNow = XServer.currentLaunchIdForTest()
+        val generationOk = generationNow == launchId
+        val ok = focusLine.isNotEmpty() && rendererLine.isNotEmpty() && childCount >= 0 &&
+            focusNowOk && surfaceNow.isNotEmpty() && sessionAliveNow && generationOk
         val summary = "launchId=" + launchId +
-            " focus=[" + (if (focusLine.isEmpty()) "MISSING" else focusLine) + "]" +
-            " surface=[" + (if (rendererLine.isEmpty()) "MISSING" else rendererLine.take(200)) + "]" +
-            " sessionWindows=" + (if (childCount < 0) "MISSING" else childCount.toString()) +
+            " focusEver=[" + (if (focusLine.isEmpty()) "MISSING" else focusLine) + "]" +
+            " surfaceEver=[" + (if (rendererLine.isEmpty()) "MISSING" else rendererLine.take(200)) + "]" +
+            " sessionClientWindows=" + (if (childCount < 0) "MISSING" else childCount.toString()) +
+            " (existence corroboration, not viewability proof)" +
+            " | at-capture: focusNow=" + focusNowOk + " surfaceNow=" + surfaceNow.isNotEmpty() +
+            " sessionAliveNow=" + sessionAliveNow + " generationNow=" + generationNow +
             " (attachAt=" + attachAt + ", 180s bound)"
-        val failure = "focusFound=" + focusLine.isNotEmpty() +
-            " surfaceBound=" + rendererLine.isNotEmpty() +
-            " sessionWindows=" + childCount +
+        val failure = "focusEver=" + focusLine.isNotEmpty() +
+            " surfaceEver=" + rendererLine.isNotEmpty() +
+            " sessionClientWindows=" + childCount +
+            " focusNow=" + focusNowOk + " surfaceNow=" + surfaceNow.isNotEmpty() +
+            " sessionAliveNow=" + sessionAliveNow + " generationNow=" + generationNow +
+            " | focusRaw=[" + focusRawTail + "] rendererRaw=[" + rendererRawTail + "]" +
             " treeTail=[" + treeTail.replace('\n', ' ').take(300) + "]"
         return CaptureIdentity(ok, summary, failure)
+    }
+
+    /**
+     * The LATEST rendererSetWindow event for OUR app process at/after
+     * sinceMs decides: returns the bind line when that event is a real
+     * bind (nonzero pointer, W,H > 0), "" when the latest event is a
+     * teardown (0x0 0 0) or no own fresh event exists. Other processes'
+     * renderer lines are excluded by pid match on the threadtime prefix.
+     */
+    private fun latestOwnRendererBind(dump: String, appPid: Int, sinceMs: Long): String {
+        var best: String? = null
+        var bestTs = -1L
+        var bestBound = false
+        dump.lineSequence().forEach { line ->
+            val m = Regex("""rendererSetWindow 0x([0-9a-f]+) (\d+) (\d+)""").find(line) ?: return@forEach
+            val ts = parseLogcatThreadtimeTs(line) ?: return@forEach
+            val pidm = Regex("""^\d\d-\d\d \d\d:\d\d:\d\d\.\d\d\d\s+(\d+)\s""").find(line)
+                ?: return@forEach
+            if (pidm.groupValues[1].toInt() != appPid) return@forEach
+            if (ts < sinceMs - 2_000) return@forEach
+            if (ts >= bestTs) {
+                bestTs = ts
+                bestBound = m.groupValues[1] != "0" && m.groupValues[2].toInt() > 0 && m.groupValues[3].toInt() > 0
+                best = line.trim()
+            }
+        }
+        return if (best != null && bestBound) best!! else ""
     }
 
     private fun parseLogcatThreadtimeTs(line: String): Long? {
@@ -527,7 +581,7 @@ class VirglGnomeSessionTest {
                 // force-stop had removed the X activity) and a structure-only
                 // pixel reading misqualified it. The WORKFLOW still gates
                 // that the screenshot actually lands in the artifact.
-                val ident = establishDesktopCaptureIdentity(launchId!!, rootfs)
+                val ident = establishDesktopCaptureIdentity(launchId!!, rootfs, gsPid)
                 out.append("capture-identity: ").append(ident.summary).append('\n')
                 assertTrue("capture-target identity NOT established - " + ident.failure, ident.ok)
                 Shot.save("virgl-session-desktop")
