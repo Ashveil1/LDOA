@@ -118,6 +118,7 @@ jobs:
             timeout -s KILL 300 adb -s emulator-5554 shell am instrument -w -e class dev.phonelinux.proto.ProotKillOnExitTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-koe.log | tail -10 || echo "KOE-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"
             grep -q "OK (13 tests)" /tmp/instr-koe.log || touch /tmp/PHONELINUX_KOE_FAILED
             timeout 60 adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/guest-gnome.log > guest-gnome.log || echo "GNOME-LOG-PULL-FAILED rc=$?"
+            timeout 60 adb -s emulator-5554 exec-out run-as dev.phonelinux.proto cat files/phantom-snapshots.log > phantom-snapshots.log || echo "PHANTOM-SNAPSHOTS-PULL-FAILED rc=$?"
             timeout 60 adb -s emulator-5554 logcat -d > /tmp/shotlog.txt || true
             python3 .github/scripts/extract_shots.py /tmp/shotlog.txt screenshots || true
             python3 .github/scripts/extract_shots.py /tmp/instr.log screenshots || true
@@ -139,6 +140,7 @@ jobs:
             screenshots/
             guest-gnome.log
             harness-owned-ledger.txt
+            phantom-snapshots.log
             /tmp/shotlog.txt
             /tmp/instr0.log
             /tmp/instr-native.log

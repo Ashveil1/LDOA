@@ -100,6 +100,26 @@ class LdoaInputHarnessTest {
             .edit().putString("touchMode", "3").apply()
         XServer.start(ctx)
         val proc = XServer.launchOrReuseGnomeSession(ctx, d, rootfs)
+        // Phantom-pressure diagnostic (approved one-run scope, test-only):
+        // sample every 5s from session spawn so a trim can be correlated
+        // with the roster that triggered it. Sampler spawns one own-uid
+        // marker per sample (counted and labeled in its output) and shell-
+        // uid dump commands (not app phantoms); it never runs guest proot.
+        val samplerStop = java.util.concurrent.atomic.AtomicBoolean(false)
+        val samplerEnd = System.currentTimeMillis() + 780_000 // inside the 1500s outer bound
+        val samplerThread = kotlin.concurrent.thread(name = "phantom-sampler", isDaemon = true) {
+            var n = 0
+            while (!samplerStop.get() && System.currentTimeMillis() < samplerEnd) {
+                try {
+                    PhantomSampler.sample(androidx.test.uiautomator.UiDevice.getInstance(
+                        InstrumentationRegistry.getInstrumentation()), "periodic-" + n)
+                } catch (t: Throwable) {
+                    Log.i(TAG, "harness: sampler periodic-" + n + " failed rc=exception: " + t.message)
+                }
+                n++
+                Thread.sleep(5_000)
+            }
+        }
         val ledger = java.io.File(ctx.filesDir, "harness-owned-ledger.txt")
         fun ledgerNote(tag: String, pr: Process) {
             val pid = try {
@@ -714,6 +734,10 @@ class LdoaInputHarnessTest {
             "arm7=text selection (best-effort pixel), arm8=legacy xev DELIVERY-only; " +
             "LDOA-2FTAP-FIRE logcat deltas corroborate injection in arm3/arm8")
         } finally {
+            // Stop the pressure sampler before teardown: its marker spawn
+            // must not inflate the post-teardown survivor record.
+            samplerStop.set(true)
+            try { samplerThread.join(20_000) } catch (t: Throwable) { }
             // Owned-only teardown, best-effort, identity-revalidated through
             // the ledger: stop the session THIS test started via the product
             // calls (the product singleton trees are this test's here), then
