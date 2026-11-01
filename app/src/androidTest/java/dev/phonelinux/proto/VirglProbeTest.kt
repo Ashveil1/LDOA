@@ -211,15 +211,12 @@ class VirglProbeTest {
 
                 if (liveWorkers.isNotEmpty()) {
                     // Stop WITH an observed worker: the owned
-                    // stop-with-client path is genuinely exercised.
+                    // stop-with-client path is genuinely exercised. The
+                    // stop OUTCOME is asserted only after the bounded
+                    // probe join below (run 41320469908: a worker-dead
+                    // assertion here fired before the join and destroyed
+                    // the collected probe evidence) - evidence first.
                     XServer.stopVirglServerForTest("probe-stop-with-client")
-                    assertTrue("virgl server still alive as captured identity after stop",
-                        !VirglTestCommon.aliveAs(ident))
-                    for (w in liveWorkers) {
-                        val obs = VirglTestCommon.obsOf(w.pid)
-                        assertTrue("virgl worker " + w.pid + " still running after stop (state=" +
-                            (obs?.state ?: "gone") + ")", obs == null || obs.state == "Z")
-                    }
                     diag.append("stop-path: WITH observed worker(s) ")
                         .append(liveWorkers.map { it.pid }).append('\n')
                 } else {
@@ -228,14 +225,25 @@ class VirglProbeTest {
                 // Bounded join EITHER WAY: the probe's own runGuest timeout
                 // (25s hold + 20s boot budget) bounds the guest; on timeout
                 // the Result still carries partial stdout/stderr with the
-                // stage breadcrumbs localizing where the guest hung.
+                // stage breadcrumbs localizing where the guest hung. A
+                // completed probe writes its full report from inside the
+                // thread (runProbeArm), so after this join the evidence is
+                // on disk no matter what the stop assertions below find.
                 t.join(70_000)
                 diag.append("probe-thread-alive-after-join: ").append(t.isAlive)
                     .append(" thread-err: ").append(virglErr?.toString() ?: "none").append('\n')
                 if (liveWorkers.isEmpty()) {
                     XServer.stopVirglServerForTest("probe-stop-no-observed-worker")
-                    assertTrue("virgl server still alive as captured identity after stop",
-                        !VirglTestCommon.aliveAs(ident))
+                }
+                // Stop-outcome assertions run only AFTER the probe evidence
+                // is collected: a leaked worker still fails the arm loudly,
+                // but can no longer destroy the renderer outcome.
+                assertTrue("virgl server still alive as captured identity after stop",
+                    !VirglTestCommon.aliveAs(ident))
+                for (w in liveWorkers) {
+                    val obs = VirglTestCommon.obsOf(w.pid)
+                    assertTrue("virgl worker " + w.pid + " still running after stop (state=" +
+                        (obs?.state ?: "gone") + ")", obs == null || obs.state == "Z")
                 }
                 assertTrue("virpipe probe thread did not finish within bound: " + virglErr,
                     virglErr == null && virglResult != null)

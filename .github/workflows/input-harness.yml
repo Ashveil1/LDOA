@@ -217,4 +217,5 @@ jobs:
             virgl-smoke.txt
             virgl-probe-default.txt
             virgl-probe-virpipe.txt
+            virgl-probe-nofork.txt
             virgl-server.log
