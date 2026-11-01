@@ -1,0 +1,92 @@
+diff --git a/src/vrend/vrend_winsys_egl.c b/src/vrend/vrend_winsys_egl.c
+index 4ddcd0d..fadd231 100644
+--- a/src/vrend/vrend_winsys_egl.c
++++ b/src/vrend/vrend_winsys_egl.c
+@@ -103,6 +103,8 @@ struct virgl_egl {
+    EGLDisplay egl_display;
+    EGLConfig egl_conf;
+    EGLContext egl_ctx;
++   EGLSurface egl_surf;   /* 1x1 pbuffer when the display lacks surfaceless */
++   bool use_pbuffer;
+    uint32_t extension_bits;
+    EGLSyncKHR signaled_fence;
+    bool different_gpu;
+@@ -186,10 +188,18 @@ static bool virgl_egl_add_extensions(struct virgl_egl *egl, const char *extensio
+    return virgl_egl_get_funcs(egl);
+ }
+ 
+-static bool virgl_egl_check_extensions(struct virgl_egl *egl)
++static bool virgl_egl_check_extensions(struct virgl_egl *egl, bool surfaceless)
+ {
+-   if (!has_bits(egl->extension_bits, EGL_KHR_SURFACELESS_CONTEXT | EGL_KHR_CREATE_CONTEXT)) {
+-      virgl_error("Missing EGL_KHR_surfaceless_context or EGL_KHR_create_context\n");
++   if (!has_bit(egl->extension_bits, EGL_KHR_CREATE_CONTEXT)) {
++      virgl_error("Missing EGL_KHR_create_context\n");
++      return false;
++   }
++   if (surfaceless && !has_bit(egl->extension_bits, EGL_KHR_SURFACELESS_CONTEXT)) {
++      virgl_warn("EGL_KHR_surfaceless_context missing - using a 1x1 pbuffer surface instead\n");
++      egl->use_pbuffer = true;
++   }
++   if (!surfaceless && !has_bit(egl->extension_bits, EGL_KHR_SURFACELESS_CONTEXT)) {
++      virgl_error("Missing EGL_KHR_surfaceless_context\n");
+       return false;
+    }
+ 
+@@ -403,7 +413,7 @@ struct virgl_egl *virgl_egl_init(EGLNativeDisplayType display_id, bool surfacele
+    if (!virgl_egl_add_extensions(egl, extensions))
+       goto fail;
+ 
+-   if (!virgl_egl_check_extensions(egl))
++   if (!virgl_egl_check_extensions(egl, surfaceless))
+       goto fail;
+ 
+    if (gles)
+@@ -424,7 +434,17 @@ struct virgl_egl *virgl_egl_init(EGLNativeDisplayType display_id, bool surfacele
+    if (!egl->egl_ctx)
+       goto fail;
+ 
+-   eglMakeCurrent(egl->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
++   EGLSurface init_surf = EGL_NO_SURFACE;
++   if (egl->use_pbuffer) {
++      static const EGLint surf_att[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
++      egl->egl_surf = eglCreatePbufferSurface(egl->egl_display, egl->egl_conf, surf_att);
++      if (!egl->egl_surf) {
++         virgl_error("Failed to create the 1x1 pbuffer fallback surface\n");
++         goto fail;
++      }
++      init_surf = egl->egl_surf;
++   }
++   eglMakeCurrent(egl->egl_display, init_surf, init_surf,
+                   egl->egl_ctx);
+ 
+    if (virgl_egl_supports_fences(egl)) {
+@@ -453,6 +473,8 @@ void virgl_egl_destroy(struct virgl_egl *egl)
+    }
+    eglMakeCurrent(egl->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                   EGL_NO_CONTEXT);
++   if (egl->egl_surf)
++      eglDestroySurface(egl->egl_display, egl->egl_surf);
+    eglDestroyContext(egl->egl_display, egl->egl_ctx);
+    eglTerminate(egl->egl_display);
+    free(egl);
+@@ -601,7 +623,7 @@ struct virgl_egl *virgl_egl_init_external(EGLDisplay egl_display)
+    if (!virgl_egl_add_extensions(egl, extensions))
+       goto fail;
+ 
+-   if (!virgl_egl_check_extensions(egl))
++   if (!virgl_egl_check_extensions(egl, false))
+       goto fail;
+ 
+ #ifdef ENABLE_GBM
+@@ -648,8 +670,9 @@ void virgl_egl_destroy_context(struct virgl_egl *egl, virgl_renderer_gl_context
+ int virgl_egl_make_context_current(struct virgl_egl *egl, virgl_renderer_gl_context virglctx)
+ {
+    EGLContext egl_ctx = (EGLContext)virglctx;
++   EGLSurface surf = egl->egl_surf ? egl->egl_surf : EGL_NO_SURFACE;
+ 
+-   return eglMakeCurrent(egl->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
++   return eglMakeCurrent(egl->egl_display, surf, surf,
+                          egl_ctx) ? 0 : -1;
+ }
+ 

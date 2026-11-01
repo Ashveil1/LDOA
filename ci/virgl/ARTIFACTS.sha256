@@ -1,2 +1,2 @@
-e6ccc37f5efb5601b4ab79e870d637e046dd8bb829ac73e4d44ba945f0ae2f57  app/src/main/jniLibs/arm64-v8a/libvirgl_test_server.so
-644c6ca61c2e031f69b8e89e1eafa512053809d35358e89cdd60c33c1d1b34c7  app/src/main/jniLibs/x86_64/libvirgl_test_server.so
+b52d760dd7ea85f1b9bd4b3603412132277d67c835ad5b4e08d2af754332ca73  app/src/main/jniLibs/arm64-v8a/libvirgl_test_server.so
+2f1767f0a9cc1537675a1eda765fcf84a02b01522d4d0973ca34da3a24c7ad49  app/src/main/jniLibs/x86_64/libvirgl_test_server.so

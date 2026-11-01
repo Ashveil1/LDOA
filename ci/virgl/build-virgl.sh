@@ -35,7 +35,7 @@ fi
   || { echo "ERROR: Android NDK not found (set ANDROID_NDK_HOME)"; exit 1; }
 TC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
 
-for t in meson ninja pkg-config curl sha256sum tar python3; do
+for t in meson ninja pkg-config patch curl sha256sum tar python3; do
   command -v "$t" >/dev/null 2>&1 || { echo "ERROR: missing tool: $t"; exit 1; }
 done
 
@@ -86,6 +86,25 @@ echo "== download pinned sources"
 curl -sSL -o vr.tar.gz "https://gitlab.freedesktop.org/virgl/virglrenderer/-/archive/virglrenderer-$VR_VERSION/virglrenderer-virglrenderer-$VR_VERSION.tar.gz"
 echo "$VR_SHA256  vr.tar.gz" | sha256sum -c -
 tar xzf vr.tar.gz
+
+# Patches (ci/virgl/patches/, applied in order):
+#   0001-do-not-use-gbm.patch - termux-packages virglrenderer-android
+#     (MIT, packages/virglrenderer-android @ termux c772c595b2, same
+#     1.3.0 pin + SHA-256): with_host_android enables have_egl without
+#     gbm/libdrm (absent on the NDK) and routes vrend_winsys_init's EGL
+#     branch to the Android virgl_egl_init(EGLNativeDisplayType) variant
+#     under __ANDROID__. WITHOUT it have_egl=false and the EGL winsys is
+#     compiled OUT - the binary can only fail with "EGL is not supported
+#     on this platform" (run 41316351369).
+#   0002-egl-pbuffer-fallback.patch - own (same MIT terms as upstream):
+#     capability-checked 1x1 pbuffer surface when the display lacks
+#     EGL_KHR_surfaceless_context (Android emulator SwiftShader case,
+#     measured by ci/virgl/hostprobe.c); EGL_KHR_create_context stays
+#     required; non-surfaceless callers are unchanged.
+for p in "$OLDPWD/ci/virgl/patches/"*.patch; do
+  echo "== applying $(basename "$p")"
+  patch -d "virglrenderer-virglrenderer-$VR_VERSION" -p1 < "$p"
+done
 curl -sSL -o epoxy.tar.gz "https://github.com/anholt/libepoxy/archive/refs/tags/$EPOXY_VERSION.tar.gz"
 echo "$EPOXY_SHA256  epoxy.tar.gz" | sha256sum -c -
 tar xzf epoxy.tar.gz

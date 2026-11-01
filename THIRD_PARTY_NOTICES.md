@@ -50,6 +50,13 @@
 - License: MIT (COPYING in the verified tarball; notice retained here and in the built artifact directory)
 - Built for Android with NDK clang, EGL-only (-Dplatforms=egl -Dvenus=false), static libepoxy.
 
+## virglrenderer Android build patch (termux-packages)
+- Source: https://github.com/termux/termux-packages/tree/master/packages/virglrenderer-android
+- Pinned: commit c772c595b2 (packages/virglrenderer-android), 0001-do-not-use-gbm.patch only
+- License: MIT (termux-packages is MIT; the patch carries its own copyright header)
+- Location: ci/virgl/patches/0001-do-not-use-gbm.patch (applied at build time by ci/virgl/build-virgl.sh)
+- Purpose: enables virglrenderer's EGL winsys on Android without GBM/libdrm.
+
 ## libepoxy (statically linked into the virgl_test_server artifact)
 - Source: https://github.com/anholt/libepoxy
 - Pinned: 1.5.10, SHA-256 a7ced37f4102b745ac86d6a70a9da399cc139ff168ba6b8002b4d8d43c900c15

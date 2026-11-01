@@ -8,9 +8,15 @@ emulator results are NOT Adreno results; no phone testing access.
 ## Contract (all facts verified from source or binaries, 2026-11-01)
 
 Host (Android app process):
-- virgl_test_server from virglrenderer 1.3.0 (MIT), built EGL-only
-  (-Dplatforms=egl, -Dvenus=false - GL-only bounded spike) with static
-  libepoxy 1.5.10 (MIT, -Degl=yes -Dglx=no -Dx11=false). It renders via the
+- virgl_test_server from virglrenderer 1.3.0 (MIT), GL-only bounded spike
+  (-Dvenus=false) with static libepoxy 1.5.10 (MIT, -Degl=yes -Dglx=no
+  -Dx11=false). Stock 1.3.0 compiles its EGL winsys only with GBM/libdrm,
+  which Android lacks, so two patches are applied at build time (see
+  ci/virgl/patches/): 0001 enables the EGL path for __ANDROID__
+  (termux-packages, MIT, provenance in THIRD_PARTY_NOTICES.md); 0002 (own)
+  adds a 1x1 pbuffer fallback when the host EGL lacks
+  EGL_KHR_surfaceless_context (Android emulator case; EGL_KHR_create_context
+  remains required and is still hard-checked). It renders via the
   SYSTEM libEGL/libGLESv2 = the phone's real GLES driver (Adreno on the
   POCO M7 4G). Launch shape: virgl_test_server --use-egl-surfaceless
   --use-gles --socket-path <path> (flags verified in vtest/vtest_server.c
