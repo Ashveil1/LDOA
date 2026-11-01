@@ -279,6 +279,29 @@ if { [ "$LANE" = full ] || [ "$LANE" = session ]; } && [ -s virgl-session.txt ] 
   fi
 fi
 
+# XCONTROL check-drawing arm (lane=xcontrol ONLY): simple server-root
+# control - the vendored server draws a known RGB square pattern into
+# the root pixmap itself (-check-drawing; no guest clients at all).
+# Results constrain hypotheses about THIS simple path ONLY: a visible
+# pattern does not prove the GNOME compositor/GL path presents, and an
+# absent pattern does not establish a presentation defect (invalid
+# control, injection/layout/timing remain candidates). No rootfs or
+# provisioning needed; own instrument invocation (force-stops per AOSP,
+# so no server reuse across arms) and the arm tears down its own server
+# by verified identity.
+if [ "$LANE" = xcontrol ]; then
+  date -u +"XCONTROL check-drawing arm start %H:%M:%S"
+  timeout -s KILL 300 adb -s "$SERIAL" shell am instrument -w -e class dev.phonelinux.proto.XServerCheckDrawingTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-xcontrol.log | tail -10 || echo "XCONTROL-INSTR-TIMEOUT: outer 300s bound hit - instrument never returned"
+  grep -q "OK (1 tests)" /tmp/instr-xcontrol.log || touch /tmp/PHONELINUX_XCONTROL_FAILED
+  pull_or_absent xcontrol-check-drawing.txt xcontrol-check-drawing.txt 60 "XCONTROL-HARVEST"
+  if [ ! -s xcontrol-check-drawing.txt ]; then
+    echo "XCONTROL-EVIDENCE-MISSING xcontrol-check-drawing.txt (absent, empty, or remote cat error captured)"
+    touch /tmp/PHONELINUX_XCONTROL_FAILED
+  fi
+else
+  echo "xcontrol SKIPPED (lane=$LANE)" > /tmp/instr-xcontrol.log
+fi
+
 # kill-on-exit + identity-reset + bus-capture fixtures (cheap:
 # toybox-symlink shaped fakes + the REAL vendored libproot.so, no rootfs),
 # always on, independently bounded. Exact count pinned: the class has 13
@@ -308,6 +331,11 @@ find screenshots -type f | sort || true
 if { [ "$LANE" = full ] || [ "$LANE" = session ]; } && [ -s virgl-session.txt ] && grep -q "shot pipeline" virgl-session.txt; then
   ls screenshots/ 2>/dev/null | grep -q "virgl-session-desktop" || { echo "VIRGL-SESSION-SHOT-MISSING: shot-pipeline fallback claimed but no screenshot landed"; touch /tmp/PHONELINUX_VIRGL_SESSION_FAILED; }
 fi
+# Same honesty for the xcontrol arm: a recorded shot-pipeline capture
+# must land the screenshot.
+if [ "$LANE" = xcontrol ] && [ -s xcontrol-check-drawing.txt ] && grep -q "shot pipeline" xcontrol-check-drawing.txt; then
+  ls screenshots/ 2>/dev/null | grep -q "xcontrol-check-drawing" || { echo "XCONTROL-SHOT-MISSING: shot-pipeline capture claimed but no screenshot landed"; touch /tmp/PHONELINUX_XCONTROL_FAILED; }
+fi
 
 if [ -f /tmp/PHONELINUX_LIFECYCLE_FAILED ]; then echo "LIFECYCLE-FAILED-OR-TIMEOUT"; fi
 if [ -f /tmp/PHONELINUX_KOE_FAILED ]; then echo "KOE-FIXTURES-FAILED-OR-TIMEOUT"; fi
@@ -321,3 +349,5 @@ if [ -f /tmp/PHONELINUX_EXPORT_FAILED ]; then exit 1; fi
 if [ -f /tmp/PHONELINUX_VIRGL_SESSION_FAILED ]; then echo "VIRGL-SESSION-FAILED-OR-TIMEOUT"; fi
 if [ -f /tmp/PHONELINUX_VIRGL_FAILED ]; then exit 1; fi
 if [ -f /tmp/PHONELINUX_VIRGL_SESSION_FAILED ]; then exit 1; fi
+if [ -f /tmp/PHONELINUX_XCONTROL_FAILED ]; then echo "XCONTROL-FAILED-OR-TIMEOUT"; fi
+if [ -f /tmp/PHONELINUX_XCONTROL_FAILED ]; then exit 1; fi
