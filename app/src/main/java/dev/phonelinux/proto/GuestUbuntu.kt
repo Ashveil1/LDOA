@@ -173,12 +173,31 @@ object GuestUbuntu {
               # explicit choice: dconf read prints nothing while only the
               # schema default (true) is in effect. Any explicit value -
               # the user's or one this block wrote earlier - is respected.
-              PREV=${'$'}(timeout 4 dconf read /org/gnome/desktop/interface/enable-animations 2>/dev/null)
-              if [ -z "${'$'}PREV" ]; then
-                timeout 4 gsettings set org.gnome.desktop.interface enable-animations false 2>&1 | head -1 | sed 's/^/gnome-launch: perf-config animations-set: /'
-                echo "gnome-launch: perf-config launch=${'$'}LAUNCH_ID animations default-applied=false (no prior explicit setting; reversible: Settings > Accessibility)"
+              # Explicit-setting detection must never treat failure as
+              # "unset" (main review 2026-11-01): dconf read with its exit
+              # status checked when the binary exists; otherwise the user
+              # dconf database's ABSENCE proves no explicit key was ever
+              # written. Read error, timeout, DBus down, or an existing db
+              # without the tool are all uncertainty -> preserve, no write.
+              CAN_DEFAULT=no
+              if command -v dconf >/dev/null 2>&1; then
+                PREV=${'$'}(timeout 4 dconf read /org/gnome/desktop/interface/enable-animations 2>/dev/null); RC=${'$'}?
+                if [ "${'$'}RC" -eq 0 ]; then
+                  if [ -z "${'$'}PREV" ]; then CAN_DEFAULT=yes; else
+                    echo "gnome-launch: perf-config launch=${'$'}LAUNCH_ID animations preserved=${'$'}PREV (explicit setting respected)"
+                  fi
+                else
+                  echo "gnome-launch: perf-config launch=${'$'}LAUNCH_ID animations preserved=unknown (dconf read rc=${'$'}RC; no write on uncertainty)"
+                fi
+              elif [ ! -f "${'$'}HOME/.config/dconf/user" ]; then
+                CAN_DEFAULT=yes
+                echo "gnome-launch: perf-config launch=${'$'}LAUNCH_ID no dconf binary; user dconf db absent, so no explicit setting exists"
               else
-                echo "gnome-launch: perf-config launch=${'$'}LAUNCH_ID animations preserved=${'$'}PREV (explicit setting respected)"
+                echo "gnome-launch: perf-config launch=${'$'}LAUNCH_ID animations preserved=unknown (no dconf binary, user db present; no write on uncertainty)"
+              fi
+              if [ "${'$'}CAN_DEFAULT" = yes ]; then
+                timeout 4 gsettings set org.gnome.desktop.interface enable-animations false 2>&1 | head -1 | sed 's/^/gnome-launch: perf-config animations-set: /'
+                echo "gnome-launch: perf-config launch=${'$'}LAUNCH_ID animations default-applied=false (no explicit setting; reversible: Settings > Accessibility)"
               fi
             ) &
             # Same identity fix as the Alpine session: GNOME components call

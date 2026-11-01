@@ -41,8 +41,24 @@ class GnomeSessionPerfConfigTest {
             script.contains("dconf read /org/gnome/desktop/interface/enable-animations")
         )
         assertTrue(
+            "the read's exit status must be captured (a failed/missing read is NOT an unset key)",
+            script.contains("RC=")
+        )
+        assertTrue(
+            "the write must be gated on an explicit CAN_DEFAULT flag, never on empty output alone",
+            script.contains("CAN_DEFAULT=no") && script.contains("[ \"\$CAN_DEFAULT\" = yes ]")
+        )
+        assertTrue(
             "an explicit user setting must be preserved and logged",
             script.contains("animations preserved=")
+        )
+        assertTrue(
+            "uncertainty (read error / no dconf binary with an existing user db) must preserve without writing",
+            script.contains("no write on uncertainty")
+        )
+        assertTrue(
+            "the user-db-absence fallback proves no explicit setting exists",
+            script.contains(".config/dconf/user")
         )
         assertTrue(
             "the reversible default path must be logged as applied only when no explicit setting exists",
