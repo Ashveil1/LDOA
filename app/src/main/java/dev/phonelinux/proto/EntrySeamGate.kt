@@ -3,22 +3,43 @@ package dev.phonelinux.proto
 /** Pure decision core of the desktop entry seam (M1): no Android types,
  *  so the JVM fixture (EntrySeamGateTest) exercises the EXACT predicates
  *  XServer.openDesktop consults. Owner tags: "apk:<distroId>",
- *  "apt:GNOME", "apt:MOBILE". */
+ *  "apt:GNOME", "apt:MOBILE".
+ *
+ *  ABSENT-vs-UNKNOWN is explicit: a missing handle, a missing identity
+ *  capture, a dead root or a reused PID all mean the owned tree's state
+ *  is UNKNOWN - guest tracees may still live (proot can be SIGKILLed
+ *  while tracees escape, the known orphan root cause). UNKNOWN is never
+ *  converted to absence and never auto-recovered: it fails closed with
+ *  a Stop-to-reset instruction. */
 internal object EntrySeamGate {
 
+    enum class LiveKind { VERIFIED_LIVE, UNKNOWN, ABSENT }
+
+    /** Classify the tracked session from raw ownership facts. */
+    fun liveKind(hasHandle: Boolean, hasIdentity: Boolean, alive: Boolean, identityMatch: Boolean): LiveKind = when {
+        !hasHandle -> LiveKind.ABSENT
+        hasIdentity && alive && identityMatch -> LiveKind.VERIFIED_LIVE
+        else -> LiveKind.UNKNOWN // missing identity, dead root, or PID reused
+    }
+
     /** Cross-desktop mutual exclusion: refuse when the OTHER desktop's
-     *  durable marker is set OR a tracked-live session belongs to a
-     *  different owner tag (covers mid-start, marker not yet written). */
-    fun refuseForOtherActive(otherMarkerActive: Boolean, liveOwnerTag: String?, myOwnerTag: String): Boolean =
-        otherMarkerActive || (liveOwnerTag != null && liveOwnerTag != myOwnerTag)
+     *  durable marker is set OR a tracked session in ANY non-absent state
+     *  belongs to a different owner tag (VERIFIED_LIVE other = active;
+     *  UNKNOWN other = its tracees may live). Same-owner UNKNOWN passes:
+     *  that mode's own machinery decides (GNOME: pre-existing fresh
+     *  launch; MOBILE: refused in the branch). */
+    fun refuseForOtherActive(otherMarkerActive: Boolean, liveKind: LiveKind, liveOwnerTag: String?, myOwnerTag: String): Boolean =
+        otherMarkerActive || (liveKind != LiveKind.ABSENT && liveOwnerTag != null && liveOwnerTag != myOwnerTag)
 
-    /** Same-mode decision for a MOBILE open. */
-    enum class MobileSameMode { REUSE, REFUSE_UNCONFIRMED, CLEAR_STALE_PROCEED, PROCEED }
+    /** Same-mode decision for a MOBILE open (state after the cross-mode
+     *  guard, so a non-absent tracked session here is tagged MOBILE). */
+    enum class MobileSameMode { REUSE, REFUSE_UNCONFIRMED, REFUSE_UNKNOWN, PROCEED }
 
-    fun mobileSameMode(sameMarker: Boolean, sameLive: Boolean): MobileSameMode = when {
-        sameLive && sameMarker -> MobileSameMode.REUSE
-        sameLive -> MobileSameMode.REFUSE_UNCONFIRMED
-        sameMarker -> MobileSameMode.CLEAR_STALE_PROCEED
+    fun mobileSameMode(sameMarker: Boolean, liveKind: LiveKind): MobileSameMode = when {
+        liveKind == LiveKind.UNKNOWN -> MobileSameMode.REFUSE_UNKNOWN
+        liveKind == LiveKind.VERIFIED_LIVE && sameMarker -> MobileSameMode.REUSE
+        liveKind == LiveKind.VERIFIED_LIVE -> MobileSameMode.REFUSE_UNCONFIRMED
+        sameMarker -> MobileSameMode.REFUSE_UNKNOWN // post-restart stale marker: orphan uncertainty, never auto-clear
         else -> MobileSameMode.PROCEED
     }
 }

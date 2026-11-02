@@ -1101,13 +1101,19 @@ object XServer {
      *  (GuestMobileShell) on the same Ubuntu rootfs. */
     enum class DesktopMode { GNOME, MOBILE }
 
-    /** The owner tag of the currently TRACKED session if it is verifiably
-     *  live (process alive AND (starttime, uid) identity still matches the
-     *  launch-time capture - a reused PID never counts), else null. */
-    private fun trackedLiveOwnerTag(): String? = synchronized(ownershipLock) {
+    /** The tracked session's owner tag + explicit liveness class.
+     *  UNKNOWN (handle present but identity missing, root dead, or PID
+     *  reused) is NEVER collapsed into ABSENT: guest tracees may still
+     *  live (proot can die while tracees escape), so callers fail closed
+     *  on UNKNOWN instead of auto-recovering. */
+    private fun trackedSessionState(): Pair<String?, EntrySeamGate.LiveKind> = synchronized(ownershipLock) {
         val sp = sessionProcess; val ri = sessionRootIdent
-        if (sp != null && ri != null && sp.isAlive &&
-            identityOf(ri.pid)?.let { it.start == ri.start && it.uid == ri.uid } == true) sessionOwnerTag else null
+        val kind = EntrySeamGate.liveKind(
+            hasHandle = sp != null,
+            hasIdentity = ri != null,
+            alive = sp?.isAlive == true,
+            identityMatch = ri != null && identityOf(ri.pid)?.let { it.start == ri.start && it.uid == ri.uid } == true)
+        (if (kind == EntrySeamGate.LiveKind.ABSENT) null else sessionOwnerTag) to kind
     }
 
     fun openDesktop(activity: Activity, distro: Distro,
@@ -1156,10 +1162,10 @@ object XServer {
                     DesktopMode.GNOME -> desktopPrefs.getBoolean("mobile_desktop_active", false)
                 }
                 val myOwnerTag = if (distro.pkgMgr == PkgMgr.APK) "apk:" + distro.id else "apt:" + mode.name
-                val liveOwnerTag = trackedLiveOwnerTag()
-                if (EntrySeamGate.refuseForOtherActive(otherMarkerActive, liveOwnerTag, myOwnerTag)) {
-                    gateLog("openDesktop refused: other desktop active (mode=" + mode + " marker=" + otherMarkerActive + " liveOwnerTag=" + liveOwnerTag + ")")
-                    finishAttempt(ctx, false, "A desktop is already running - Stop session first, then start the other mode.", mySeq)
+                val (liveOwnerTag, liveKind) = trackedSessionState()
+                if (EntrySeamGate.refuseForOtherActive(otherMarkerActive, liveKind, liveOwnerTag, myOwnerTag)) {
+                    gateLog("openDesktop refused: other desktop active or unknown (mode=" + mode + " marker=" + otherMarkerActive + " liveOwnerTag=" + liveOwnerTag + " liveKind=" + liveKind + ")")
+                    finishAttempt(ctx, false, "A desktop is already running or in an unknown state - Stop session first, then start again.", mySeq)
                     return@thread
                 }
                 stage("Starting X server")
@@ -1226,19 +1232,31 @@ object XServer {
                                 // with nothing live and start fresh
                                 // (data-preserving: rootfs untouched; Stop
                                 // session remains the manual recovery).
+                                // (The cross-mode guard already refused a
+                                //  foreign-owner tracked session; a tracked
+                                //  session here is tagged MOBILE or absent.)
                                 val mobileMarker = desktopPrefs.getBoolean("mobile_desktop_active", false)
-                                when (EntrySeamGate.mobileSameMode(mobileMarker, trackedLiveOwnerTag() == "apt:MOBILE")) {
+                                val mobileKind = trackedSessionState().second
+                                when (EntrySeamGate.mobileSameMode(mobileMarker, mobileKind)) {
                                     EntrySeamGate.MobileSameMode.REUSE -> {
-                                        gateLog("mobile: reusing tracked-live confirmed session (identity verified) - nothing launched")
+                                        gateLog("mobile: reusing VERIFIED_LIVE confirmed session (identity match) - nothing launched")
                                         launched = true
                                     }
                                     EntrySeamGate.MobileSameMode.REFUSE_UNCONFIRMED -> {
-                                        gateLog("mobile: tracked-live UNCONFIRMED session (no active marker) - fail closed; Stop session reaps by identity")
+                                        gateLog("mobile: VERIFIED_LIVE session WITHOUT active marker (mid-start/thrown attempt) - fail closed; Stop session reaps by identity")
                                         failure = "A mobile session is already starting or failed mid-start - Stop session first."
                                     }
-                                    EntrySeamGate.MobileSameMode.CLEAR_STALE_PROCEED -> {
-                                        gateLog("mobile: stale active marker, no tracked-live session (died with the app process) - clearing, starting fresh")
-                                        desktopPrefs.edit().putBoolean("mobile_desktop_active", false).apply()
+                                    EntrySeamGate.MobileSameMode.REFUSE_UNKNOWN -> {
+                                        // Stale marker after an app restart
+                                        // or a handle whose tree is not
+                                        // verifiably dead: guest tracees
+                                        // may still live (orphan root
+                                        // cause). NEVER auto-clear the
+                                        // marker or auto-launch: Stop
+                                        // session resets state, the next
+                                        // open starts clean.
+                                        gateLog("mobile: marker/state uncertain (marker=" + mobileMarker + " kind=" + mobileKind + ") - fail closed, no auto-clear")
+                                        failure = "Mobile desktop state is unknown (the app may have restarted with a session still alive) - tap Stop session to reset, then start again."
                                     }
                                     EntrySeamGate.MobileSameMode.PROCEED -> { }
                                 }
