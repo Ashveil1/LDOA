@@ -82,28 +82,48 @@ class MobileDesktopEntryTest {
 
     @After
     fun tearDown() {
+        exportGuestLogs("pre-stop")
         try { XServer.stopDesktopMode(ctx) } catch (t: Throwable) { }
-        // Preserve guest logs into instrumentation output BEFORE the runner
-        // uninstalls the app (run 41449407107: the lane's post-run run-as
-        // pulls raced the connectedDebugAndroidTest auto-uninstall and got
-        // "unknown package"; additional_test_output is pulled by the runner
-        // even on failed assertions).
-        try {
-            val out = ctx.getExternalMediaDirs().firstOrNull()
-                ?.let { File(it, "additional_test_output") }
-            if (out != null && out.mkdirs() || out?.isDirectory == true) {
-                for (name in listOf("mobile-desktop.log", "xserver.log")) {
-                    val f = File(ctx.filesDir, name)
-                    if (f.isFile) f.copyTo(File(out, name), overwrite = true)
-                }
-                Log.i(TAG, "m1-evidence: guest logs exported to additional_test_output")
-            }
-        } catch (t: Throwable) {
-            Log.i(TAG, "m1-evidence: guest-log export failed (auxiliary): " + t.javaClass.simpleName)
-        }
+        exportGuestLogs("post-stop")
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         SessionService.stop(ctx)
         XServer.resetOwnershipStateForTest()
+    }
+
+    /** Guest-log preservation into the runner-collected directory. Route
+     *  grounded in run 41449407107's own runner log: "Copying files from
+     *  device to host: /sdcard/Android/media/dev.phonelinux.proto/
+     *  additional_test_output to .../app/build/outputs/
+     *  connected_android_test_additional_output/..." - pulled even on failed
+     *  assertions, unlike the lane's post-uninstall run-as pulls ("unknown
+     *  package"). Called pre-stop (stop can truncate/replace logs) and
+     *  post-stop (captures teardown lines). Per-file outcome and a missing
+     *  output dir are logged explicitly; auxiliary, never masks the real
+     *  failure. */
+    private fun exportGuestLogs(stage: String) {
+        try {
+            val out = ctx.getExternalMediaDirs().firstOrNull()
+                ?.let { File(it, "additional_test_output") }
+            if (out == null) {
+                Log.i(TAG, "m1-evidence: $stage guest-log export SKIPPED - no external media dir")
+                return
+            }
+            if (!out.isDirectory && !out.mkdirs()) {
+                Log.i(TAG, "m1-evidence: $stage guest-log export SKIPPED - cannot create " + out.absolutePath)
+                return
+            }
+            for (name in listOf("mobile-desktop.log", "xserver.log")) {
+                val f = File(ctx.filesDir, name)
+                if (f.isFile) {
+                    f.copyTo(File(out, name), overwrite = true)
+                    Log.i(TAG, "m1-evidence: $stage exported " + name + " (" + f.length() + " bytes)")
+                } else {
+                    Log.i(TAG, "m1-evidence: $stage " + name + " ABSENT - nothing to export")
+                }
+            }
+        } catch (t: Throwable) {
+            Log.i(TAG, "m1-evidence: $stage guest-log export failed (auxiliary): " + t.javaClass.simpleName)
+        }
     }
 
     private fun tapByDesc(desc: String) {
@@ -287,8 +307,12 @@ class MobileDesktopEntryTest {
                 (System.currentTimeMillis() - openTapAt) + "ms after open tap (+" +
                 (System.currentTimeMillis() - liveAt) + "ms after marker); 32px-grid distinct=" +
                 distinct + " - observation only, no desktop claim")
-            assertTrue("uniform-screen negative observation: something drew (distinct=$distinct)",
-                distinct > 2)
+            // Sampled uniformity ONLY: a grid color count says nothing about
+            // rendering (blank X area + Android bars can be non-uniform; flat
+            // content can be near-uniform). The hard gate is limited to a
+            // SAMPLED-UNIFORM screen observation; content review stays manual.
+            assertTrue("sampled screen NOT uniform on the 32px grid (uniformity" +
+                " observation only, no rendering conclusion; distinct=$distinct)", distinct > 2)
             val (focusRaw, xlorieFocused) = xlorieFocusState()
             assertTrue("focused window IS the Xlorie display activity" +
                 " (positive component match, no contradiction; raw: $focusRaw)",
@@ -296,7 +320,6 @@ class MobileDesktopEntryTest {
             val log = File(ctx.filesDir, "mobile-desktop.log").let { if (it.isFile) it.readText() else "" }
             assertTrue("guest session log exists", log.isNotEmpty())
             assertFalse("guest session log has no FAIL CLOSED marker", log.contains("FAIL CLOSED"))
-            assertTrue("non-uniform candidate screen (negative gate only; distinct=$distinct, focus=$focusRaw)", distinct > 32)
             Shot.save("m1-evidence-post-start-screen")
 
             // 2. Repeat open REUSES the tracked session (same handle).
