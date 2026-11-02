@@ -10,6 +10,8 @@ import android.util.Log
 import android.system.Os
 import android.system.OsConstants
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.LinkOption
 import kotlin.concurrent.thread
 
 /**
@@ -504,7 +506,30 @@ object XServer {
         val reuseLikely = synchronized(ownershipLock) {
             gnomeSession?.let { it.first == distro.id && it.second.isAlive } == true
         }
-        val virglSocket = if (reuseLikely) null else startVirglServerOptIn(ctx)
+        // VTEST-MC EVALUATION OPT-IN ONLY: the flag file is written by
+        // the instrumentation test when -e ldoaVtestMc 1 is passed
+        // (same flag-file pattern as ldoaE1). Gated DEBUG-only AND on a
+        // REGULAR NON-SYMLINK file: Files.isRegularFile(NOFOLLOW_LINKS)
+        // is false for directories, symlinks and unreadable entries, so
+        // every unexpected type fails CLOSED to the default. ABSENT
+        // flag = the DEFAULT fork-per-client launch, byte-identical to
+        // before. PRESENT flag = upstream virglrenderer 1.3.0
+        // single-process multi-client mode (--no-fork --multi-clients:
+        // vtest_server.c:185-218 flag definitions, :455 "accept new
+        // clients when there is none or when multi_clients is set",
+        // :548 fork-per-client path), under evaluation for the
+        // phantom-process budget. This is NOT a default change and not
+        // production permission: the shared address space (upstream:
+        // "clients must trust each other"), crash-isolation loss and
+        // select-loop scheduling tradeoffs are exactly what the
+        // evaluation must measure. The instrumentation test verifies
+        // the RUNNING server's effective args against the requested
+        // mode, so a silently-ignored opt-in can never masquerade as
+        // the requested mode.
+        val vtestMcOptIn = BuildConfig.DEBUG && Files.isRegularFile(
+            File(ctx.filesDir, "vtest-mc.optin").toPath(), LinkOption.NOFOLLOW_LINKS)
+        val virglSocket = if (reuseLikely) null else startVirglServerOptIn(ctx,
+            extraArgs = if (vtestMcOptIn) listOf("--no-fork", "--multi-clients") else emptyList())
         // A server started speculatively for a launch that turns out to be
         // a reuse (or fails) dies AFTER the ownership lock is released:
         // its bounded stop wait must never extend a lock hold that UI Stop
