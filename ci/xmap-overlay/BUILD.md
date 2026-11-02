@@ -37,6 +37,23 @@
   successful Get; post-get mapstate is never claimed as preexisting
   viewability; release is never claimed to restore pre-probe state.
 
+## COW topology dump (2026-11-02 addition, TEST-ONLY, text only)
+- While the overlay reference is held, the helper QueryTrees the COW and
+  prints XO_COW_TREE (counts, parent/root sanity, timestamp) plus at most 8
+  XO_COW_CHILD lines (id, class, geometry, mapstate, name with all
+  control/nonprintable bytes sanitized, explicit name-status, timestamp).
+  A name-query failure yields name-status=UNKNOWN rather than a bare
+  result=ok; the failure branch frees a partially returned child list;
+  the deadline margin is re-checked inside the child loop.
+  Per-child X errors (a child can vanish between QueryTree and attrs)
+  record result=UNKNOWN; a QueryTree error records children UNKNOWN;
+  neither fails the probe or changes cleanup. A listed child is at most
+  a stage CANDIDATE - name/geometry/parent do not authenticate identity.
+- parent-match semantics: QueryTree reports the parent OF the queried
+  window; for the COW the expected parent is the probed root. (A first
+  version of this check compared against the COW id itself; the real
+  Xvfb smoke caught the semantic error the stub fixture had validated.)
+
 ## ABI evidence chain (records, 2026-11-02)
 - Sandbox here is Ubuntu 22.04 (jammy): local validation compiled and
   LINKED against REAL jammy headers/libs (apt-get download libx11-dev

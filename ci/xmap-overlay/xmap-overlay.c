@@ -58,6 +58,8 @@
  *   XO_CM_OWNER initial=0x..|None screen=0
  *   XO_OWNER_ATTRS id=0x.. wxh=WxH+X+Y mapstate=Is*  (or rc=fail)
  *   XO_ATTRIB result=UNKNOWN detail=no-server-provided-client-identification (always)
+ *   XO_COW_TREE root-match=N parent-match=N children=N listed=N limit=8 result=.. (text topology)
+ *   XO_COW_CHILD idx=N id=0x.. class=.. wxh=.. mapstate=.. name=[..] name-status=ok|UNKNOWN t=.. result=ok|UNKNOWN
  *   XO_SIDE_EFFECT note=[acquisition+mapping semantics; not passive]
  *   XO_OWNER pre=0x..  /  XO_OWNER post=0x..
  *   XO_NOTE owner-changed-before-get|owner-changed-during-get|owner-lost-before-get ..
@@ -139,6 +141,7 @@ struct xattrs {
     long x, y; unsigned width, height;
     int map_state;   /* 0 IsUnmapped, 1 IsUnviewable, 2 IsViewable */
     int depth, vclass; unsigned long red, green, blue; int has_visual;
+    int wclass;      /* 1 InputOutput, 2 InputOnly, else UNPARSED */
 };
 
 typedef struct {
@@ -157,6 +160,11 @@ typedef struct {
     void (*release_overlay_window)(void *dpy, unsigned long ov);
     int (*get_image_patch)(void *dpy, unsigned long drawable, int x, int y, unsigned ps,
                            const struct xattrs *a, unsigned char *dst_rgb); /* 0 ok */
+    int (*query_tree)(void *dpy, unsigned long w, unsigned long *root_out,
+                      unsigned long *parent_out, unsigned long **kids_out,
+                      unsigned *nkids_out);                          /* 0 ok */
+    void (*free_kids)(void *p);
+    int (*fetch_name)(void *dpy, unsigned long w, char *buf, size_t n); /* 0 ok */
     void (*xerr_clear)(void);
     int (*xerr_seen)(void);
     void (*xerr_describe)(char *buf, size_t n);
@@ -193,6 +201,74 @@ static const char *map_state_str(int ms) {
 static void fmt_xid(char *b, size_t n, unsigned long v) {
     if (v) snprintf(b, n, "0x%lx", v);
     else snprintf(b, n, "None");
+}
+
+/* Bounded COW children topology dump (TEXT ONLY, no pixel sampling).
+ * Runs only while the overlay reference is held; output is capped at
+ * XO_COW_CHILD_LIMIT children and short sanitized names; per-child X
+ * errors (a child can vanish between QueryTree and GetWindowAttributes)
+ * record UNKNOWN, never fail the probe. A listed child is at most a
+ * stage CANDIDATE: name/geometry/parent do not authenticate identity,
+ * and mapstate here is a current-state sample, never a history proof. */
+#define XO_COW_CHILD_LIMIT 8
+static void probe_cow_children(const XOps *ops, void *dpy, unsigned long ov,
+                               unsigned long root, long long t_start) {
+    unsigned long r = 0, parent = 0, *kids = NULL;
+    unsigned n = 0, i, listed;
+    char eb[96], nb[65];
+    long long margin = (long long)(DEADLINE_SECS * 1000) - 1500;
+    if (now_ms() - t_start > margin) {
+        printf("XO_COW_TREE result=skipped-deadline note=[insufficient deadline margin]\n");
+        return;
+    }
+    ops->xerr_clear();
+    if (ops->query_tree(dpy, ov, &r, &parent, &kids, &n) || ops->xerr_seen()) {
+        /* free even on the failure branch: a driver may report an error
+         * after a partial allocation, and the list is ours either way */
+        if (kids) ops->free_kids(kids);
+        ops->xerr_describe(eb, sizeof eb);
+        printf("XO_COW_TREE result=x-error %s note=[children UNKNOWN] t=%lld\n",
+               ops->xerr_seen() ? eb : "querytree-failed-no-xerror", now_ms());
+        return;
+    }
+    listed = n > XO_COW_CHILD_LIMIT ? XO_COW_CHILD_LIMIT : n;
+    /* parent-match: QueryTree reports the parent OF the queried window, so for
+     * the COW the expected parent is the probed root, not the COW id itself. */
+    printf("XO_COW_TREE root-match=%d parent-match=%d children=%u listed=%u limit=%d"
+           " result=%s note=[topology only; a listed child is at most a stage CANDIDATE;"
+           " name/geometry/parent do not authenticate it; missing or changed children"
+           " remain UNKNOWN] t=%lld\n",
+           r == root ? 1 : 0, parent == root ? 1 : 0, n, listed, XO_COW_CHILD_LIMIT,
+           n > XO_COW_CHILD_LIMIT ? "ok-over-limit" : "ok", now_ms());
+    for (i = 0; i < listed; i++) {
+        struct xattrs ca;
+        const char *cls;
+        int name_ok;
+        if (now_ms() - t_start > margin) {
+            printf("XO_COW_TREE remaining-skipped-deadline at-idx=%u note=[children past"
+                   " idx %u not observed this run] t=%lld\n", i, i, now_ms());
+            break;
+        }
+        memset(&ca, 0, sizeof ca);
+        ops->xerr_clear();
+        if (ops->get_window_attributes(dpy, kids[i], &ca) || ops->xerr_seen()) {
+            printf("XO_COW_CHILD idx=%u id=0x%lx result=UNKNOWN detail=%s t=%lld\n",
+                   i, kids[i],
+                   ops->xerr_seen() ? "x-error-vanished-or-unreadable" : "getattrs-failed",
+                   now_ms());
+            continue;
+        }
+        ops->xerr_clear();
+        name_ok = !(ops->fetch_name(dpy, kids[i], nb, sizeof nb) || ops->xerr_seen());
+        if (!name_ok) snprintf(nb, sizeof nb, "[unreadable]");
+        cls = ca.wclass == 1 ? "InputOutput" : ca.wclass == 2 ? "InputOnly" : "UNPARSED";
+        printf("XO_COW_CHILD idx=%u id=0x%lx class=%s wxh=%ux%u%+ld%+ld mapstate=%s"
+               " depth=%d name=[%s] name-status=%s t=%lld result=ok\n",
+               i, kids[i], cls, ca.width, ca.height, ca.x, ca.y,
+               map_state_str(ca.map_state), ca.depth, nb,
+               name_ok ? "ok" : "UNKNOWN", now_ms());
+    }
+    if (kids) ops->free_kids(kids);
 }
 
 /* ---- shared probe flow (runtime AND host selftest drive this) ---- */
@@ -324,6 +400,8 @@ static int run_probe(const XOps *ops, const char *out_path) {
            " visual-class=%d masks=%lx/%lx/%lx\n",
            oa.width, oa.height, oa.x, oa.y, map_state_str(oa.map_state),
            oa.depth, oa.vclass, oa.red, oa.green, oa.blue);
+
+    probe_cow_children(ops, dpy, ov, root, t_start);
 
     if (!oa.has_visual || (oa.vclass != 4 && oa.vclass != 5) ||  /* TrueColor/DirectColor */
         mask_decode(oa.red, &rs, &rb) || mask_decode(oa.green, &gs, &gb) ||
@@ -459,6 +537,7 @@ static int rt_attrs(void *d, unsigned long w, struct xattrs *out) {
     out->width = (unsigned)a.width; out->height = (unsigned)a.height;
     out->map_state = (a.map_state == IsViewable) ? 2 : (a.map_state == IsUnviewable) ? 1 : 0;
     out->depth = a.depth;
+    out->wclass = (a.class == InputOutput) ? 1 : (a.class == InputOnly) ? 2 : -1;
     if (a.visual) {
         out->has_visual = 1; out->vclass = a.visual->class;
         out->red = a.visual->red_mask; out->green = a.visual->green_mask;
@@ -497,6 +576,31 @@ static int rt_get_patch(void *d, unsigned long drawable, int x, int y, unsigned 
     XDestroyImage(im);
     return 0;
 }
+static int rt_query_tree(void *d, unsigned long w, unsigned long *r, unsigned long *p,
+                         unsigned long **kids, unsigned *n) {
+    Window rr = 0, pp = 0, *k = NULL;
+    unsigned nn = 0;
+    if (!XQueryTree((Display *)d, (Window)w, &rr, &pp, &k, &nn)) return 1;
+    *r = (unsigned long)rr; *p = (unsigned long)pp;
+    *kids = (unsigned long *)k; *n = nn;
+    return 0;
+}
+static void rt_free_kids(void *p) { XFree(p); }
+static int rt_fetch_name(void *d, unsigned long w, char *buf, size_t n) {
+    char *nm = NULL;
+    size_t i, j = 0;
+    (void)XFetchName((Display *)d, (Window)w, &nm);
+    if (xerr_seen_flag) { if (nm) XFree(nm); buf[0] = '\0'; return 1; }
+    if (!nm) { snprintf(buf, n, "[none]"); return 0; }
+    for (i = 0; nm[i] && j + 1 < n; i++) {
+        unsigned char c = (unsigned char)nm[i];
+        buf[j++] = (c < 0x20 || c == 0x7f || c > 0x7e ||
+                    c == '[' || c == ']') ? '?' : (char)c;
+    }
+    buf[j] = '\0';
+    XFree(nm);
+    return 0;
+}
 static void rt_xerr_clear(void) { xerr_seen_flag = 0; xerr_code = 0; xerr_request = 0; }
 static int rt_xerr_seen(void) { return xerr_seen_flag; }
 static void rt_xerr_describe(char *buf, size_t n) {
@@ -525,6 +629,9 @@ int main(int argc, char **argv) {
     ops.get_overlay_window = rt_get_overlay;
     ops.release_overlay_window = rt_release_overlay;
     ops.get_image_patch = rt_get_patch;
+    ops.query_tree = rt_query_tree;
+    ops.free_kids = rt_free_kids;
+    ops.fetch_name = rt_fetch_name;
     ops.xerr_clear = rt_xerr_clear;
     ops.xerr_seen = rt_xerr_seen;
     ops.xerr_describe = rt_xerr_describe;
@@ -548,6 +655,12 @@ struct fake {
     unsigned fail_mask; /* bit k -> k-th patch GetImage fails */
     int get_calls, release_calls, patch_calls;
     int xerr_flag;
+    unsigned long kids[16]; int n_kids;
+    int kid_fail_idx;   /* >=0: that child index's attrs fail as vanished */
+    int kid_namefail;   /* >=0: that child index's name fetch fails with X error */
+    int tree_err;       /* 1: query_tree fails with an X error (no list);
+                           2: fails AFTER handing back a partial list (must be freed) */
+    int free_calls;
 };
 static struct fake *g_fake;
 
@@ -578,10 +691,22 @@ static int fk_attrs(void *d, unsigned long w, struct xattrs *out) {
     if (w == g_fake->overlay) {
         out->x = 0; out->y = 0; out->width = 1280; out->height = 1024;
         out->map_state = 2; out->depth = 24; out->has_visual = 1; out->vclass = 4;
+        out->wclass = 1;
+        out->red = 0xFF0000UL; out->green = 0x00FF00UL; out->blue = 0x0000FFUL;
+    } else if (w >= 0x900UL && w < 0x900UL + 16 &&
+               (int)(w - 0x900UL) < g_fake->n_kids) {
+        int idx = (int)(w - 0x900UL);
+        if (idx == g_fake->kid_fail_idx) { g_fake->xerr_flag = 1; return 1; }
+        out->x = 16 * (long)idx; out->y = 8;
+        out->width = 640; out->height = 480;
+        out->map_state = idx == 2 ? 0 : 2; out->depth = 24;
+        out->has_visual = 1; out->vclass = 4;
+        out->wclass = idx == 3 ? 2 : 1;
         out->red = 0xFF0000UL; out->green = 0x00FF00UL; out->blue = 0x0000FFUL;
     } else {
         out->x = -100; out->y = -100; out->width = 1; out->height = 1;
         out->map_state = 0; out->depth = 24; out->has_visual = 1; out->vclass = 4;
+        out->wclass = 1;
         out->red = 0xFF0000UL; out->green = 0x00FF00UL; out->blue = 0x0000FFUL;
     }
     return 0;
@@ -614,6 +739,40 @@ static int fk_patch(void *d, unsigned long drawable, int x, int y, unsigned ps,
         }
     return 0;
 }
+static unsigned long fk_kidbuf[16];
+static int fk_query_tree(void *d, unsigned long w, unsigned long *r, unsigned long *p,
+                         unsigned long **kids, unsigned *n) {
+    int i;
+    (void)d; (void)w;
+    if (g_fake->tree_err) {
+        g_fake->xerr_flag = 1;
+        if (g_fake->tree_err == 2) {
+            /* partial list handed back before the error: caller must free */
+            fk_kidbuf[0] = 0x900UL;
+            *kids = fk_kidbuf; *n = 1;
+        }
+        return 1;
+    }
+    *r = 0x511UL; *p = 0x511UL; /* QueryTree reports the parent of the queried window: the COW parent is the root */
+    for (i = 0; i < g_fake->n_kids; i++) fk_kidbuf[i] = 0x900UL + (unsigned long)i;
+    *kids = g_fake->n_kids ? fk_kidbuf : NULL;
+    *n = (unsigned)g_fake->n_kids;
+    return 0;
+}
+static void fk_free_kids(void *p) { (void)p; g_fake->free_calls++; }
+static int fk_fetch_name(void *d, unsigned long w, char *buf, size_t n) {
+    (void)d;
+    if (w >= 0x900UL && w < 0x900UL + 16) {
+        if ((int)(w - 0x900UL) == g_fake->kid_namefail) {
+            g_fake->xerr_flag = 1;
+            return 1;
+        }
+        snprintf(buf, n, "fake-child-%lu", w - 0x900UL);
+        return 0;
+    }
+    snprintf(buf, n, "[none]");
+    return 0;
+}
 static void fk_xerr_clear(void) { g_fake->xerr_flag = 0; }
 static int fk_xerr_seen(void) { return g_fake->xerr_flag; }
 static void fk_xerr_describe(char *buf, size_t n) { snprintf(buf, n, "code=3 request=98"); }
@@ -634,6 +793,9 @@ static void make_fake_ops(XOps *ops, struct fake *cfg) {
     ops->get_overlay_window = fk_get_overlay;
     ops->release_overlay_window = fk_release_overlay;
     ops->get_image_patch = fk_patch;
+    ops->query_tree = fk_query_tree;
+    ops->free_kids = fk_free_kids;
+    ops->fetch_name = fk_fetch_name;
     ops->xerr_clear = fk_xerr_clear;
     ops->xerr_seen = fk_xerr_seen;
     ops->xerr_describe = fk_xerr_describe;
@@ -833,6 +995,102 @@ int main(void) {
     expect1("atom-absent zero GetOverlay", c.get_calls == 0);
     expect1("atom-absent zero Release", c.release_calls == 0);
     expect1("atom-absent skip recorded", strstr(log, "skipped=no-cm-atom") != NULL);
+
+    /* 13: topology happy - 1 child, attrs+name listed, probe unaffected */
+    memset(&c, 0, sizeof c);
+    c.owner_seq[0] = c.owner_seq[1] = c.owner_seq[2] = 0x400007UL; c.n_owners = 3;
+    c.overlay = 0x400009UL; c.composite_present = 1;
+    c.n_kids = 1; c.kid_fail_idx = -1; c.kid_namefail = -1;
+    remove(out);
+    rc = run_scenario(&c, out, log, sizeof log);
+    expect1("topo-1 rc=0", rc == 0);
+    expect1("topo-1 tree line", strstr(log, "XO_COW_TREE root-match=1 parent-match=1 children=1 listed=1") != NULL);
+    expect1("topo-1 child line", strstr(log, "XO_COW_CHILD idx=0 id=0x900 class=InputOutput wxh=640x480+0+8 mapstate=IsViewable depth=24 name=[fake-child-0] name-status=ok t=") != NULL);
+    expect1("topo-1 candidate-only note", strstr(log, "stage CANDIDATE") != NULL);
+    expect1("topo-1 release once", c.release_calls == 1);
+    expect1("topo-1 kids freed once", c.free_calls == 1);
+    remove(out);
+
+    /* 14: topology empty - zero children recorded, probe unaffected */
+    memset(&c, 0, sizeof c);
+    c.owner_seq[0] = c.owner_seq[1] = c.owner_seq[2] = 0x400007UL; c.n_owners = 3;
+    c.overlay = 0x400009UL; c.composite_present = 1;
+    c.n_kids = 0; c.kid_fail_idx = -1; c.kid_namefail = -1;
+    remove(out);
+    rc = run_scenario(&c, out, log, sizeof log);
+    expect1("topo-empty rc=0", rc == 0);
+    expect1("topo-empty children=0", strstr(log, "children=0 listed=0") != NULL);
+    expect1("topo-empty no child lines", strstr(log, "XO_COW_CHILD idx=") == NULL);
+    expect1("topo-empty nothing to free", c.free_calls == 0);
+    remove(out);
+
+    /* 15: over-limit - 12 children, only 8 listed, recorded over-limit */
+    memset(&c, 0, sizeof c);
+    c.owner_seq[0] = c.owner_seq[1] = c.owner_seq[2] = 0x400007UL; c.n_owners = 3;
+    c.overlay = 0x400009UL; c.composite_present = 1;
+    c.n_kids = 12; c.kid_fail_idx = -1; c.kid_namefail = -1;
+    remove(out);
+    rc = run_scenario(&c, out, log, sizeof log);
+    expect1("topo-limit rc=0", rc == 0);
+    expect1("topo-limit over-limit recorded", strstr(log, "children=12 listed=8 limit=8 result=ok-over-limit") != NULL);
+    expect1("topo-limit child 7 listed", strstr(log, "idx=7") != NULL);
+    expect1("topo-limit child 8 NOT listed", strstr(log, "idx=8") == NULL);
+    remove(out);
+
+    /* 16: child vanished between QueryTree and attrs - UNKNOWN, not failure */
+    memset(&c, 0, sizeof c);
+    c.owner_seq[0] = c.owner_seq[1] = c.owner_seq[2] = 0x400007UL; c.n_owners = 3;
+    c.overlay = 0x400009UL; c.composite_present = 1;
+    c.n_kids = 3; c.kid_fail_idx = 1; c.kid_namefail = -1;
+    remove(out);
+    rc = run_scenario(&c, out, log, sizeof log);
+    expect1("topo-vanished rc=0", rc == 0);
+    expect1("topo-vanished UNKNOWN line", strstr(log, "XO_COW_CHILD idx=1 id=0x901 result=UNKNOWN detail=x-error-vanished-or-unreadable") != NULL);
+    expect1("topo-vanished others ok", strstr(log, "idx=0 id=0x900 class=InputOutput") != NULL &&
+            strstr(log, "idx=2 id=0x902") != NULL);
+    expect1("topo-vanished release confirmed once",
+            strstr(log, "XO_RELEASE attempted=1 result=confirmed") != NULL && c.release_calls == 1);
+    remove(out);
+
+    /* 17: QueryTree X error - children UNKNOWN, sampling still proceeds */
+    memset(&c, 0, sizeof c);
+    c.owner_seq[0] = c.owner_seq[1] = c.owner_seq[2] = 0x400007UL; c.n_owners = 3;
+    c.overlay = 0x400009UL; c.composite_present = 1;
+    c.tree_err = 1; c.kid_fail_idx = -1; c.kid_namefail = -1;
+    remove(out);
+    rc = run_scenario(&c, out, log, sizeof log);
+    expect1("topo-err rc=0", rc == 0);
+    expect1("topo-err tree x-error", strstr(log, "XO_COW_TREE result=x-error") != NULL);
+    expect1("topo-err sampling still done", strstr(log, "patches-ok=5") != NULL);
+    expect1("topo-err release once", c.release_calls == 1);
+    remove(out);
+
+    /* 18: name-query failure - explicit name-status=UNKNOWN, attrs still reported */
+    memset(&c, 0, sizeof c);
+    c.owner_seq[0] = c.owner_seq[1] = c.owner_seq[2] = 0x400007UL; c.n_owners = 3;
+    c.overlay = 0x400009UL; c.composite_present = 1;
+    c.n_kids = 2; c.kid_fail_idx = -1; c.kid_namefail = 0;
+    remove(out);
+    rc = run_scenario(&c, out, log, sizeof log);
+    expect1("topo-namefail rc=0", rc == 0);
+    expect1("topo-namefail name-status UNKNOWN", strstr(log, "idx=0 id=0x900 class=InputOutput wxh=640x480+0+8 mapstate=IsViewable depth=24 name=[[unreadable]] name-status=UNKNOWN") != NULL);
+    expect1("topo-namefail sibling name ok", strstr(log, "idx=1 id=0x901") != NULL && strstr(log, "name=[fake-child-1] name-status=ok") != NULL);
+    expect1("topo-namefail release confirmed", strstr(log, "XO_RELEASE attempted=1 result=confirmed") != NULL);
+    remove(out);
+
+    /* 19: partial QueryTree allocation then error - list freed, children UNKNOWN */
+    memset(&c, 0, sizeof c);
+    c.owner_seq[0] = c.owner_seq[1] = c.owner_seq[2] = 0x400007UL; c.n_owners = 3;
+    c.overlay = 0x400009UL; c.composite_present = 1;
+    c.tree_err = 2; c.kid_fail_idx = -1; c.kid_namefail = -1;
+    remove(out);
+    rc = run_scenario(&c, out, log, sizeof log);
+    expect1("topo-partial rc=0", rc == 0);
+    expect1("topo-partial x-error recorded", strstr(log, "XO_COW_TREE result=x-error") != NULL);
+    expect1("topo-partial partial list freed", c.free_calls == 1);
+    expect1("topo-partial no child lines", strstr(log, "XO_COW_CHILD") == NULL);
+    expect1("topo-partial release once", c.release_calls == 1);
+    remove(out);
 
     printf("XMAP-OVERLAY-SELFTEST: %d passed, %d failed\n", passes, fails);
     return fails ? 1 : 0;
