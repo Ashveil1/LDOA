@@ -1249,16 +1249,6 @@ class VirglGnomeSessionTest {
                 }
             }
 
-            // ANDROID PRESENTATION: STRICT and UNCHANGED - shot pipeline
-            // gated on capture-target IDENTITY (component/surface/content
-            // axes + CURRENT-state resample). Only the ANR handling
-            // changed: at most ONE verified narrow dismissal per arm; a
-            // recurrence ends focus polling early WITH EVIDENCE instead of
-            // manufacturing focus.
-            val establishAt = System.currentTimeMillis()
-            val ident = establishDesktopCaptureIdentity(launchId!!, rootfs, gsPid)
-            out.append("capture-identity: ").append(ident.summary).append('\n')
-            assertTrue("capture-target identity NOT established - " + ident.failure, ident.ok)
             // WINDOW TOPOLOGY + BOUNDED ROOT PIXEL probes (xmap /
             // xmap-pixels): bounded SEQUENTIAL samples before the
             // screencap, then a FRESH final-sample immediately before
@@ -1451,6 +1441,21 @@ class VirglGnomeSessionTest {
                 }
             }
 
+            // ANDROID PRESENTATION: STRICT gate UNCHANGED - shot pipeline
+            // gated on capture-target IDENTITY (component/surface/content
+            // axes + CURRENT-state resample; at most ONE verified narrow
+            // dismissal per arm; a recurrence ends focus polling early WITH
+            // EVIDENCE instead of manufacturing focus).
+            // ORDERING (run 41368404492): the guest topology/pixel probes
+            // above now run BEFORE this Android focus stage - they are
+            // generation/starttime-owned guest diagnostics that never
+            // depend on Android focus, so a persistent ANR obstruction
+            // fails presentation honestly HERE while the guest samples
+            // are still retained. The identity gate itself is NOT relaxed.
+            val establishAt = System.currentTimeMillis()
+            val ident = establishDesktopCaptureIdentity(launchId!!, rootfs, gsPid)
+            out.append("capture-identity: ").append(ident.summary).append('\n')
+            assertTrue("capture-target identity NOT established - " + ident.failure, ident.ok)
             // FINAL SAMPLE immediately before the screencap (xcontrol
             // pattern): focus NOW + generation NOW + session process
             // NOW. The full establish (ANR dismissal budget) is NOT
