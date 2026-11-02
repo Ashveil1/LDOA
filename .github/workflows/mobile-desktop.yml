@@ -43,6 +43,20 @@ jobs:
             adb -s emulator-5554 logcat -c || true
             adb -s emulator-5554 shell settings put global anr_show_background 0 || true
             if [ "$(cat ci/launcher-suppression.conf 2>/dev/null || echo on)" = "on" ]; then adb -s emulator-5554 shell pm disable-user --user 0 com.google.android.apps.nexuslauncher || true; echo "launcher suppression: ON"; else echo "launcher suppression: OFF"; fi
+            # Live-only focus/no-ANR readiness gate (ci/launcher_gate.py),
+            # at boot AND after the heavy build immediately before
+            # instrumentation (run 41510706613: the launcher ANR'd DURING the
+            # build at 19:34:34; a boot-only check cannot cover that
+            # recurrence). Live reads only; never lastanr (frozen replay is
+            # not current unhealthiness). READY = two consecutive consistent
+            # observations of a parseable non-null focused component with no
+            # ANR dialog - a focus/no-ANR precondition, NOT proof of launcher
+            # responsiveness. Failure is environmental + early exit: no
+            # dismissal, no restart, no suppression change.
+            python3 ci/launcher_gate.py boot || exit 1
+            ./gradlew assembleDebug assembleDebugAndroidTest 2>&1 | tee /tmp/build.log
+            grep -q "BUILD SUCCESSFUL" /tmp/build.log || { echo "assemble FAILED before readiness gate + instrumentation"; exit 1; }
+            python3 ci/launcher_gate.py post-build || exit 1
             ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=dev.phonelinux.proto.MobileDesktopEntryTest -Pandroid.testInstrumentationRunnerArguments.ldoa_ci_emulator=true --info 2>&1 | tee /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
             grep -q "BUILD SUCCESSFUL" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
             # NO post-task run-as guest-log pulls (run 41457173978): they

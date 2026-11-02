@@ -9,7 +9,9 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.By
 import androidx.test.uiautomator.BySelector
+import androidx.test.uiautomator.StaleObjectException
 import androidx.test.uiautomator.UiDevice
+import androidx.test.uiautomator.UiObject2
 import androidx.test.uiautomator.UiObjectNotFoundException
 import androidx.test.uiautomator.UiScrollable
 import androidx.test.uiautomator.UiSelector
@@ -320,6 +322,29 @@ class MobileDesktopEntryTest {
         }
     }
 
+    /** Run 41510706613 proved the desc-matched node itself is NON-clickable
+     *  (UiObject2 "Clicking on non-clickable object" on the open-mobile tap),
+     *  so a wrapper-center tap is ambiguous. The clickable node being a
+     *  DESCENDANT is source-inferred from the Compose modifier order
+     *  (semantics wrapper outside the button's own clickable), NOT yet
+     *  runtime-proven from a captured hierarchy - so resolution stays
+     *  fail-closed: the matched node itself when clickable, else the SINGLE
+     *  clickable descendant; zero or 2+ (or an ancestor-only mapping) =
+     *  no tap, evidence, fail. */
+    private fun resolveClickableNode(node: UiObject2): UiObject2? {
+        if (node.isClickable) return node
+        val found = mutableListOf<UiObject2>()
+        val stack = java.util.ArrayDeque<UiObject2>()
+        stack.add(node)
+        while (!stack.isEmpty()) {
+            val n = stack.removeFirst()
+            for (c in n.children) {
+                if (c.isClickable) found.add(c) else stack.add(c)
+            }
+        }
+        return if (found.size == 1) found[0] else null
+    }
+
     /** Shared bounded-scroll tap with readiness + evidence. UiScrollable
      *  THROWS UiObjectNotFoundException when no scrollable container exists
      *  at all (run 41457173978) - that escape is caught, evidenced, and
@@ -373,7 +398,29 @@ class MobileDesktopEntryTest {
             org.junit.Assert.fail("'" + label + "' vanished between find and click -" +
                 " evidence captured, no stale-bounds click")
         }
-        fresh.click()
+        val target = try {
+            resolveClickableNode(fresh)
+        } catch (e: StaleObjectException) {
+            captureFailureEvidence(label)
+            org.junit.Assert.fail("'" + label + "' went STALE while resolving the clickable node" +
+                " (surface changed under the find) - evidence captured, NO retry tap")
+            return // unreachable (Assert.fail throws); keeps the compiler honest
+        }
+        if (target == null) {
+            captureFailureEvidence(label)
+            org.junit.Assert.fail("'" + label + "' resolved to no unambiguous clickable node" +
+                " (matched node non-clickable, and not exactly one clickable descendant) -" +
+                " no wrapper-center tap; evidence captured")
+            return // unreachable (Assert.fail throws); keeps the compiler honest
+        }
+        try {
+            target.click()
+        } catch (e: StaleObjectException) {
+            captureFailureEvidence(label)
+            org.junit.Assert.fail("'" + label + "' went STALE at click time" +
+                " (surface changed under the tap) - evidence captured, NO duplicate click")
+            return // unreachable (Assert.fail throws); keeps the compiler honest
+        }
         device.waitForIdle(1_000)
     }
 
@@ -1355,6 +1402,23 @@ class MobileDesktopEntryTest {
             if (consent != null) {
                 Shot.save("m1-intent-mobile-consent")
                 tapByText("Download and start")
+            } else {
+                // Consent is the ONLY route to openDesktop on a rootfs without
+                // the mobile shell. Unobserved consent there means the
+                // tap-to-consent chain is broken; the old flow then burned the
+                // full 15-min liveness budget blind (run 41510706613).
+                // Terminate HERE with explicit evidence. The hierarchy capture
+                // carries the picker's visible log text when the app window is
+                // in the a11y tree - no product change.
+                if (!GuestMobileShell.hasMobileShell(DistroInstaller(ctx).rootfsDir(Distros.UBUNTU))) {
+                    captureFailureEvidence("consent-gap")
+                    org.junit.Assert.fail("expected first-start consent unobserved within 3s after the" +
+                        " open-mobile tap on a rootfs WITHOUT the mobile shell (needsProvision=true):" +
+                        " the tap-to-consent chain is broken; evidence captured (shot + focus +" +
+                        " dumpsys + UI hierarchy) - NOT continuing into a blind liveness wait")
+                }
+                Log.i(TAG, "m1-stage: no consent dialog - mobile shell already provisioned" +
+                    " (direct-start route); continuing to liveness wait")
             }
 
             var proc: Process? = null
@@ -1362,6 +1426,19 @@ class MobileDesktopEntryTest {
             while (System.currentTimeMillis() < deadline) {
                 proc = XServer.sessionProcess
                 if (proc != null && proc.isAlive && prefs.getBoolean("mobile_desktop_active", false)) break
+                // Fail fast on a re-presented launcher ANR: detection +
+                // evidence only, NO dismissal (the test's ONE shared budget
+                // stays exactly as before). Run 41510706613 burned the whole
+                // 15-min budget with a re-presented ANR dialog focused at
+                // failure - an OBSERVED obstruction, never asserted as the
+                // proven cause of the session not starting.
+                if (Shot.detectVerifiedLauncherAnr(device)) {
+                    captureFailureEvidence("liveness-anr-obstruction")
+                    org.junit.Assert.fail("observed obstruction: verified launcher-ANR dialog present" +
+                        " during the liveness wait at +" + (System.currentTimeMillis() - openTapAt) +
+                        "ms after open tap - detection + evidence only, no dismissal;" +
+                        " an observed obstruction, not proof of what blocked session start")
+                }
                 Thread.sleep(5_000)
             }
             val liveAt = System.currentTimeMillis()
