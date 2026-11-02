@@ -20,7 +20,6 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
-import android.os.ParcelFileDescriptor
 
 /**
  * M1 entry-seam emulator test (custom-mobile lane entry lifecycle).
@@ -62,6 +61,22 @@ class MobileDesktopEntryTest {
         assertFalse("fresh world required: ubuntu marker set", prefs.getBoolean("ubuntu_desktop_active", false))
         assertFalse("fresh world required: mobile marker set", prefs.getBoolean("mobile_desktop_active", false))
         assertFalse("fresh world required: recovery block set", prefs.getBoolean("mobile_recovery_blocked", false))
+
+        // Rootfs bootstrap: the mobile-desktop picker button exists ONLY when
+        // Ubuntu is installed; a fresh emulator has none, and no button means
+        // no consent flow to exercise. Provision the BASE distro up front
+        // (same DistroInstaller path as MobileShellSpikeTest); the MOBILE
+        // package's first-run consent ("Download and start") stays in-flow.
+        val installer = DistroInstaller(ctx)
+        if (!installer.isInstalled(Distros.UBUNTU)) {
+            var last: InstallState = InstallState.NotInstalled
+            val ok = kotlinx.coroutines.runBlocking {
+                installer.install(Distros.UBUNTU) { last = it }
+            }
+            assertTrue("ubuntu rootfs provision failed at state=$last", ok)
+        }
+        assertTrue("ubuntu rootfs installed (mobile button requires it)",
+            installer.isInstalled(Distros.UBUNTU))
     }
 
     @After
@@ -100,17 +115,44 @@ class MobileDesktopEntryTest {
         device.waitForIdle(1_000)
     }
 
+    /** /proc/<pid>/stat content with the errno preserved: ENOENT = the
+     *  process is GONE (the only clean "dead"); any other errno is UNKNOWN,
+     *  never assumed dead. Os.open exposes the real errno; File.exists()
+     *  cannot distinguish ENOENT from permission failures. */
+    private fun readProcStat(pid: Int): Pair<String?, Int?> {
+        val fd = try {
+            android.system.Os.open("/proc/$pid/stat", android.system.OsConstants.O_RDONLY, 0)
+        } catch (e: android.system.ErrnoException) { return null to e.errno }
+        try {
+            val sb = StringBuilder()
+            val buf = ByteArray(4096)
+            while (true) {
+                val n = android.system.Os.read(fd, buf, 0, buf.size)
+                if (n <= 0) break
+                sb.append(String(buf, 0, n, Charsets.US_ASCII))
+            }
+            return sb.toString() to null
+        } catch (e: android.system.ErrnoException) { return null to e.errno }
+        finally { try { android.system.Os.close(fd) } catch (t: Throwable) { } }
+    }
+
     /** pid -> starttime snapshot of the session root and every current
-     *  descendant (ppid walk over /proc), for post-Stop identity checks. */
-    private fun pidTreeSnapshot(rootPid: Int): Map<Int, String> {
+     *  descendant (ppid walk over /proc), for post-Stop identity checks.
+     *  Non-ENOENT read failures land in [unreadable] and make the coverage
+     *  INCOMPLETE - the caller fails rather than trusting a partial tree. */
+    private fun pidTreeSnapshot(rootPid: Int, unreadable: MutableMap<Int, String>): Map<Int, String> {
         val stats = HashMap<Int, Pair<Int, String>>() // pid -> (ppid, starttime)
         File("/proc").listFiles { f -> f.name.matches(Regex("[0-9]+")) }?.forEach { f ->
-            try {
-                val t = File(f, "stat").readText()
-                val close = t.lastIndexOf(')')
-                val rest = t.substring(close + 1).trim().split(Regex("\\s+"))
-                if (rest.size > 20) stats[f.name.toInt()] = rest[1].toInt() to rest[19]
-            } catch (t: Throwable) { }
+            val pid = f.name.toInt()
+            val (content, errno) = readProcStat(pid)
+            if (content == null) {
+                if (errno != android.system.OsConstants.ENOENT) unreadable[pid] = "errno=$errno"
+                return@forEach
+            }
+            val close = content.lastIndexOf(')')
+            val rest = if (close >= 0) content.substring(close + 1).trim().split(Regex("\\s+")) else emptyList()
+            if (rest.size > 20) stats[pid] = rest[1].toInt() to rest[19]
+            else unreadable[pid] = "unparseable stat"
         }
         val out = LinkedHashMap<Int, String>()
         var frontier = listOf(rootPid)
@@ -132,22 +174,28 @@ class MobileDesktopEntryTest {
         return if (rest.size > 19) rest[19] else null
     }
 
-    /** starttime for one pid; null when ENOENT (gone) - callers needing the
-     *  ENOENT/unreadable split read the file themselves. */
-    private fun procStartTime(pid: Int): String? {
-        val f = File("/proc/$pid/stat")
-        if (!f.exists()) return null
-        return try { parseStartTime(f.readText()) } catch (t: Throwable) { null }
-    }
+    /** starttime for one pid; null when ENOENT (gone) or unreadable -
+     *  identity-unchanged assertions treat null as a FAIL, never as dead. */
+    private fun procStartTime(pid: Int): String? = readProcStat(pid).first?.let { parseStartTime(it) }
 
-    /** Raw mCurrentFocus / mFocusedApp lines from the window manager. */
-    private fun currentFocusLine(): String = try {
-        val pfd = InstrumentationRegistry.getInstrumentation().uiAutomation
-            .executeShellCommand("dumpsys window windows")
-        val lines = ParcelFileDescriptor.AutoCloseInputStream(pfd).use { it.bufferedReader().readLines() }
-        lines.filter { it.contains("mCurrentFocus") || it.contains("mFocusedApp") }
-            .joinToString(" | ").trim()
-    } catch (t: Throwable) { "focus-dumpsys-failed: ${t.javaClass.simpleName}" }
+    /** (raw excerpt, focused) where focused is TRUE only when every
+     *  mCurrentFocus line names the vendored Xlorie display activity and no
+     *  mFocusedApp line contradicts it; a dumpsys read failure or an
+     *  unparseable display state is FALSE, never a pass. Mirrors the
+     *  tri-state parser in VirglGnomeSessionTest (full dump filtered
+     *  in-process: executeShellCommand has no shell). */
+    private fun xlorieFocusState(): Pair<String, Boolean> {
+        val raw = try { device.executeShellCommand("dumpsys window") } catch (t: Throwable) {
+            return "focus-dumpsys-failed: ${t.javaClass.simpleName}" to false
+        }
+        fun mentions(l: String) =
+            l.contains("com.termux.x11.MainActivity") || l.contains("com.termux.x11/.MainActivity")
+        val cur = raw.lineSequence().filter { it.contains("mCurrentFocus") }.toList()
+        val app = raw.lineSequence().filter { it.contains("mFocusedApp") }.toList()
+        val ok = cur.isNotEmpty() && cur.all { mentions(it) } && app.all { mentions(it) }
+        val joined = (cur + app).joinToString(" | ").replace('\n', ' ').take(300)
+        return (if (joined.isNotEmpty()) joined else raw.replace('\n', ' ').take(300)) to ok
+    }
 
     /** Distinct-color count over a coarse grid: a uniform (black/frozen)
      *  screen is NOT desktop evidence. */
@@ -206,14 +254,14 @@ class MobileDesktopEntryTest {
             val bmp = InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
             assertNotNull("post-start screenshot", bmp)
             val distinct: Int = try { distinctSampledColors(bmp!!) } finally { bmp!!.recycle() }
-            val focusLine = currentFocusLine()
-            assertTrue("WM focus line captured: $focusLine", focusLine.isNotBlank())
-            assertFalse("focus not the launcher (raw: $focusLine)",
-                focusLine.lowercase().contains("launcher"))
+            val (focusRaw, xlorieFocused) = xlorieFocusState()
+            assertTrue("focused window IS the Xlorie display activity" +
+                " (positive component match, no contradiction; raw: $focusRaw)",
+                xlorieFocused)
             val log = File(ctx.filesDir, "mobile-desktop.log").let { if (it.isFile) it.readText() else "" }
             assertTrue("guest session log exists", log.isNotEmpty())
             assertFalse("guest session log has no FAIL CLOSED marker", log.contains("FAIL CLOSED"))
-            assertTrue("non-uniform candidate screen (negative gate only; distinct=$distinct, focus=$focusLine)", distinct > 32)
+            assertTrue("non-uniform candidate screen (negative gate only; distinct=$distinct, focus=$focusRaw)", distinct > 32)
             Shot.save("m1-evidence-desktop-draw")
 
             // 2. Repeat open REUSES the tracked session (same handle).
@@ -244,21 +292,24 @@ class MobileDesktopEntryTest {
             //    tracked root identity is still the launch identity.
             assertEquals("launch root identity unchanged at Stop (pid+starttime)",
                 launchRootStart, procStartTime(rootPid))
-            val preStopTree = pidTreeSnapshot(rootPid)
+            val preStopUnreadable = LinkedHashMap<Int, String>()
+            val preStopTree = pidTreeSnapshot(rootPid, preStopUnreadable)
             assertTrue("pre-Stop tree captured root", preStopTree.containsKey(rootPid))
+            assertTrue("pre-Stop /proc scan coverage complete (non-ENOENT unreadable: $preStopUnreadable)",
+                preStopUnreadable.isEmpty())
             XServer.stopDesktopMode(ctx)
             assertFalse("mobile marker cleared by Stop", prefs.getBoolean("mobile_desktop_active", false))
             assertFalse("no recovery block (verified owned cleanup)", prefs.getBoolean("mobile_recovery_blocked", false))
             assertNull("ownership released after Stop", XServer.sessionProcess)
             val survivors = LinkedHashMap<Int, String>()
             val unknown = LinkedHashMap<Int, String>()
-            for ((pid, start) in preStopTree) {
-                val f = File("/proc/$pid/stat")
-                if (!f.exists()) continue // ENOENT: gone - the only clean "dead"
-                val t = try { f.readText() } catch (e: Throwable) {
-                    unknown[pid] = "unreadable: ${e.javaClass.simpleName}"; continue
+            for ((pid, start) in preStopTree) { // scoped to the captured tree only - no universal reap claim
+                val (content, errno) = readProcStat(pid)
+                if (content == null) {
+                    if (errno == android.system.OsConstants.ENOENT) continue // gone: the only clean "dead"
+                    unknown[pid] = "errno=$errno"; continue
                 }
-                val st = parseStartTime(t)
+                val st = parseStartTime(content)
                 if (st == null) unknown[pid] = "unparseable stat"
                 else if (st == start) survivors[pid] = st
             }
