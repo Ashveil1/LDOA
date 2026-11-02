@@ -207,6 +207,20 @@ class PickerSurfaceTest {
         assertEquals(devComponent, interactionFocusToken(dump))
     }
 
+    @Test fun `frozen-only or truncated input is unknown - never the frozen focus token`() {
+        // Marker present but the live display section never comes (truncated
+        // dump / ANR replay only): the frozen token must NOT leak out.
+        val frozenOnly = "WINDOW MANAGER LAST ANR (dumpsys window lastanr)\n" +
+            "  ANR time: Nov 2, 2026 5:54:59 PM\n" +
+            "Last ANR continued\n" +
+            "WINDOW MANAGER DISPLAY CONTENTS (dumpsys window displays)\n" +
+            "Display: mDisplayId=0 (organized)\n" + focusLine(launcherToken) + "\n"
+        assertEquals(null, interactionFocusToken(frozenOnly))
+        val truncatedMidFrozen = fullDumpWithFrozenAnr(launcherToken, devComponent)
+            .substring(0, 200)
+        assertEquals(null, interactionFocusToken(truncatedMidFrozen))
+    }
+
     // ---- Stability poll reducer (pure temporal logic) ----
 
     private val budget = 3_000L
