@@ -69,13 +69,15 @@ class PickerSurfaceTest {
     }
 
     // ---- Per-display focus parse (source: AOSP android14 DisplayContent.dump;
-    // run 41490601274 carried two mCurrentFocus lines from two displays) ----
+    // run 41490601274 carried multiple mCurrentFocus lines; section structure
+    // is AOSP-established, run-7 display assignment is hypothesis) ----
 
     private val launcherToken = "com.google.android.apps.nexuslauncher/.NexusLauncherActivity"
 
+    private fun focusLine(token: String?) =
+        if (token == null) "  mCurrentFocus=null" else "  mCurrentFocus=Window{abc123 u0 " + token + "}"
+
     private fun twoDisplayDump(display0: String?, display1: String?): String {
-        fun focusLine(token: String?) =
-            if (token == null) "  mCurrentFocus=null" else "  mCurrentFocus=Window{abc123 u0 " + token + "}"
         return "Display: mDisplayId=0\n" + focusLine(display0) + "\n" +
             "  mFocusedApp=AppWindowToken{x u0 whatever}\n" +
             "Display: mDisplayId=1\n" + focusLine(display1) + "\n"
@@ -89,27 +91,58 @@ class PickerSurfaceTest {
             classifyPickerSurface(interactionFocusToken(dump), false))
     }
 
-    @Test fun `run-7 transition shape - launcher on interaction display, app on display 1 - is NOT picker`() {
+    @Test fun `run-7 shape - launcher on interaction display, app on display 1 - is NOT picker`() {
         val dump = twoDisplayDump(launcherToken, devShortComponent)
         assertEquals(launcherToken, interactionFocusToken(dump))
         assertEquals(PickerSurface.WRONG_SURFACE,
             classifyPickerSurface(interactionFocusToken(dump), false))
     }
 
+    @Test fun `realistic preamble before display headers still scopes per display`() {
+        val preamble = "WINDOW MANAGER DISPLAY CONTENTS (dumpsys window displays)\n" +
+            "  mOverrideDisplayInfo=...\n\n"
+        assertEquals(devComponent, interactionFocusToken(preamble + twoDisplayDump(devComponent, launcherToken)))
+        assertEquals(launcherToken, interactionFocusToken(preamble + twoDisplayDump(launcherToken, devComponent)))
+    }
+
     @Test fun `interaction display section missing or unfocused is unknown - never a neighbor display`() {
         assertEquals(null, interactionFocusToken(twoDisplayDump(null, devComponent)))
-        val onlyDisplay1 = "Display: mDisplayId=1\n  mCurrentFocus=Window{abc123 u0 " + devComponent + "}\n"
+        val onlyDisplay1 = "Display: mDisplayId=1\n" + focusLine(devComponent) + "\n"
         assertEquals(null, interactionFocusToken(onlyDisplay1))
     }
 
+    @Test fun `conflicting token later in the section poisons an earlier valid token`() {
+        val dump = "Display: mDisplayId=0\n" + focusLine(devComponent) + "\n" +
+            focusLine(launcherToken) + "\n"
+        assertEquals(null, interactionFocusToken(dump))
+        assertEquals(mapOf(0 to null), parseFocusedTokensByDisplay(dump))
+    }
+
+    @Test fun `null or malformed focus line later in the section poisons an earlier valid token`() {
+        val withNull = "Display: mDisplayId=0\n" + focusLine(devComponent) + "\n" + focusLine(null) + "\n"
+        assertEquals(null, interactionFocusToken(withNull))
+        val withMalformed = "Display: mDisplayId=0\n" + focusLine(devComponent) + "\n" +
+            "  mCurrentFocus=Window{916ca84 u0 Application Not Responding: com.google.android.apps.nexuslauncher}\n"
+        assertEquals(null, interactionFocusToken(withMalformed))
+    }
+
+    @Test fun `repeated identical token within a section stays valid`() {
+        val dump = "Display: mDisplayId=0\n" + focusLine(devComponent) + "\n" +
+            focusLine(devComponent) + "\n"
+        assertEquals(devComponent, interactionFocusToken(dump))
+    }
+
+    @Test fun `repeated display section with conflicting content is unknown`() {
+        val dump = twoDisplayDump(devComponent, null) + "Display: mDisplayId=0\n" + focusLine(launcherToken) + "\n"
+        assertEquals(null, interactionFocusToken(dump))
+    }
+
     @Test fun `legacy headerless dump - exactly one distinct token wins, conflicting tokens are unknown`() {
-        val one = "  mCurrentFocus=Window{abc123 u0 " + devComponent + "}\n"
+        val one = focusLine(devComponent) + "\n"
         assertEquals(devComponent, interactionFocusToken(one))
-        val two = "  mCurrentFocus=Window{abc123 u0 " + launcherToken + "}\n" +
-            "  mCurrentFocus=Window{def456 u0 " + devComponent + "}\n"
+        val two = focusLine(launcherToken) + "\n" + focusLine(devComponent) + "\n"
         assertEquals(null, interactionFocusToken(two))
-        val sameTwice = "  mCurrentFocus=Window{abc123 u0 " + devComponent + "}\n" +
-            "  mCurrentFocus=Window{def456 u0 " + devComponent + "}\n"
+        val sameTwice = focusLine(devComponent) + "\n" + focusLine(devComponent) + "\n"
         assertEquals(devComponent, interactionFocusToken(sameTwice))
     }
 
@@ -118,5 +151,49 @@ class PickerSurfaceTest {
         assertEquals(null, interactionFocusToken("Display: mDisplayId=0\n  mCurrentFocus=null\n"))
         assertEquals(null, interactionFocusToken(
             "Display: mDisplayId=0\n  mCurrentFocus=Window{abc123 no-user-token}\n"))
+    }
+
+    // ---- Stability poll reducer (pure temporal logic) ----
+
+    private val budget = 3_000L
+
+    @Test fun `stability - same exact token twice in budget confirms`() {
+        val first = reduceStabilitySample(null, 0, devComponent, budget)
+        assertEquals(StabilityOutcome.Pending(devComponent), first)
+        val second = reduceStabilitySample((first as StabilityOutcome.Pending).lastToken, 400, devComponent, budget)
+        assertEquals(StabilityOutcome.Confirmed(devComponent), second)
+    }
+
+    @Test fun `stability - null sample resets the streak`() {
+        val first = reduceStabilitySample(null, 0, devComponent, budget)
+        assertEquals(StabilityOutcome.Pending(devComponent), first)
+        val reset = reduceStabilitySample(devComponent, 400, null, budget)
+        assertEquals(StabilityOutcome.Pending(null), reset)
+        val restart = reduceStabilitySample(null, 800, devComponent, budget)
+        assertEquals(StabilityOutcome.Pending(devComponent), restart)
+    }
+
+    @Test fun `stability - changing tokens never confirm`() {
+        var last: String? = null
+        val tokens = listOf(launcherToken, devComponent, launcherToken, devComponent)
+        tokens.forEachIndexed { i, t ->
+            val out = reduceStabilitySample(last, i * 400L, t, budget)
+            assertEquals(StabilityOutcome.Pending(t), out)
+            last = (out as StabilityOutcome.Pending).lastToken
+        }
+    }
+
+    @Test fun `stability - sample at or past the budget can never confirm`() {
+        assertEquals(StabilityOutcome.Exhausted,
+            reduceStabilitySample(devComponent, budget, devComponent, budget))
+        assertEquals(StabilityOutcome.Exhausted,
+            reduceStabilitySample(devComponent, budget + 1, devComponent, budget))
+    }
+
+    @Test fun `stability - last in-budget null sample then exhaustion yields no confirmation`() {
+        val reset = reduceStabilitySample(devComponent, 2_800, null, budget)
+        assertEquals(StabilityOutcome.Pending(null), reset)
+        assertEquals(StabilityOutcome.Exhausted,
+            reduceStabilitySample(null, budget, devComponent, budget))
     }
 }

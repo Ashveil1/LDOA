@@ -210,6 +210,10 @@ class MobileDesktopEntryTest {
         val focus = xlorieFocusState()
         Log.i(TAG, "m1-evidence: failure at '" + site + "' (token=" + unique + ") foreground=" + fg +
             " focus=" + focus.second + " raw=" + focus.first)
+        // Full untruncated dump alongside the truncated log excerpt (the
+        // excerpt's 300-char cut loses section headers - run 41490601274).
+        val fullDump = try { device.executeShellCommand("dumpsys window") } catch (t: Throwable) { "" }
+        archiveFullFocusDump(site, fullDump)
         try {
             val out = ctx.getExternalMediaDirs().firstOrNull()
                 ?.let { File(it, "additional_test_output") }
@@ -464,27 +468,56 @@ class MobileDesktopEntryTest {
         return interactionFocusToken(raw)
     }
 
-    /** Bounded stability poll for the interaction display's focus token:
-     *  the SAME exact token on two consecutive reads (~400ms apart) within
-     *  the budget. A transition dump is transitional/UNKNOWN, never a
-     *  verdict - a null (unparseable/absent) read keeps polling and never
-     *  confirms. Returns null on budget exhaustion; callers fail closed
-     *  with the last token + full per-display map logged as evidence. */
+    /** Bounded stability poll for the interaction display's focus token.
+     *  The temporal decision is the PURE reduceStabilitySample (unit-tested):
+     *  monotonic SystemClock.elapsedRealtime feeding (elapsed, token)
+     *  samples - the deadline is checked BEFORE a result is accepted, an
+     *  unreadable sample resets the streak, and only the same exact token
+     *  on two consecutive in-budget samples (~400ms apart) confirms.
+     *  Exhaustion archives the FULL untruncated `dumpsys window` (the
+     *  300-char log excerpt loses section headers - run 41490601274) and
+     *  returns null; callers fail closed. */
     private fun stableFocusedComponent(site: String, budgetMs: Long = 3_000): String? {
-        val deadline = System.currentTimeMillis() + budgetMs
+        val start = android.os.SystemClock.elapsedRealtime()
         var last: String? = null
         while (true) {
             val token = focusedComponent()
-            if (token != null && token == last) return token
-            last = token
-            if (System.currentTimeMillis() >= deadline) break
-            Thread.sleep(400)
+            when (val outcome = reduceStabilitySample(
+                last, android.os.SystemClock.elapsedRealtime() - start, token, budgetMs)) {
+                is StabilityOutcome.Confirmed -> return outcome.token
+                is StabilityOutcome.Exhausted -> {
+                    val raw = try { device.executeShellCommand("dumpsys window") } catch (t: Throwable) { "" }
+                    archiveFullFocusDump(site, raw)
+                    Log.i(TAG, "m1-nav: no stable interaction-display focus token at '" + site +
+                        "' within " + budgetMs + "ms (last=" + last +
+                        ", perDisplay=" + parseFocusedTokensByDisplay(raw) + ")")
+                    return null
+                }
+                is StabilityOutcome.Pending -> { last = outcome.lastToken; Thread.sleep(400) }
+            }
         }
-        val raw = try { device.executeShellCommand("dumpsys window") } catch (t: Throwable) { "" }
-        Log.i(TAG, "m1-nav: no stable interaction-display focus token at '" + site +
-            "' within " + budgetMs + "ms (last=" + last +
-            ", perDisplay=" + parseFocusedTokensByDisplay(raw) + ")")
-        return null
+    }
+
+    /** FULL raw `dumpsys window` into the archived additional_test_output
+     *  dir (same sink as the failure hierarchy XML): section headers and
+     *  every per-display focus line survive, unlike the truncated log
+     *  excerpt. Auxiliary - a write failure is logged, never fatal. */
+    private fun archiveFullFocusDump(site: String, raw: String) {
+        try {
+            val out = ctx.getExternalMediaDirs().firstOrNull()
+                ?.let { File(it, "additional_test_output") }
+            if (out != null && (out.isDirectory || out.mkdirs())) {
+                val token = site.replace(Regex("[^A-Za-z0-9_-]"), "_")
+                val dest = File(out, "m1-focusdump-" + token + "-" +
+                    System.currentTimeMillis() + ".txt")
+                dest.writeText(raw)
+                Log.i(TAG, "m1-evidence: full dumpsys window archived at '" + site +
+                    "' (" + raw.length + " chars)")
+            }
+        } catch (t: Throwable) {
+            Log.i(TAG, "m1-evidence: full focus dump at '" + site +
+                "' failed (auxiliary): " + t.javaClass.simpleName)
+        }
     }
 
     /** ActivityRecord tokens of the dev MainActivity instances on the device
@@ -571,10 +604,22 @@ class MobileDesktopEntryTest {
         var comp: String? = null
         var lorie = false
         var attempt = 0
+        // ONE overall return deadline (monotonic) covering every pass AND
+        // the nested stability poll - the poll's own 3s budget is per-pass,
+        // never a new lease on the whole navigation.
+        val returnDeadline = android.os.SystemClock.elapsedRealtime() + 20_000
+        fun returnDeadlineExceeded() {
+            if (android.os.SystemClock.elapsedRealtime() < returnDeadline) return
+            captureFailureEvidence(site)
+            org.junit.Assert.fail("return-to-picker at '" + site + "': overall 20s" +
+                " deadline exhausted (attempts=" + attempt + ") - evidence captured")
+        }
         while (true) {
+            returnDeadlineExceeded()
             // Verify FIRST and after EVERY action, including the last.
             comp = stableFocusedComponent(site)
             lorie = lorieViewPresent()
+            returnDeadlineExceeded()
             when (classifyPickerSurface(comp, lorie)) {
                 PickerSurface.PICKER_COMPONENT -> {
                     val afterRecords = mainActivityRecords()
@@ -599,6 +644,7 @@ class MobileDesktopEntryTest {
                     val uiDeadline = System.currentTimeMillis() + 5_000
                     while (uiState == PickerUiState.NEITHER &&
                         System.currentTimeMillis() < uiDeadline) {
+                        returnDeadlineExceeded()
                         Thread.sleep(500)
                         uiState = pickerUiState()
                     }
@@ -612,7 +658,7 @@ class MobileDesktopEntryTest {
                     dismissImeIfShownOnPicker(site)
                     // A guarded back is still an action: re-verify the picker
                     // component AFTER it before declaring navigation done.
-                    val postComp = focusedComponent()
+                    val postComp = stableFocusedComponent(site)
                     val postLorie = lorieViewPresent()
                     if (classifyPickerSurface(postComp, postLorie) !=
                         PickerSurface.PICKER_COMPONENT) {
