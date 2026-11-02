@@ -312,6 +312,152 @@ object RenderProbeParse {
         return map
     }
 
+    /** One settle-sampler observation reduced to what the control flow
+     *  gates on. [doneNanos] is the round COMPLETION time on the budget's
+     *  clock; a round is late when it COMPLETED at/past the subdeadline,
+     *  whenever it started. */
+    data class SettleObservation(val reason: String?, val state: TopoState?, val doneNanos: Long)
+
+    class SettleFailure(message: String) : AssertionError(message)
+
+    /** The settle-sampler control flow, with clock/sample/sleep injected so
+     *  deadline, slow-call and stability behavior are unit-testable with
+     *  synthetic times. Rules (identical in instrument and fixtures):
+     *  [needed] CONSECUTIVE consistent observations whose states are EQUAL
+     *  on the full stable key; any inconsistent observation resets the
+     *  streak; a sample or revalidation COMPLETING at/past the subdeadline
+     *  ALWAYS fails; the budget ending without stability ALWAYS fails (a
+     *  final lucky frame never substitutes for stability); after stability,
+     *  one COMPLETE extra observation under the same budget must still be
+     *  consistent and key-equal (full current-state revalidation, never a
+     *  partial guard). [onSample] receives every observation for logging.
+     *
+     *  NOT closed (Owner C): a destroy/recreate of the SAME process+window
+     *  identity INSIDE one round is theoretically undetectable by pid/
+     *  class/XID rereads; the full current-state revalidation each round
+     *  is the mitigation. This case is explicitly not claimed closed. */
+    fun settleLoop(budget: SettleBudget, needed: Int = 3, intervalMs: Long = 500L,
+                   now: () -> Long, sleep: (Long) -> Unit,
+                   sample: () -> SettleObservation,
+                   onSample: (Int, SettleObservation) -> Unit = { _, _ -> }): SettleObservation {
+        val tracker = SettleTracker(needed)
+        var stable: SettleObservation? = null
+        var idx = 0
+        while (now() < budget.endNanos) {
+            val s = sample()
+            budget.lateReason(s.doneNanos)?.let {
+                throw SettleFailure("settle sample COMPLETED after the subdeadline ($it)" +
+                    " - return-late ALWAYS fails")
+            }
+            onSample(idx, s)
+            idx++
+            if (tracker.offer(s.reason == null, s.state)) { stable = s; break }
+            val remainMs = budget.remainingMs(now())
+            if (remainMs <= 0) break
+            sleep(minOf(intervalMs, remainMs))
+        }
+        val st = stable ?: throw SettleFailure("topology NEVER STABILIZED within the" +
+            " bounded sampler budget - FAIL (a final passing frame cannot substitute for" +
+            " stability)")
+        // Pre-final deadline check: the extracted control flow never ISSUES
+        // the revalidation once the budget is gone (the instrument's
+        // per-probe caps would also refuse, but the contract holds without
+        // relying on the sample's own wiring).
+        budget.lateReason(now())?.let {
+            throw SettleFailure("budget EXHAUSTED before post-stability revalidation" +
+                " ($it) - never issued")
+        }
+        val fin = sample()
+        budget.lateReason(fin.doneNanos)?.let {
+            throw SettleFailure("post-stability revalidation COMPLETED after the" +
+                " subdeadline ($it) - return-late ALWAYS fails")
+        }
+        onSample(idx, fin)   // the revalidation is logged like every observation
+        budget.lateReason(now())?.let {
+            throw SettleFailure("post-revalidation bookkeeping completed after the" +
+                " subdeadline ($it) - return-late ALWAYS fails")
+        }
+        if (fin.reason != null || fin.state == null || !topoStatesEqual(fin.state!!, st.state!!))
+            throw SettleFailure("post-stability revalidation shows CHURN (reason=" +
+                (fin.reason ?: "stable-key mismatch") + ") - UNKNOWN")
+        return st
+    }
+
+    /** Bounded settle-sampler clock. Every decision takes an EXPLICIT
+     *  caller-supplied now (System.nanoTime() at the call site) so the
+     *  behavior is unit-testable with synthetic times.
+     *  subdeadline = min(start + cap, globalEnd - margin). A call that
+     *  ENDS at/past the subdeadline is ALWAYS late, whenever it started. */
+    class SettleBudget(startNanos: Long, globalEndNanos: Long,
+                       capNanos: Long, marginNanos: Long) {
+        val endNanos: Long = minOf(startNanos + capNanos, globalEndNanos - marginNanos)
+        fun remainingMs(nowNanos: Long): Long =
+            java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(endNanos - nowNanos)
+        /** Non-null when now is at/past the subdeadline (return-late = fail). */
+        fun lateReason(nowNanos: Long): String? =
+            if (nowNanos >= endNanos) "settle-subdeadline-exceeded" else null
+    }
+
+    /** One settle-sampler topology observation keyed on IDENTITY, not just
+     *  geometry: the owned pcmanfm process (pid + /proc starttime) and the
+     *  desktop XID are part of the stable key, so a re-realized window or
+     *  restarted process resets stability even at identical rects.
+     *  monRects/deskRects are canonically content-sorted by the caller. */
+    data class TopoState(val pcmanPid: Int, val pcmanStart: String,
+                         val deskId: Long, val deskRect: IntArray,
+                         val deskRects: List<IntArray>, val monRects: List<IntArray>,
+                         val primaryMonIdx: Int, val rootRect: IntArray)
+
+    /** Full stable-key equality (identity + geometry + intended selection). */
+    fun topoStatesEqual(a: TopoState, b: TopoState): Boolean =
+        a.pcmanPid == b.pcmanPid && a.pcmanStart == b.pcmanStart &&
+        a.deskId == b.deskId && a.deskRect.contentEquals(b.deskRect) &&
+        a.deskRects.size == b.deskRects.size &&
+        a.deskRects.zip(b.deskRects).all { (x, y) -> x.contentEquals(y) } &&
+        a.monRects.size == b.monRects.size &&
+        a.monRects.zip(b.monRects).all { (x, y) -> x.contentEquals(y) } &&
+        a.primaryMonIdx == b.primaryMonIdx &&
+        a.rootRect.contentEquals(b.rootRect)
+
+    /** The FULL render-qualification gate set over one sampled topology as
+     *  a typed reason (null = consistent) - the same invariants the gates
+     *  assert: positive root, at least one active monitor, no monitor
+     *  overlap, every monitor inside the root framebuffer, qualified
+     *  desktop count == active monitor count, exact desktop-to-monitor
+     *  bijection, and a unique primary whenever multiple desktops qualify. */
+    fun topologyConsistency(rootRect: IntArray, monRects: List<IntArray>,
+                            primaryCount: Int, deskRects: List<IntArray>): String? {
+        if (rootRect.size != 4 || rootRect[2] <= 0 || rootRect[3] <= 0) return "root-degenerate"
+        if (monRects.isEmpty()) return "zero-active-monitors"
+        if (anyOverlap(monRects)) return "monitor-overlap"
+        if (monRects.any { it.size != 4 || it[0] < rootRect[0] || it[1] < rootRect[1] ||
+                it[0] + it[2] > rootRect[0] + rootRect[2] ||
+                it[1] + it[3] > rootRect[1] + rootRect[3] }) return "monitor-outside-root"
+        if (deskRects.size != monRects.size)
+            return "qualified(" + deskRects.size + ")!=monitors(" + monRects.size + ")"
+        if (matchMonitorBijection(deskRects, monRects) == null) return "no-desktop-monitor-bijection"
+        if (deskRects.size > 1 && primaryCount != 1) return "primary-not-unique"
+        return null
+    }
+
+    /** Bounded settle-sampler streak tracker. offer() one KNOWN observation
+     *  (consistent = the full gate set passed on THAT sample's own current
+     *  topology). Stability = [need] CONSECUTIVE observations that are EACH
+     *  consistent AND EQUAL on the full stable key. An inconsistent known
+     *  observation resets the streak; individually-consistent-but-DIFFERENT
+     *  states never stabilize. Unknown observations never reach here - the
+     *  caller fails them immediately. */
+    class SettleTracker(private val need: Int = 3) {
+        private var streak = 0
+        private var last: TopoState? = null
+        fun offer(consistent: Boolean, state: TopoState?): Boolean {
+            if (!consistent || state == null) { streak = 0; last = null; return false }
+            streak = if (last != null && topoStatesEqual(last!!, state)) streak + 1 else 1
+            last = state
+            return streak >= need
+        }
+    }
+
     /** xdotool search: one DECIMAL window id per line. Any other line
      *  makes the whole result unreadable (never silently drop output). */
     fun searchIds(text: String): List<Long>? {

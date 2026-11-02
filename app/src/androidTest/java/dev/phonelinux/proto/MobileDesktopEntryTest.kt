@@ -1166,137 +1166,225 @@ class MobileDesktopEntryTest {
                 File(rootfs, "usr/bin/$tool").isFile)
 
         // 6. Geometry ground truth: POSITIVE root dims, parser-verified.
+        //    (early sanity only; the BINDING root stats come from the
+        //    settled sample in step 7 - the root can resize during startup)
         val rootStats = RenderProbeParse.winStats(guest("xwininfo", "-root"))
         assertNotNull("render/geometry: root stats parseable with positive dims", rootStats)
-        val rs = rootStats!!
 
-        // 7. Desktop window identity, TOPOLOGY-ANCHORED (run 41526200813:
-        //    TWO pcmanfm windows PID-linked on the AOSP image; counting
-        //    alone cannot distinguish legitimate multi-head - pcmanfm:
-        //    one FmDesktop per enabled GDK monitor, DESKTOP type hint per
-        //    window, source desktop.c - from duplicated/phantom windows).
-        //    Evidence BEFORE any decision: xrandr --listmonitors +
-        //    xdpyinfo -ext XINERAMA, raw logged and strictly parsed
-        //    against SOURCE-VERIFIED output formats (xrandr.c /
-        //    xdpyinfo.c); malformed NEVER falls back. Qualification:
-        //    PID-linked to the tracked pcmanfm + Pcmanfm class + DESKTOP
-        //    type + IsViewable. Consistency: qualified count == ACTIVE
-        //    RandR monitor count (Xinerama cross-checked when it declares
-        //    heads) AND an EXACT desktop-to-monitor geometry bijection.
-        //    Selection: the desktop corresponding to the UNIQUE
-        //    primary-marked active monitor (single-head: the sole
-        //    correspondence); no primary marker fails closed - never
-        //    first-is-primary.
-        val rrRaw = guest("xrandr", "--listmonitors")
-        Log.i(TAG, "render-evidence: xrandr --listmonitors RAW:\n" + rrRaw)
-        val rrMonitors = RenderProbeParse.xrandrListMonitors(rrRaw)
-            ?: throw AssertionError("render/geometry: xrandr --listmonitors UNPARSEABLE -" +
-                " topology unknown, never guessed")
-        val rrActive = rrMonitors.filter { it.active }
-        assertTrue("render/geometry: ZERO active RandR monitors - no intended" +
-            " display exists to anchor a selection on", rrActive.isNotEmpty())
-        val monRects = rrActive.map { intArrayOf(it.x, it.y, it.w, it.h) }
-        assertTrue("render/geometry: active monitor rects OVERLAP - clone/overlap" +
-            " topology makes desktop attribution ambiguous",
-            !RenderProbeParse.anyOverlap(monRects))
-        // RandR server invariant: an active CRTC viewport lies INSIDE the
-        // screen; a monitor outside the root framebuffer is bogus topology.
-        // Transitively this puts the selected-monitor ROI inside the root.
-        assertTrue("render/geometry: active monitor outside the root framebuffer " +
-            rs.w + "x" + rs.h + ": " + monRects.joinToString { it.contentToString() } +
-            " - bogus topology, never sampled",
-            monRects.all { it[0] >= 0 && it[1] >= 0 &&
-                it[0] + it[2] <= rs.w && it[1] + it[3] <= rs.h })
-        val xinRaw = guest("xdpyinfo", "-ext", "XINERAMA")
-        Log.i(TAG, "render-evidence: xdpyinfo -ext XINERAMA RAW:\n" + xinRaw)
-        val xin = RenderProbeParse.xdpyinfoXinerama(xinRaw)
-            ?: throw AssertionError("render/geometry: xdpyinfo XINERAMA section MALFORMED" +
-                " - declared-but-unparseable topology NEVER falls back to RandR")
-        when (xin.state) {
-            RenderProbeParse.XineramaState.ABSENT ->
-                Log.i(TAG, "render-evidence: XINERAMA extension ABSENT (declared)" +
-                    " - RandR governs topology")
-            RenderProbeParse.XineramaState.INACTIVE ->
-                Log.i(TAG, "render-evidence: XINERAMA declared INACTIVE -" +
-                    " RandR governs topology")
-            RenderProbeParse.XineramaState.ACTIVE ->
-                if (xin.heads.isEmpty())
-                    Log.i(TAG, "render-evidence: XINERAMA ACTIVE with ZERO heads" +
-                        " (lorie PseudoramiX no-registered-screens state, expected per" +
-                        " vendored pseudoramiX.c) - RandR governs topology")
-                else {
-                    if (xin.heads.size != monRects.size)
-                        throw AssertionError("render/geometry: topology sources DISAGREE" +
-                            " (xinerama heads=" + xin.heads.size + " vs randr active=" +
-                            monRects.size + ") - monitor count unanchored")
-                    if (RenderProbeParse.matchMonitorBijection(xin.heads, monRects) == null)
-                        throw AssertionError("render/geometry: topology sources DISAGREE" +
-                            " GEOMETRICALLY - no exact xinerama-to-randr bijection -" +
-                            " intended display unanchored")
-                    Log.i(TAG, "render-evidence: topology sources AGREE: xinerama heads" +
-                        " == randr active monitors (exact bijection)")
-                }
-        }
-        val enabledMonitors = rrActive.size
-        Log.i(TAG, "render-evidence: topology randr-active=" + enabledMonitors +
-            " xinerama-state=" + xin.state + " heads=" + xin.heads.size)
+        // 7. Desktop window identity, TOPOLOGY-ANCHORED + BOUNDED SETTLE
+        //    SAMPLER. OBSERVED (run 41532775447): the qualified desktop was
+        //    1280x1949 while the settled screen/monitor was 1080x1949.
+        //    HYPOTHESIS (unproven): the desktop was realized at an
+        //    intermediate startup geometry and the final change never
+        //    reached an applied resize - pcmanfm 1.3.2 resizes its desktop
+        //    only on GdkScreen "monitors-changed" (desktop.c:4977) and the
+        //    source shows the INTENDED notification path, never runtime
+        //    delivery/consumption. The sampler records the ACTUAL geometry
+        //    trajectory - every observation fully rescanned/revalidated,
+        //    raw, wall+mono timestamped - and gates on STABILITY: 3
+        //    CONSECUTIVE observations that each pass the SAME exact gates
+        //    on their own current topology AND are EQUAL on the full
+        //    stable key (owner pid+starttime, desktop XID, rects, primary/
+        //    intended selection, root geometry). Fail-closed: an unknown
+        //    (unparseable/unreadable) observation fails IMMEDIATELY; a
+        //    probe returning after the subdeadline ALWAYS fails; deadline
+        //    without stability fails UNCONDITIONALLY - a final lucky frame
+        //    never substitutes for stability. The settle delay itself is
+        //    logged as a product finding, not erased.
+        val pcmanStart0 = tree.getValue(pcmanPid)  // ORIGINAL ownership anchor
+        if (procStartTime(pcmanPid) != pcmanStart0)
+            throw AssertionError("render/geometry: pcmanfm process identity CHANGED before" +
+                " sampling (restart/PID reuse) - UNKNOWN, never accepting a new process" +
+                " under the owned pid")
+        val settle = RenderProbeParse.SettleBudget(System.nanoTime(), deadlineEnd,
+            20_000_000_000L, 5_000_000_000L)
+        if (settle.remainingMs(System.nanoTime()) <= 0)
+            throw AssertionError("render/geometry: no budget left for settle sampling" +
+                " (global deadline) - UNKNOWN, never skipped")
 
-        val pcmanCandidates = (RenderProbeParse.searchIds(guest("xdotool", "search", "--class", "pcmanfm"))
-            ?: throw AssertionError("render/geometry: pcmanfm search output unparseable")) +
-            (RenderProbeParse.searchIds(guest("xdotool", "search", "--class", "Pcmanfm"))
-            ?: throw AssertionError("render/geometry: Pcmanfm search output unparseable"))
-        val qualified = mutableListOf<Pair<Long, RenderProbeParse.WinStats>>()
-        val identities = StringBuilder()
-        for (id in pcmanCandidates.distinct()) {
-            val xp = guest("xprop", "-id", id.toString(), "_NET_WM_PID", "WM_CLASS", "_NET_WM_WINDOW_TYPE")
-            val pid = RenderProbeParse.xpropPid(xp)
-            val pidAbsent = RenderProbeParse.xpropPidAbsent(xp)
-            val cls = RenderProbeParse.xpropClass(xp)
-            val types = RenderProbeParse.xpropWmTypes(xp)
-            val st = RenderProbeParse.winStats(guest("xwininfo", "-id", id.toString()))
-            identities.append("candidate 0x").append(java.lang.Long.toHexString(id))
-                .append(" pid=").append(pid?.toString() ?: if (pidAbsent) "ABSENT" else "UNREADABLE")
-                .append(" class=").append(cls)
-                .append(" types=").append(types?.toString() ?: "UNREADABLE")
-                .append(" stats=").append(st?.toString() ?: "UNREADABLE").append('\n')
-            if ((pid == null && !pidAbsent) || cls == null || types == null || st == null)
-                throw AssertionError("render/geometry: candidate 0x" +
-                    java.lang.Long.toHexString(id) + " probe UNREADABLE - unknown," +
-                    " never skipped; identities so far:\n" + identities)
-            if (pid == null) continue  // property explicitly ABSENT: not owned, documented above
-            if (pid.toInt() == pcmanPid && cls.second == "Pcmanfm" &&
-                types.contains("_NET_WM_WINDOW_TYPE_DESKTOP") && st.mapState == "IsViewable")
-                qualified.add(id to st)
+        fun settleGuest(vararg a: String): String {
+            if (guestAborted) throw AssertionError("render-evidence: probe already aborted" +
+                " by an earlier guest timeout - refusing further guest work")
+            val remMs = minOf(rem(), settle.remainingMs(System.nanoTime()))
+            if (remMs <= 0) throw AssertionError("render/geometry: settle budget EXHAUSTED" +
+                " before probe " + a.joinToString(" ") + " - UNKNOWN, never issuing an" +
+                " unbounded call")
+            // Per-call cap = remaining budget; the existing guestExec
+            // timeout + destroy-ladder cleanup path is REUSED unchanged.
+            val out = requireGuest(guestExec(rootfs, remMs, *a), a.joinToString(" "))
+            settle.lateReason(System.nanoTime())?.let {
+                throw AssertionError("render/geometry: probe " + a.joinToString(" ") +
+                    " returned AFTER the settle subdeadline (" + it + ") - return-late" +
+                    " ALWAYS fails")
+            }
+            return out
         }
-        Log.i(TAG, "render-evidence: pcmanfm candidate identities:\n" + identities)
-        assertTrue("render/geometry: qualified DESKTOP windows ${qualified.size} !=" +
-            " enabled monitors $enabledMonitors - duplicate/missing desktop vs topology;" +
-            " identities logged", qualified.size == enabledMonitors)
-        val qualifiedRects = qualified.map { intArrayOf(it.second.absX, it.second.absY, it.second.w, it.second.h) }
-        val deskToMon = RenderProbeParse.matchMonitorBijection(qualifiedRects, monRects)
-            ?: throw AssertionError("render/geometry: no EXACT desktop-to-monitor" +
-                " geometry bijection - phantom/mis-realized desktop vs server topology;" +
-                " desktop rects " + qualifiedRects.joinToString { it.contentToString() } +
-                " vs active monitors " + monRects.joinToString { it.contentToString() })
-        val deskId: Long
-        val ds: RenderProbeParse.WinStats
-        val selMon: IntArray
-        if (qualified.size == 1) {
-            deskId = qualified[0].first; ds = qualified[0].second
-            selMon = monRects[deskToMon[0]]
-        } else {
-            val primIdx = rrActive.withIndex().filter { it.value.primary }.map { it.index }
-            assertTrue("render/geometry: ${qualified.size} qualified desktops require" +
-                " EXACTLY ONE primary-marked active monitor (found ${primIdx.size}) -" +
-                " multi-head selection unanchored, never first-is-primary",
-                primIdx.size == 1)
-            val di = deskToMon.indexOf(primIdx[0])
-            deskId = qualified[di].first; ds = qualified[di].second
-            selMon = monRects[primIdx[0]]
+
+        data class Sample(val atNanos: Long, val doneNanos: Long, val wallMs: Long,
+                          val reason: String?, val state: RenderProbeParse.TopoState?,
+                          val ds: RenderProbeParse.WinStats?, val rootSt: RenderProbeParse.WinStats?,
+                          val selMon: IntArray?, val rrRaw: String, val xinDesc: String,
+                          val monRects: List<IntArray>, val deskRects: List<IntArray>,
+                          val rootRect: IntArray?, val identities: String)
+
+        fun takeSample(): Sample {
+            val t0 = System.nanoTime()
+            val wall = System.currentTimeMillis()
+            // Fresh EVERYTHING each observation - no stale XID chain.
+            val rrRawS = settleGuest("xrandr", "--listmonitors")
+            Log.i(TAG, "render-evidence: sample xrandr --listmonitors RAW:\n" + rrRawS)
+            val rrM = RenderProbeParse.xrandrListMonitors(rrRawS)
+                ?: throw AssertionError("render/geometry: sampler xrandr UNPARSEABLE -" +
+                    " unknown, never guessed; RAW:\n" + rrRawS)
+            val rrAct = rrM.filter { it.active }
+            val mons = rrAct.map { intArrayOf(it.x, it.y, it.w, it.h) }
+            val xinRawS = settleGuest("xdpyinfo", "-ext", "XINERAMA")
+            Log.i(TAG, "render-evidence: sample xdpyinfo -ext XINERAMA RAW:\n" + xinRawS)
+            val xinS = RenderProbeParse.xdpyinfoXinerama(xinRawS)
+                ?: throw AssertionError("render/geometry: sampler xdpyinfo XINERAMA section" +
+                    " MALFORMED - declared-but-unparseable topology NEVER falls back; RAW:\n" + xinRawS)
+            var xinIssue: String? = null
+            if (xinS.state == RenderProbeParse.XineramaState.ACTIVE && xinS.heads.isNotEmpty() &&
+                (xinS.heads.size != mons.size ||
+                    RenderProbeParse.matchMonitorBijection(xinS.heads, mons) == null))
+                xinIssue = "topology-sources-disagree"
+            val rootStS = RenderProbeParse.winStats(settleGuest("xwininfo", "-root"))
+                ?: throw AssertionError("render/geometry: sampler root stats UNREADABLE - unknown")
+            val rootR = intArrayOf(rootStS.absX, rootStS.absY, rootStS.w, rootStS.h)
+            // Candidate identity re-probe (the same verified chain); RAW
+            // xprop+xwininfo (incl. the window NAME line) logged for EVERY
+            // candidate IMMEDIATELY, before parsing - the evidence exists
+            // whichever way the sample fails.
+            val pcmanCandS = (RenderProbeParse.searchIds(settleGuest("xdotool", "search", "--class", "pcmanfm"))
+                ?: throw AssertionError("render/geometry: sampler pcmanfm search unparseable")) +
+                (RenderProbeParse.searchIds(settleGuest("xdotool", "search", "--class", "Pcmanfm"))
+                ?: throw AssertionError("render/geometry: sampler Pcmanfm search unparseable"))
+            val qual = mutableListOf<Pair<Long, RenderProbeParse.WinStats>>()
+            val ids = StringBuilder()
+            for (id in pcmanCandS.distinct()) {
+                val xp = settleGuest("xprop", "-id", id.toString(),
+                    "_NET_WM_PID", "WM_CLASS", "_NET_WM_WINDOW_TYPE")
+                Log.i(TAG, "render-evidence: candidate 0x" + java.lang.Long.toHexString(id) +
+                    " xprop RAW:\n" + xp)
+                val xw = settleGuest("xwininfo", "-id", id.toString())
+                Log.i(TAG, "render-evidence: candidate 0x" + java.lang.Long.toHexString(id) +
+                    " xwininfo RAW (incl. NAME):\n" + xw)
+                val pid = RenderProbeParse.xpropPid(xp)
+                val pidAbsent = RenderProbeParse.xpropPidAbsent(xp)
+                val cls = RenderProbeParse.xpropClass(xp)
+                val types = RenderProbeParse.xpropWmTypes(xp)
+                val st = RenderProbeParse.winStats(xw)
+                ids.append("candidate 0x").append(java.lang.Long.toHexString(id))
+                    .append(" pid=").append(pid?.toString() ?: if (pidAbsent) "ABSENT" else "UNREADABLE")
+                    .append(" class=").append(cls)
+                    .append(" types=").append(types?.toString() ?: "UNREADABLE")
+                    .append(" stats=").append(st?.toString() ?: "UNREADABLE").append('\n')
+                if ((pid == null && !pidAbsent) || cls == null || types == null || st == null)
+                    throw AssertionError("render/geometry: sampler candidate 0x" +
+                        java.lang.Long.toHexString(id) + " probe UNREADABLE - unknown," +
+                        " never skipped; identities so far:\n" + ids)
+                if (pid == null) continue  // explicitly ABSENT: not owned, documented
+                if (pid.toInt() == pcmanPid && cls.second == "Pcmanfm" &&
+                    types.contains("_NET_WM_WINDOW_TYPE_DESKTOP") && st.mapState == "IsViewable")
+                    qual.add(id to st)
+            }
+            // Owner process identity: fresh anchor compared to the ORIGINAL
+            // ownership anchor - a changed starttime = restart/PID reuse,
+            // never "a new process under the old pid is fine".
+            val pStart = procStartTime(pcmanPid)
+                ?: throw AssertionError("render/geometry: sampler pcmanfm process anchor" +
+                    " unreadable - unknown, never assumed")
+            if (pStart != pcmanStart0)
+                throw AssertionError("render/geometry: pcmanfm process identity CHANGED" +
+                    " mid-sampling (" + pcmanStart0 + " -> " + pStart + ") - restart/PID" +
+                    " reuse; UNKNOWN, never stabilizing an unrelated process")
+            settle.lateReason(System.nanoTime())?.let {
+                throw AssertionError("render/geometry: process-anchor read completed AFTER" +
+                    " the settle subdeadline (" + it + ") - return-late ALWAYS fails")
+            }
+            val primCount = rrAct.count { it.primary }
+            val dRects = qual.map { intArrayOf(it.second.absX, it.second.absY, it.second.w, it.second.h) }
+            val reason = xinIssue ?: RenderProbeParse.topologyConsistency(rootR, mons, primCount, dRects)
+            if (reason != null)
+                return Sample(t0, System.nanoTime(), wall, reason, null, null, rootStS, null,
+                    rrRawS, xinS.state.toString() + "(heads=" + xinS.heads.size + ")",
+                    mons, dRects, rootR, ids.toString())
+            // Consistent: the INTENDED selection (primary's desktop, or sole).
+            val bij = RenderProbeParse.matchMonitorBijection(dRects, mons)!!
+            val selIdx = if (qual.size == 1) 0
+                else bij.indexOf(rrAct.withIndex().first { it.value.primary }.index)
+            val deskIdS = qual[selIdx].first
+            val dsS = qual[selIdx].second
+            val monsSorted = mons.sortedWith(compareBy({ it[0] }, { it[1] }, { it[2] }, { it[3] }))
+            val dSorted = dRects.sortedWith(compareBy({ it[0] }, { it[1] }, { it[2] }, { it[3] }))
+            val primRect = rrAct.firstOrNull { it.primary }
+                ?.let { intArrayOf(it.x, it.y, it.w, it.h) }
+            val st = RenderProbeParse.TopoState(pcmanPid, pStart, deskIdS,
+                dRects[selIdx].copyOf(), dSorted, monsSorted,
+                monsSorted.indexOfFirst { primRect != null && it.contentEquals(primRect) },
+                rootR.copyOf())
+            return Sample(t0, System.nanoTime(), wall, null, st, dsS, rootStS,
+                mons[bij[selIdx]].copyOf(), rrRawS,
+                xinS.state.toString() + "(heads=" + xinS.heads.size + ")",
+                mons, dRects, rootR, ids.toString())
         }
+
+        var lastSample: Sample? = null
+        val trajectory = StringBuilder()
+        var firstSampleNanos = -1L
+        var firstConsistentNanos = -1L
+        val settled = try {
+            RenderProbeParse.settleLoop(
+                settle, 3, 500L,
+                now = { System.nanoTime() },
+                sleep = { ms -> Thread.sleep(ms) },
+                sample = {
+                    val s = takeSample()
+                    lastSample = s
+                    RenderProbeParse.SettleObservation(s.reason, s.state, s.doneNanos)
+                },
+                onSample = { idx, _ ->
+                    val s = lastSample!!
+                    if (firstSampleNanos < 0) firstSampleNanos = s.atNanos
+                    if (s.reason == null && firstConsistentNanos < 0) firstConsistentNanos = s.doneNanos
+                    trajectory.append("#").append(idx)
+                        .append(" wall=").append(s.wallMs)
+                        .append(" mono+").append((s.doneNanos - firstSampleNanos) / 1_000_000).append("ms")
+                        .append(" round=").append((s.doneNanos - s.atNanos) / 1_000_000).append("ms")
+                        .append(" ").append(s.reason ?: "CONSISTENT")
+                        .append(" root=").append(s.rootRect?.contentToString() ?: "-")
+                        .append(" mons=").append(s.monRects.joinToString { it.contentToString() })
+                        .append(" desks=").append(s.deskRects.joinToString { it.contentToString() })
+                        .append('\n')
+                    Log.i(TAG, "render-evidence: settle sample #" + idx + " wall=" + s.wallMs +
+                        " mono+" + (s.doneNanos - firstSampleNanos) / 1_000_000 + "ms " +
+                        (s.reason ?: "CONSISTENT") +
+                        (if (s.identities.isNotEmpty()) "\n" + s.identities else ""))
+                })
+        } catch (e: AssertionError) {
+            // SettleFailure AND any unknown from inside takeSample - the
+            // trajectory is attached either way (raw candidate/sample logs
+            // remain in logcat regardless).
+            throw AssertionError("render/geometry: " + e.message + "\nsettle trajectory:\n" + trajectory)
+        }
+        // lastSample is the post-stability REVALIDATION sample - key-equal
+        // to the stable observation (settleLoop threw otherwise) and the
+        // most current full state, so downstream checks build on it.
+        val stable = lastSample!!
+        Log.i(TAG, "render-evidence: topology SETTLED (product finding: first consistent" +
+            " at +" + (if (firstConsistentNanos >= 0) (firstConsistentNanos - firstSampleNanos) / 1_000_000 else -1) +
+            "ms, stable at +" + (settled.doneNanos - firstSampleNanos) / 1_000_000 +
+            "ms, revalidated at +" + (stable.doneNanos - firstSampleNanos) / 1_000_000 +
+            "ms of observation)")
+        val deskId = stable.state!!.deskId
+        val ds = stable.ds!!
+        val selMon = stable.selMon!!
+        val rs = stable.rootSt!!
+        val enabledMonitors = stable.state.monRects.size
         Log.i(TAG, "render-evidence: desktop window " + ds + " selected on monitor " +
             selMon.contentToString() + " over root " + rs.w + "x" + rs.h +
-            " (monitors=" + enabledMonitors + ")")
+            " (monitors=" + enabledMonitors + ", stable-key pid=" + stable.state.pcmanPid +
+            "/" + stable.state.pcmanStart + " xid=0x" + java.lang.Long.toHexString(deskId) + ")")
 
         // 8. xterm window identity via a VERIFIED channel - never a class
         //    or uniqueness heuristic: xterm sets WINDOWID (the X window id
