@@ -125,7 +125,12 @@ object PhantomSampler {
 
         // Marker state AT SCAN TIME: 'Z'/'X' = expired but not yet
         // reaped (still visible in /proc) - calibration UNKNOWN.
-        val markerSpawnStart = if (markerPid > 0) startTimeOf(markerPid) else null
+        // The identity pin is captured HERE - after the own-uid scan,
+        // BEFORE any signal - NOT at spawn: the pid of our own unreaped
+        // child cannot be reused, so the pin still binds any later
+        // signal to the spawned child, but "spawn-captured" would
+        // misstate the chronology.
+        val markerPinStart = if (markerPid > 0) startTimeOf(markerPid) else null
         var markerState: String? = null
         if (markerPid > 0) {
             val mst = try { File("/proc/" + markerPid + "/stat").readText() } catch (t: Throwable) { null }
@@ -161,16 +166,20 @@ object PhantomSampler {
                 markerProc.destroy()
                 var end = System.currentTimeMillis() + 3_000
                 while (System.currentTimeMillis() < end && markerProc.isAlive) Thread.sleep(50)
-                if (markerProc.isAlive && markerPid > 0 && markerSpawnStart != null &&
-                    startTimeOf(markerPid) == markerSpawnStart &&
+                if (markerProc.isAlive && markerPid > 0 && markerPinStart != null &&
+                    startTimeOf(markerPid) == markerPinStart &&
                     try { android.system.Os.stat("/proc/" + markerPid).st_uid == myUid } catch (t: Throwable) { false }) {
                     try { android.os.Process.sendSignal(markerPid, android.system.OsConstants.SIGKILL) } catch (t: Throwable) { }
                     end = System.currentTimeMillis() + 2_000
                     while (System.currentTimeMillis() < end && markerProc.isAlive) Thread.sleep(50)
                 }
                 if (!markerProc.isAlive) {
-                    try { markerProc.waitFor() } catch (t: Throwable) { }
-                    markerCleanup = "terminated+reaped"
+                    // waitFor() REAPS the child; its exception is
+                    // PRESERVED in the label - "reaped" is never
+                    // claimed from a swallowed exception.
+                    val reapNote = try { markerProc.waitFor(); "waitFor-returned" }
+                        catch (t: Throwable) { "waitFor-threw(" + (t.message ?: t.javaClass.simpleName) + ")" }
+                    markerCleanup = "terminated+reap-attempted(" + reapNote + ")"
                 } else {
                     markerCleanup = "STILL-ALIVE(unknown leftover state)"
                 }

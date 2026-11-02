@@ -480,19 +480,26 @@ class VirglGnomeSessionTest {
         return Pair(out, partial)
     }
 
-    /** Own-uid vtest server/worker pids (live cmdline carries the
-     *  binary name) + a partial flag: an unreadable own-uid cmdline
-     *  cannot be classified, so "no residual" is unproven. */
-    private fun scanOwnUidVirgl(): Pair<List<Int>, Boolean> {
+    /** Own-uid vtest processes attributed by the launch's
+     *  generation-unique SOCKET PATH in their live cmdline:
+     *  Triple(pids-owned-by-this-launch, other-own-uid-vtest-count,
+     *  partial). A process whose cmdline carries the binary but not
+     *  this socket path is NOT this launch's - recorded, never
+     *  attributed, never signaled. An UNREADABLE own-uid cmdline cannot
+     *  be attributed either way, so partial=true and "no residual" is
+     *  unproven. */
+    private fun scanOwnUidVirglForSocket(socketPath: String): Triple<List<Int>, Int, Boolean> {
         val procs = scanOwnUidProcs()
-        val pids = ArrayList<Int>()
+        val matched = ArrayList<Int>()
+        var other = 0
         var partial = procs.second
         for (t in procs.first) {
             val cmd = try { File("/proc/" + t.first + "/cmdline").readText() }
                 catch (e: Throwable) { partial = true; continue }
-            if (cmd.contains("libvirgl_test_server.so")) pids.add(t.first)
+            if (!cmd.contains("libvirgl_test_server.so")) continue
+            if (cmd.contains(socketPath)) matched.add(t.first) else other++
         }
-        return Pair(pids, partial)
+        return Triple(matched, other, partial)
     }
 
     /** PPid-ancestry walk: TRUE = [ancestor] is on [pid]'s chain (owned
@@ -627,6 +634,11 @@ class VirglGnomeSessionTest {
         // one file, so only bytes at/after this offset belong to THIS
         // arm's server (the same binding discipline as launchBase).
         var virglLogBase = -1L
+        // THIS launch's generation-unique server socket path, captured
+        // at launch: the ownership discriminator for the post-stop
+        // residual roster (an unrelated own-uid vtest process is never
+        // attributed to this launch and never signaled).
+        var armSocketPath: String? = null
         var rendererVerdict = "UNKNOWN (stage not reached)"
         var presentationVerdict = "REVIEWER-VERIFICATION PENDING (stage not reached)"
         var failure: Throwable? = null
@@ -764,6 +776,7 @@ class VirglGnomeSessionTest {
             assertNotNull("opted-in session launch started NO virgl render server " +
                 "(software fallback - virgl session verdict void)", srvIdent)
             val sock = XServer.virglCurrentSocketForTest()
+            armSocketPath = sock?.absolutePath
             out.append("render-server: pid=").append(srvIdent!!.pid).append(" start=").append(srvIdent.start)
                 .append(" uid=").append(srvIdent.uid).append(" sock=")
                 .append(sock?.absolutePath ?: "?").append(" launchId=").append(launchId).append('\n')
@@ -1003,18 +1016,30 @@ class VirglGnomeSessionTest {
                         else "NOT-PROVEN (no owned this-generation gnome-shell environ carried" +
                     " GALLIUM_DRIVER=virpipe)")
                 .append('\n')
-            // VTEST-MC SERVER-LOG EVIDENCE (pinned 1.3.0 protocol):
-            // vtest_server.c:217 prints the multi-clients startup line
-            // ONLY when the flag actually parsed; :759 prints "client
-            // context created." per new client context; :538 prints
-            // "client: ..." on disconnect. Scope = bytes appended to
-            // virgl-server.log since virglLogBase (THIS arm's server;
-            // the product appendTo()s every generation into one file).
+            // VTEST-MC SERVER-LOG OBSERVATION (pinned 1.3.0 protocol;
+            // NEVER a gate): vtest_server.c:217 prints the multi-clients
+            // startup line when the flag parses, :759 "client context
+            // created." per new client context, :538 "client: ..." on
+            // disconnect. ALL of these go to STDOUT (printf /
+            // fprintf(stdout)), which is block-buffered to a file, and
+            // the identity-verified teardown SIGNALS the server, so
+            // buffered lines can be lost before any flush (run
+            // 41365593840 aborted on exactly this: the line was ABSENT
+            // while the live cmdline PROVED the flag effective). The
+            // hard mode proof is the live-cmdline + roster gate above;
+            // everything here is a recorded observation with its
+            // readable state and byte accounting.
             run {
                 val vf = File(ctx.filesDir, "virgl-server.log")
-                val all = try { if (vf.isFile) vf.readBytes() else ByteArray(0) } catch (t: Throwable) { ByteArray(0) }
+                val read = try {
+                    if (vf.isFile) Pair(vf.readBytes(), "ok") else Pair(ByteArray(0), "absent")
+                } catch (t: Throwable) {
+                    Pair(ByteArray(0), "unreadable(" + (t.message ?: t.javaClass.simpleName) + ")")
+                }
+                val all = read.first
                 val bound = virglLogBase >= 0 && all.size.toLong() >= virglLogBase
-                val region = if (bound) String(all, virglLogBase.toInt(), all.size - virglLogBase.toInt()) else String(all)
+                val region = if (bound)
+                    String(all, virglLogBase.toInt(), all.size - virglLogBase.toInt()) else ""
                 val mcLine = region.contains("multi-clients enabled: clients must trust each other")
                 var created = 0
                 var gone = 0
@@ -1023,33 +1048,29 @@ class VirglGnomeSessionTest {
                 for (ln in region.lines()) {
                     if (ln.contains("client context created.")) {
                         created++
+                        if (bal + 1 > maxLive) maxLive = bal + 1
                         bal++
-                        if (bal > maxLive) maxLive = bal
                     } else if (ln.startsWith("client: ")) {
                         gone++
                         bal--
                     }
                 }
-                out.append("== VTEST-MC server-log (this arm, byte-base=")
-                    .append(if (bound) virglLogBase.toString() else "INVALID(base " + virglLogBase + ", parsed whole file - generation binding UNVERIFIED)")
-                    .append("): multi-clients-startup-line=").append(if (mcLine) "PRESENT" else "ABSENT")
+                out.append("== VTEST-MC server-log OBSERVATION (not a gate; stdout is block-buffered\n")
+                    .append("  and the teardown signals the server, so buffered lines can be lost before flush):\n")
+                    .append("  read-state=").append(read.second)
+                    .append(" byte-base=").append(virglLogBase)
+                    .append(" current-bytes=").append(all.size)
+                    .append(if (bound) "" else " BASE-INVALID(file shrank or base unset - slice void)")
+                    .append(" slice-bytes=").append(if (bound) region.length else 0).append('\n')
+                    .append("  multi-clients-startup-line=").append(if (mcLine) "PRESENT" else "ABSENT")
                     .append(" client-contexts-created=").append(created)
                     .append(" client-disconnects=").append(gone)
-                    .append(" max-live-clients=").append(maxLive)
-                    .append('\n')
-                out.append("== VTEST-MC concurrency: ")
-                    .append(if (maxLive >= 2)
-                        "OBSERVED (>=2 simultaneously live client contexts from pinned server log evidence)"
-                        else "NOT-OBSERVED (max-live<2; readiness/shell/window lines do NOT prove " +
-                            "simultaneous clients - multi-client concurrency remains UNPROVEN)")
-                    .append('\n')
-                assertTrue("vtest-mc requested ON but this arm's running server never printed its " +
-                    "multi-clients startup line (vtest_server.c:217) - the flag did not take effect " +
-                    "in the RUNNING binary",
-                    !vtestMcRequested || mcLine)
-                assertTrue("vtest-mc requested OFF but the server log carries the multi-clients " +
-                    "startup line - a stale mode contaminated this launch",
-                    vtestMcRequested || !mcLine)
+                    .append(" (lower bounds under buffer loss; ABSENT proves nothing)\n")
+                out.append("== VTEST-MC concurrency: UNPROVEN (unpaired running-balance max-live=")
+                    .append(maxLive)
+                    .append(" is only a protocol-derived candidate - missing or disordered disconnect\n")
+                    .append("  lines can INFLATE it, and the pinned 1.3.0 log lines carry no client\n")
+                    .append("  identity to pair, so simultaneous clients are never asserted from this evidence)\n")
             }
             out.append("VERDICT compositor-renderer: ").append(rendererVerdict).append('\n')
             assertTrue("owned this-generation gnome-shell environ lacks GALLIUM_DRIVER=virpipe - " +
@@ -1565,24 +1586,35 @@ class VirglGnomeSessionTest {
                 if (failure == null) failure = ce else failure!!.addSuppressed(ce)
             }
             // POST-STOP OWNED ROSTER: count own-uid processes whose
-            // live cmdline carries the vtest server binary (server or
-            // forked worker). Zero workers alone proves NOTHING about
-            // rendering or crash isolation - this checks ONLY teardown
-            // completeness (the identity-checked cleanup removed the
-            // whole server tree). A partial scan = UNKNOWN, never zero.
+            // live cmdline carries THIS launch's generation-unique
+            // socket path (ownership attribution; an unrelated own-uid
+            // server is never attributed to this launch and NEVER
+            // signaled - this check signals NOTHING). Zero workers
+            // alone proves NOTHING about rendering or crash isolation -
+            // this checks ONLY teardown completeness. A partial scan
+            // (any unreadable own-uid cmdline) or a missing socket
+            // identity = UNKNOWN, never "cleanup complete".
             try {
-                val resid = scanOwnUidVirgl()
-                out.append("post-stop virgl roster: ")
-                    .append(if (resid.second)
-                        "UNKNOWN (own-uid scan partial - a residual server/worker cannot be excluded)"
-                        else if (resid.first.isEmpty())
-                            "zero residual virgl server/worker processes (owned teardown complete)"
-                        else "RESIDUAL " + resid.first.size + " virgl process(es) still owned: " +
+                val sockPath = armSocketPath
+                if (sockPath == null) {
+                    out.append("post-stop virgl roster: UNKNOWN (no owned-server socket identity captured this arm)\n")
+                } else {
+                    val resid = scanOwnUidVirglForSocket(sockPath)
+                    out.append("post-stop virgl roster: ")
+                        .append(if (resid.third)
+                            "UNKNOWN (own-uid scan partial - a residual owned by this launch cannot be excluded)"
+                            else if (resid.first.isEmpty())
+                                "zero residual virgl processes owned by THIS launch (socket-path attributed)"
+                            else "RESIDUAL " + resid.first.size + " virgl process(es) owned by THIS launch: " +
+                                resid.first.joinToString(","))
+                        .append(if (resid.second > 0)
+                            " [other own-uid virgl processes NOT this launch's: " + resid.second +
+                                " - recorded, never attributed, never signaled]" else "")
+                        .append('\n')
+                    if (!resid.third && resid.first.isNotEmpty())
+                        throw java.io.IOException("post-stop residual virgl processes owned by this launch: " +
                             resid.first.joinToString(","))
-                    .append('\n')
-                if (!resid.second && resid.first.isNotEmpty())
-                    throw java.io.IOException("post-stop residual virgl processes owned by this uid: " +
-                        resid.first.joinToString(","))
+                }
             } catch (re: Throwable) {
                 out.append("== CLEANUP-ERROR post-stop virgl roster: ").append(re.message ?: re.toString()).append('\n')
                 if (failure == null) failure = re else failure!!.addSuppressed(re)
