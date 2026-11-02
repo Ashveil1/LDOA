@@ -64,15 +64,10 @@ jobs:
             # guarded: capture can never mask the gate's exit). Files land in
             # paths the always() artifact upload already covers.
             mkdir -p screenshots
-            gate_capture() {
-              timeout 10 adb -s emulator-5554 exec-out screencap -p > "screenshots/gate-fail-$1.png" 2>/dev/null || true
-              timeout 15 adb -s emulator-5554 shell dumpsys window displays > "screenshots/gate-fail-$1-displays.txt" 2>/dev/null || true
-              timeout 20 adb -s emulator-5554 logcat -d > /tmp/shotlog.txt 2>/dev/null || true
-            }
-            python3 ci/launcher_gate.py boot || { gate_capture boot; exit 1; }
+            python3 ci/launcher_gate.py boot || { sh ci/gate_capture.sh boot; exit 1; }
             ./gradlew assembleDebug assembleDebugAndroidTest 2>&1 | tee /tmp/build.log
             grep -q "BUILD SUCCESSFUL" /tmp/build.log || { echo "assemble FAILED before readiness gate + instrumentation"; exit 1; }
-            python3 ci/launcher_gate.py post-build || { gate_capture post-build; exit 1; }
+            python3 ci/launcher_gate.py post-build || { sh ci/gate_capture.sh post-build; exit 1; }
             ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=dev.phonelinux.proto.MobileDesktopEntryTest -Pandroid.testInstrumentationRunnerArguments.ldoa_ci_emulator=true --info 2>&1 | tee /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
             grep -q "BUILD SUCCESSFUL" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
             # NO post-task run-as guest-log pulls (run 41457173978): they
