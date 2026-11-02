@@ -45,6 +45,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      # Cheap BEFORE any emulator work: the upload path list must retain
+      # every lane-harvested diagnostic artifact (run 41371167693 lost the
+      # first SAMPLED xmap PPM to a stale list). Local coverage check of
+      # the parsed upload list vs the parsed lane harvest targets - not an
+      # upload-artifact execution.
+      - name: Evidence-retention upload-path coverage check
+        run: python3 ci/check_evidence_upload_paths.py . --negative-selftest
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
