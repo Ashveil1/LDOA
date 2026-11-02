@@ -367,6 +367,7 @@ pull_or_absent gnome-recovery-evidence.txt gnome-recovery-evidence.txt 60 "RECOV
 pull_or_absent ldoa-session-census.txt ldoa-session-census.txt 60 "SESSION-CENSUS-HARVEST (written pre-launch; ABSENT = the census never ran - arm skipped, write failed, or pre-this-instrumentation build)"
 pull_or_absent phantom-snapshots.log phantom-snapshots.log 60 "PHANTOM-SNAPSHOTS-HARVEST"
 pull_or_absent phantom-dumpsys-raw.log phantom-dumpsys-raw.log 120 "PHANTOM-RAW-HARVEST"
+pull_or_absent virgl-server.log virgl-server.log 60 "VIRGL-SERVER-LOG-HARVEST (ABSENT = no record: file missing, empty (buffered stdout never flushed before the signaled teardown), or harvest failed; NOT proof the server printed nothing)"
 
 timeout 60 adb -s "$SERIAL" logcat -d > /tmp/shotlog.txt || true
 python3 .github/scripts/extract_shots.py /tmp/shotlog.txt screenshots || true
