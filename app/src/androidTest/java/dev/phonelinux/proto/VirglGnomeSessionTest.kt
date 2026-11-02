@@ -622,6 +622,25 @@ class VirglGnomeSessionTest {
                         "non-symlink file - refusing to manage an unexpected type (fail closed)")
                 Files.readAllBytes(vtestMcPath)
             } else null
+        // VIRGL DEBUG LOGGING OPT-IN (explicit -e ldoaVirglDebug 1 ONLY;
+        // default OFF = byte-identical launch env on both sides). One flag
+        // file gates BOTH the server traces (XServer: VIRGL_LOG_LEVEL +
+        // VREND_DEBUG=feat extraEnv) and the guest init-time GL logs
+        // (GuestUbuntu: LIBGL_DEBUG=verbose + EGL_LOG_LEVEL=debug;
+        // MUTTER_DEBUG defaults are NOT modified). Strict lifecycle via
+        // LdoaFlagLifecycle (JVM-fixture-covered), NOT the Files.exists
+        // pattern.
+        val virglDebugRequested = InstrumentationRegistry.getArguments().getString("ldoaVirglDebug") == "1"
+        val virglDebugFlag = File(ctx.filesDir, ".ldoa-virgl-debug")
+        val virglDebugPath = virglDebugFlag.toPath()
+        // LdoaFlagLifecycle (JVM-fixture-covered): absence is null; a
+        // non-regular/symlinked path throws; access failure propagates -
+        // unknown never reads as "absent".
+        val savedVirglDebugFlag: ByteArray? = LdoaFlagLifecycle.readIfRegular(virglDebugPath)
+        // INVOCATION-LEVEL ownership: restored only if THIS invocation's
+        // own successful mutation says so (NONE touches nothing - a
+        // same-bytes lookalike from a racer is never deleted).
+        var virglDebugMutation = LdoaFlagLifecycle.Mutation.NONE
         var executed = false
         var checksPassed = false
         // Arm-scoped launch generation markers, hoisted so the finally
@@ -725,6 +744,44 @@ class VirglGnomeSessionTest {
                     out.append("vtest-mc evaluation mode: OFF (no ldoaVtestMc arg; default fork mode)\n")
                 }
             }
+            if (virglDebugRequested) {
+                if (savedVirglDebugFlag == null) {
+                    // explicit WRITE+CREATE_NEW+NOFOLLOW: fail loudly on a
+                    // race or symlink; never truncates whatever appeared.
+                    LdoaFlagLifecycle.createNew(virglDebugPath, byteArrayOf(0x31))
+                    virglDebugMutation = LdoaFlagLifecycle.Mutation.CREATED
+                } // else: pre-existing regular flag left UNCHANGED (no rewrite,
+                  // no owned mutation; restore will touch nothing)
+                out.append("virgl-debug logging mode: ON (explicit instrumentation arg\n")
+                    .append("  ldoaVirglDebug=1; MINIMAL INIT-ONLY set: server VREND_DEBUG=feat +\n")
+                    .append("  VIRGL_LOG_LEVEL=debug (stderr, flushed per message), guest\n")
+                    .append("  LIBGL_DEBUG=verbose + EGL_LOG_LEVEL=debug (init-time driver-load\n")
+                    .append("  lines only; MUTTER_DEBUG defaults UNCHANGED - no per-frame topics;\n")
+                    .append("  knob presence strings-verified on the noble 25.2.8 Mesa binaries;\n")
+                    .append("  diagnostic launch ONLY)\n")
+            } else {
+                if (savedVirglDebugFlag != null) {
+                    // Owned stale-flag removal ONLY while the bytes are
+                    // still the saved ones; a same-position newcomer is
+                    // preserved and this invocation records NO mutation.
+                    if (LdoaFlagLifecycle.deleteIfUnchanged(virglDebugPath, savedVirglDebugFlag)) {
+                        virglDebugMutation = LdoaFlagLifecycle.Mutation.DELETED
+                        out.append("virgl-debug logging mode: OFF (no ldoaVirglDebug arg; removed a\n")
+                            .append("  STALE virgl-debug flag so this launch is the default env)\n")
+                    } else {
+                        out.append("virgl-debug logging mode: OFF REQUESTED but stale flag content\n")
+                            .append("  changed before removal - PRESERVED, no owned mutation; the\n")
+                            .append("  pre-launch mode check below REFUSES this launch (no silent\n")
+                            .append("  logging-on launch under a requested OFF)\n")
+                    }
+                } else {
+                    out.append("virgl-debug logging mode: OFF (no ldoaVirglDebug arg; default env)\n")
+                }
+            }
+            // Fail closed BEFORE launch: the EFFECTIVE flag state must
+            // equal the requested mode - a preserved-foreign or racer flag
+            // must never silently launch with logging in the wrong state.
+            LdoaFlagLifecycle.requireMode(virglDebugPath, virglDebugRequested)
             if (e1Requested) {
                 e1Flag.writeText("1")
                 out.append("E1 experiment mode: ON (explicit instrumentation arg ldoaE1=1;\n")
@@ -1835,6 +1892,21 @@ class VirglGnomeSessionTest {
                 }
             } catch (fe: Throwable) {
                 out.append("== CLEANUP-ERROR vtest-mc-flag restore: ").append(fe.message ?: fe.toString()).append('\n')
+                if (failure == null) failure = fe else failure!!.addSuppressed(fe)
+            }
+            try {
+                // Undo ONLY this invocation's own recorded mutation:
+                // NONE touches nothing (a same-bytes lookalike is never
+                // deleted); CREATED deletes only its exact bytes; DELETED
+                // recreates the saved bytes via CREATE_NEW (a newcomer
+                // fails loudly instead of being overwritten).
+                val outcome = LdoaFlagLifecycle.guardedRestore(
+                    virglDebugPath, savedVirglDebugFlag, virglDebugMutation)
+                if (outcome == LdoaFlagLifecycle.RestoreOutcome.PRESERVED_FOREIGN)
+                    out.append("== CLEANUP-WARNING virgl-debug-flag: content changed during the " +
+                        "test - foreign/replaced file PRESERVED untouched (restore skipped)\n")
+            } catch (fe: Throwable) {
+                out.append("== CLEANUP-ERROR virgl-debug-flag restore: ").append(fe.message ?: fe.toString()).append('\n')
                 if (failure == null) failure = fe else failure!!.addSuppressed(fe)
             }
             // Runtime mode + guest-side mask/rollback outcome, scoped to

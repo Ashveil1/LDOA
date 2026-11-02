@@ -32,6 +32,11 @@ on:
         default: 'off'
         type: choice
         options: ['off', 'on']
+      virgldebug:
+        description: 'VIRGL DEBUG LOGGING experiment: on = pass -e ldoaVirglDebug 1 to VirglGnomeSessionTest only (MINIMAL init-time set for THAT launch: server VREND_DEBUG=feat + VIRGL_LOG_LEVEL=debug, guest LIBGL_DEBUG=verbose + EGL_LOG_LEVEL=debug; MUTTER_DEBUG defaults unmodified; flags restored after); off (DEFAULT) = every lane keeps the stock launch env. Regression/full runs must keep this off.'
+        default: 'off'
+        type: choice
+        options: ['off', 'on']
 
 jobs:
   lorie-mouse-attribution:
@@ -41,6 +46,7 @@ jobs:
       LANE: ${{ github.event.inputs.lane || 'full' }}
       E1: ${{ github.event.inputs.e1 || 'off' }}
       VTESTMC: ${{ github.event.inputs.vtestmc || 'off' }}
+      VIRGLDEBUG: ${{ github.event.inputs.virgldebug || 'off' }}
     steps:
       - uses: actions/checkout@v4
         with:

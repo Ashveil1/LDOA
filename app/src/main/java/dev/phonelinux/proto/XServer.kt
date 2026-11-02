@@ -241,6 +241,23 @@ object XServer {
     private fun virglOptedIn(ctx: Context): Boolean =
         System.getenv("LDOA_VIRGL") == "1" || File(ctx.filesDir, ".ldoa-virgl-optin").isFile
 
+    /** Strict DEBUG-gated diagnostic opt-in flag read: BuildConfig.DEBUG
+     *  AND a regular NON-SYMLINK file. Files.exists/isRegularFile-style
+     *  checks conflate ABSENT with UNKNOWN (an access error reads as
+     *  false); here absence (NoSuchFileException) is false and any other
+     *  failure THROWS (fail closed) - an unreadable flag state must never
+     *  silently read as "not requested" for a diagnostic that changes
+     *  logging behavior. Shared by the server (here) and guest
+     *  (GuestUbuntu) sides so both apply IDENTICAL discipline. */
+    internal fun ldoaDebugFlagOn(ctx: Context, name: String): Boolean {
+        if (!BuildConfig.DEBUG) return false
+        // readAttributes-based: absence (NoSuchFileException) is false; a
+        // non-regular/symlinked path throws; any other access failure
+        // propagates - unknown never reads as "not requested"
+        // (LdoaFlagLifecycle, JVM-fixture-covered).
+        return LdoaFlagLifecycle.isSet(File(ctx.filesDir, name).toPath())
+    }
+
     /** VirGL spike: start the host vtest render server (opt-in only;
      *  default launches never touch this). Runs WITHOUT holding
      *  ownershipLock: the exec is instant and the bounded 5s socket wait
@@ -528,7 +545,24 @@ object XServer {
         // the requested mode.
         val vtestMcOptIn = BuildConfig.DEBUG && Files.isRegularFile(
             File(ctx.filesDir, "vtest-mc.optin").toPath(), LinkOption.NOFOLLOW_LINKS)
+        // VIRGL DEBUG LOGGING (DEFAULT OFF; instrumentation arg
+        // ldoaVirglDebug=1 -> .ldoa-virgl-debug flag): server-side traces
+        // go to stderr, which virgl_log fflushes per message
+        // (virglrenderer 1.3.0 src/virgl_util.c:157-213) - each message is
+        // flushed when written, so nothing flushed stays pending at
+        // teardown. The server's OWN stdout activity lines (multi-clients
+        // banner, client context created/disconnect) are a separate path:
+        // stdout MAY buffer (block-buffered under the file redirect;
+        // vtest_server installs no SIGTERM handler, so default-disposition
+        // teardown would terminate without a stdio flush). VREND_DEBUG is
+        // bounded to feat (once-per-context caps negotiation); obj and
+        // the per-command cmd stream are deliberately excluded (volume is
+        // object/submission-count-bound, not a fixed small size).
+        val virglDebugOptIn = ldoaDebugFlagOn(ctx, ".ldoa-virgl-debug")
         val virglSocket = if (reuseLikely) null else startVirglServerOptIn(ctx,
+            extraEnv = if (virglDebugOptIn) mapOf(
+                "VIRGL_LOG_LEVEL" to "debug",
+                "VREND_DEBUG" to "feat") else emptyMap(),
             extraArgs = if (vtestMcOptIn) listOf("--no-fork", "--multi-clients") else emptyList())
         // A server started speculatively for a launch that turns out to be
         // a reuse (or fails) dies AFTER the ownership lock is released:

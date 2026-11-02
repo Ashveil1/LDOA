@@ -226,6 +226,11 @@ if [ "$E1" = "on" ]; then E1ARG="-e ldoaE1 1"; fi
 # server everywhere; regression/full runs keep this off.
 VTESTMCARG=""
 if [ "$VTESTMC" = "on" ]; then VTESTMCARG="-e ldoaVtestMc 1"; fi
+# VIRGL DEBUG LOGGING arg: EXPLICIT opt-in only (dispatch input
+# virgldebug=on -> -e ldoaVirglDebug 1). Default off = stock launch env on
+# both sides; regression/full runs keep this off.
+VIRGLDEBUGARG=""
+if [ "$VIRGLDEBUG" = "on" ]; then VIRGLDEBUGARG="-e ldoaVirglDebug 1"; fi
 # xmap-pixels helper: CI-built on THIS ubuntu-24.04 runner (noble ABI =
 # the guest rootfs; ci/xmap-pixels/BUILD.md) and pushed for the session
 # arm's bounded root pixel probe. A build/push failure does NOT fail the
@@ -279,7 +284,7 @@ if [ "$LANE" = full ] || [ "$LANE" = session ]; then
 fi
 date -u +"VIRGL-SESSION start %H:%M:%S (lane=$LANE e1=$E1 vtestmc=$VTESTMC)"
 if [ "$LANE" = full ] || [ "$LANE" = session ]; then
-  timeout -s KILL 1500 adb -s "$SERIAL" shell am instrument -w $E1ARG $VTESTMCARG -e class dev.phonelinux.proto.VirglGnomeSessionTest,dev.phonelinux.proto.GnomeSessionScriptSafetyTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl-session.log | tail -15 || echo "VIRGL-SESSION-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"
+  timeout -s KILL 1500 adb -s "$SERIAL" shell am instrument -w $E1ARG $VTESTMCARG $VIRGLDEBUGARG -e class dev.phonelinux.proto.VirglGnomeSessionTest,dev.phonelinux.proto.GnomeSessionScriptSafetyTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl-session.log | tail -15 || echo "VIRGL-SESSION-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"
 else
   echo "virgl-session SKIPPED (lane=$LANE)" > /tmp/instr-virgl-session.log
 fi
@@ -290,7 +295,7 @@ if [ "$LANE" = full ] || [ "$LANE" = session ]; then grep -q "OK (" /tmp/instr-v
 # payload REMOVES the target: a harvested file is intact device content or
 # ABSENT, never a masquerading partial/error payload.
 if [ "$LANE" = full ] || [ "$LANE" = session ]; then
-  for f in virgl-session.txt virgl-session-xcontent.img virgl-session-xcontent.partial virgl-session-xmap.ppm virgl-session-xov.ppm; do
+  for f in virgl-session.txt virgl-session-xcontent.img virgl-session-xcontent.partial virgl-session-xmap.ppm virgl-session-xov.ppm virgl-server.log; do
     pull_or_absent "$f" "$f" 60 "VIRGL-SESSION-HARVEST"
   done
 fi

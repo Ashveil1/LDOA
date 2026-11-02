@@ -1751,6 +1751,30 @@ object GuestUbuntu {
         if (File(ctx.filesDir, ".ldoa-session-diet-e1").isFile) {
             pb.environment()["LDOA_SESSION_DIET_E1"] = "1"
         }
+        // VIRGL DEBUG LOGGING (DEFAULT OFF; same .ldoa-virgl-debug flag as
+        // the server side, read through XServer.ldoaDebugFlagOn so BOTH
+        // sides apply identical DEBUG+regular+NOFOLLOW/unknown-fails-closed
+        // discipline): MAY yield clues toward the shell's GL stack in
+        // guest-gnome.log (driver-load lines are evidence, they do not by
+        // themselves settle renderer identity). Knob presence is
+        // strings-verified on the noble
+        // guest binaries (libmutter-14 46.2 + Mesa 25.2.8 debs) - a
+        // compiled-in clue, with per-knob output confirmed only at
+        // runtime; MUTTER_DEBUG's backend topic additionally has runtime
+        // precedent on this stack (2026-11-01 phone export). CLUTTER_DEBUG
+        // is NOT compiled into Ubuntu's clutter build - absent here. These
+        // vars travel the same pb.environment() route that carried
+        // GALLIUM_DRIVER=virpipe to the shell in run 41385820496
+        // (supporting evidence for the mechanism, not per-var proof). The
+        // MUTTER_DEBUG stays at its defaults (dbus,sm,startup): the
+        // per-frame backend topic is deliberately NOT enabled (volume is
+        // frame-cadence-bound, not a fixed small size). This set is
+        // init-time only: libGL/libEGL driver-load lines, emitted once
+        // per GL client initialization - KB-scale, not cadence-bound.
+        if (XServer.ldoaDebugFlagOn(ctx, ".ldoa-virgl-debug")) {
+            pb.environment()["LIBGL_DEBUG"] = "verbose"
+            pb.environment()["EGL_LOG_LEVEL"] = "debug"
+        }
         pb.redirectErrorStream(true)
         pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))
         Log.i(TAG, "launching GNOME session, log=$log")
