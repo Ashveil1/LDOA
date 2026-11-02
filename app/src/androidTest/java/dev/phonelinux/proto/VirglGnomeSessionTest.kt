@@ -1174,7 +1174,11 @@ class VirglGnomeSessionTest {
             // block and is never relabeled. An already-present xwd is
             // resolved FIRST and apt runs only when absent; resolution is
             // re-recorded after any install attempt, including a failed
-            // one. apt is bounded IN-GUEST by coreutils timeout -k (the
+            // one. apt runs under proot fake-root (-0): run 41439000905
+            // proved dpkg refuses without it (exit=100 "requested operation
+            // requires superuser privilege"); Proot.kt:41/46 fakeRoot adds
+            // ONLY the -0 arg (guest uid 0, no host privilege). apt is bounded
+            // IN-GUEST by coreutils timeout -k (the
             // runGuest timeout only SIGKILLs proot and ORPHANS guest-side
             // processes - Proot.kt:126-140 - which would strand apt/dpkg
             // mid-transaction), noninteractive per the existing fixture
@@ -1194,7 +1198,7 @@ class VirglGnomeSessionTest {
                     val fxApt = Proot.runGuest(ctx, rootfs,
                         listOf("/bin/sh", "-c",
                             "export DEBIAN_FRONTEND=noninteractive; timeout -k 5 570 apt-get install -y --no-install-recommends x11-apps"),
-                        timeoutMs = 600_000)
+                        fakeRoot = true, timeoutMs = 600_000)
                     out.append("guest-xcontent fixture: apt-get install x11-apps exit=")
                         .append(fxApt.exitCode)
                         .append(" stdout-tail=").append(fxApt.stdout.takeLast(200).replace('\n', ' '))
