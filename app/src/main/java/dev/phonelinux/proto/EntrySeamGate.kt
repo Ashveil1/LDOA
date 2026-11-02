@@ -32,6 +32,13 @@ internal object EntrySeamGate {
     fun refuseForOtherActive(otherMarkerActive: Boolean, liveKind: LiveKind, liveOwnerTag: String?, myOwnerTag: String): Boolean =
         otherMarkerActive || (liveKind != LiveKind.ABSENT && liveOwnerTag != myOwnerTag)
 
+    /** Durable recovery block: true while an unverified-cleanup block
+     *  applies to THIS boot. A device reboot (boot id change) means every
+     *  guest process is certainly dead, so the block never survives it.
+     *  Missing ids fail closed (still blocked). */
+    fun mobileRecoveryBlocked(blocked: Boolean, blockedBootId: String?, currentBootId: String?): Boolean =
+        blocked && (blockedBootId == null || currentBootId == null || blockedBootId == currentBootId)
+
     /** Same-mode decision for a MOBILE open (state after the cross-mode
      *  guard, so a non-absent tracked session here is tagged MOBILE). */
     enum class MobileSameMode { REUSE, REFUSE_UNCONFIRMED, REFUSE_UNKNOWN, PROCEED }

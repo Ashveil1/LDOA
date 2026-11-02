@@ -836,6 +836,7 @@ object XServer {
         lateWatchFor = null
         sessionProcess = null
         sessionRootIdent = null
+        sessionOwnerTag = null
         sessionBusIdent = null
         currentLaunchId = null
         busIdentGeneration = 0L
@@ -1116,6 +1117,14 @@ object XServer {
         (if (kind == EntrySeamGate.LiveKind.ABSENT) null else sessionOwnerTag) to kind
     }
 
+    /** Current kernel boot id, or null when unreadable (callers fail
+     *  closed). Readable without permissions; changes only on reboot, so
+     *  it distinguishes "same boot, orphan tracees possible" from "new
+     *  boot, every guest process certainly dead". */
+    private fun currentBootId(): String? = try {
+        File("/proc/sys/kernel/random/boot_id").readText().trim().ifEmpty { null }
+    } catch (t: Throwable) { null }
+
     fun openDesktop(activity: Activity, distro: Distro,
                     onStage: (String) -> Unit = {},
                     onError: (String) -> Unit = {},
@@ -1239,6 +1248,23 @@ object XServer {
                                 //  refused a foreign-owner or unattributed
                                 //  tracked session; the decision below
                                 //  still re-checks attribution.)
+                                //
+                                // Durable recovery block FIRST: set only
+                                // by a Stop whose owned cleanup was
+                                // unverified. A boot_id change means every
+                                // guest process is certainly dead - the
+                                // block lifts there and nowhere else.
+                                val bootNow = currentBootId()
+                                if (EntrySeamGate.mobileRecoveryBlocked(
+                                        desktopPrefs.getBoolean("mobile_recovery_blocked", false),
+                                        desktopPrefs.getString("mobile_recovery_boot", null), bootNow)) {
+                                    gateLog("mobile: recovery BLOCKED (unverified prior cleanup, same boot) - refuse")
+                                    failure = "Mobile desktop is blocked: a previous session's cleanup could not be verified. Tapping Stop again or restarting the app will NOT fix this - restart the device to reset it."
+                                } else if (desktopPrefs.getBoolean("mobile_recovery_blocked", false)) {
+                                    desktopPrefs.edit().remove("mobile_recovery_blocked").remove("mobile_recovery_boot").apply()
+                                    gateLog("mobile: recovery block lifted by device reboot (boot_id changed)")
+                                }
+                                if (failure == null) {
                                 val mobileMarker = desktopPrefs.getBoolean("mobile_desktop_active", false)
                                 val mobileState = trackedSessionState()
                                 when (EntrySeamGate.mobileSameMode(mobileMarker, mobileState.second, mobileState.first)) {
@@ -1263,6 +1289,7 @@ object XServer {
                                         failure = "Mobile desktop state is unknown - a previous session may still be running. Tap Stop session, then start again. Stop resets app state but CANNOT verify no guest processes survived; if the next start shows a stale or doubled desktop, Stop again and restart the app."
                                     }
                                     EntrySeamGate.MobileSameMode.PROCEED -> { }
+                                }
                                 }
                                 if (failure == null && !launched) {
                                 if (!GuestMobileShell.hasMobileShell(rootfs)) {
@@ -1604,10 +1631,12 @@ object XServer {
         val procSnap = rootProc
         val idents = LinkedHashMap<Int, PIdent>()
         teardownHookForTest?.invoke()
+        var treeWalkRan = false
         if (rootSnap != null) {
             val cur = identityOf(rootSnap.pid)
             if (cur != null && cur.start == rootSnap.start && cur.uid == rootSnap.uid) {
                 // Root identity matches THIS launch: walk its live tree.
+                treeWalkRan = true
                 for (pid in treeOf(rootSnap.pid, scanProc())) identityOf(pid)?.let { idents[pid] = it }
             } else {
                 Log.i(TAG, "stopDesktopMode: session root already exited or its PID was reused - tree walk skipped " +
@@ -1634,6 +1663,27 @@ object XServer {
                 Log.w(TAG, "stopDesktopMode: ownership changed hands during teardown " +
                     "(concurrent launch/retain) - new session handles, X server and active-pref left intact")
                 return
+            }
+            // MOBILE recovery block: a stopped MOBILE world whose
+            // teardown was UNVERIFIED (tree walk skipped, or leftover
+            // pids) must NOT let the marker clear below turn the next
+            // open into a clean PROCEED - orphan tracees may survive.
+            // Block durably for THIS boot; only a VERIFIED owned cleanup
+            // or a device reboot (boot_id change, checked at open) lifts
+            // it. Repeated Stop/app restarts never do.
+            val mobileWorldStopped = sessionOwnerTag == "apt:MOBILE" ||
+                ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
+                    .getBoolean("mobile_desktop_active", false)
+            if (mobileWorldStopped) {
+                val dp = ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
+                if (treeWalkRan && left.isEmpty()) {
+                    dp.edit().remove("mobile_recovery_blocked").remove("mobile_recovery_boot").apply()
+                    gateLog("mobile recovery: VERIFIED owned cleanup - recovery block cleared")
+                } else {
+                    dp.edit().putBoolean("mobile_recovery_blocked", true)
+                        .putString("mobile_recovery_boot", currentBootId()).apply()
+                    gateLog("mobile recovery: cleanup UNVERIFIED (treeWalkRan=" + treeWalkRan + " leftovers=" + left + ") - recovery BLOCKED until device reboot")
+                }
             }
             sessionProcess = null
             sessionRootIdent = null

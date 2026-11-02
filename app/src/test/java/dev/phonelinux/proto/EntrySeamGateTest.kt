@@ -89,6 +89,27 @@ class EntrySeamGateTest {
         t("mobile REFUSE_UNKNOWN: UNKNOWN any marker + stale marker with no handle")
     }
 
+    @Test fun transition_unknownStopUnverified_blockThenVerifiedCleanup_proceed() {
+        // 1. Post-restart stale marker, nothing tracked: REFUSE_UNKNOWN.
+        assertEquals(EntrySeamGate.MobileSameMode.REFUSE_UNKNOWN,
+            EntrySeamGate.mobileSameMode(true, EntrySeamGate.LiveKind.ABSENT, null))
+        // 2. User Stops; cleanup UNVERIFIED (no identity -> tree walk
+        //    skipped): durable block set for THIS boot. The next open
+        //    REFUSES even though Stop cleared the active marker - the
+        //    bypass (clear -> PROCEED) stays closed.
+        assertTrue(EntrySeamGate.mobileRecoveryBlocked(true, "boot-A", "boot-A"))
+        // 3. Missing boot ids fail closed (still blocked).
+        assertTrue(EntrySeamGate.mobileRecoveryBlocked(true, null, "boot-A"))
+        assertTrue(EntrySeamGate.mobileRecoveryBlocked(true, "boot-A", null))
+        // 4. A device reboot lifts the block: every process is dead.
+        assertFalse(EntrySeamGate.mobileRecoveryBlocked(true, "boot-A", "boot-B"))
+        // 5. A VERIFIED owned cleanup clears the block: open proceeds.
+        assertFalse(EntrySeamGate.mobileRecoveryBlocked(false, "boot-A", "boot-A"))
+        assertEquals(EntrySeamGate.MobileSameMode.PROCEED,
+            EntrySeamGate.mobileSameMode(false, EntrySeamGate.LiveKind.ABSENT, null))
+        t("transition: unknown->Stop-unverified->REFUSE(blocked); verified-cleanup->PROCEED; reboot lifts")
+    }
+
     @Test fun mobile_proceed_onlyColdClean() {
         assertEquals(EntrySeamGate.MobileSameMode.PROCEED, EntrySeamGate.mobileSameMode(false, EntrySeamGate.LiveKind.ABSENT, null))
         t("mobile PROCEED: no marker + nothing tracked")
