@@ -1163,6 +1163,58 @@ class VirglGnomeSessionTest {
             // sha256. A nonblank image is NOT automatically a desktop -
             // reviewer pixel inspection decides.
             var guestVerdict: String
+            // Fixture (test-only diagnostic provisioning; product/runtime
+            // provisioning unchanged): the lane's guest image carries no
+            // X capture tool - runs 41385820496/41393344830/41408046508
+            // all reported xwd/import/gnome-screenshot/ffmpeg absent ->
+            // exit 43 no-tool-succeeded. Provisioning runs BEFORE the
+            // capture-identity qualification below so apt latency and any
+            // guest apt/dpkg side effects never sit between the identity
+            // gate and the capture; the gate below is evaluated AFTER this
+            // block and is never relabeled. An already-present xwd is
+            // resolved FIRST and apt runs only when absent; resolution is
+            // re-recorded after any install attempt, including a failed
+            // one. apt is bounded IN-GUEST by coreutils timeout -k (the
+            // runGuest timeout only SIGKILLs proot and ORPHANS guest-side
+            // processes - Proot.kt:126-140 - which would strand apt/dpkg
+            // mid-transaction), noninteractive per the existing fixture
+            // pattern (XvncCompareTest:184, UbuntuGnomeSpikeTest:182).
+            // Recorded, never a direct assertion gate: on any failure the
+            // probe below still runs and reports tool absence as before.
+            // xwd -root output remains a composited-readback measurement,
+            // never a presentation success gate.
+            var xwdReady = false
+            try {
+                val fxPre = Proot.runGuest(ctx, rootfs,
+                    listOf("which", "xwd"), timeoutMs = 20_000)
+                xwdReady = fxPre.exitCode == 0 && fxPre.stdout.trim().isNotEmpty()
+                out.append("guest-xcontent fixture: pre-existing xwd resolution exit=")
+                    .append(fxPre.exitCode).append(" path=").append(fxPre.stdout.trim()).append('\n')
+                if (!xwdReady) {
+                    val fxApt = Proot.runGuest(ctx, rootfs,
+                        listOf("/bin/sh", "-c",
+                            "export DEBIAN_FRONTEND=noninteractive; timeout -k 5 570 apt-get install -y --no-install-recommends x11-apps"),
+                        timeoutMs = 600_000)
+                    out.append("guest-xcontent fixture: apt-get install x11-apps exit=")
+                        .append(fxApt.exitCode)
+                        .append(" stdout-tail=").append(fxApt.stdout.takeLast(200).replace('\n', ' '))
+                        .append(" stderr-tail=").append(fxApt.stderr.takeLast(200).replace('\n', ' '))
+                        .append('\n')
+                    val fxPost = Proot.runGuest(ctx, rootfs,
+                        listOf("which", "xwd"), timeoutMs = 20_000)
+                    xwdReady = fxPost.exitCode == 0 && fxPost.stdout.trim().isNotEmpty()
+                    out.append("guest-xcontent fixture: post-install xwd resolution exit=")
+                        .append(fxPost.exitCode).append(" path=").append(fxPost.stdout.trim()).append('\n')
+                }
+            } catch (t: Throwable) {
+                out.append("guest-xcontent fixture: provisioning threw ")
+                    .append(t.message ?: t.javaClass.simpleName)
+                    .append(" - recorded, probe continues\n")
+            }
+            if (!xwdReady) {
+                out.append("guest-xcontent fixture: xwd UNAVAILABLE - probe proceeds, ")
+                    .append("tool-absence verdict remains possible\n")
+            }
             val genPreCap = XServer.currentLaunchIdForTest()
             val gateFailure: String? = when {
                 genPreCap != launchId -> "generation changed (was " + launchId + " now " + genPreCap + ")"
