@@ -266,9 +266,16 @@ class MobileDesktopEntryTest {
     fun mobileEntryLifecycle() {
         val prefs = ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-            // UiDevice-only helper: instrumentation thread is the correct
-            // place; onActivity would block the app UI thread.
-            Shot.dismissSystemDialogs(device)
+            // Obstruction policy for the WHOLE test (setUp helpers included):
+            // exactly ONE verified launcher-ANR dismissal, armed only at the
+            // pre-focus-gate site below. No broad dismissal (dismissSystemDialogs
+            // is NOT called - it would register the auto-clicking watcher and
+            // add silent clicks), no watchers, no close-app, no launcher
+            // disable/replace. The watcher is removed explicitly in case any
+            // harness path registered it.
+            device.removeWatcher("phonelinux-anr")
+            Log.i(TAG, "m1-arm: ANR watcher removed; dialog handling = ONE verified" +
+                " launcher-ANR dismissal at the focus gate, nothing else")
 
             // 1. Picker entry (bounded scroll), then the mobile start.
             tapByDesc("show-picker")
@@ -320,7 +327,35 @@ class MobileDesktopEntryTest {
             // SAMPLED-UNIFORM screen observation; content review stays manual.
             assertTrue("sampled screen NOT uniform on the 32px grid (uniformity" +
                 " observation only, no rendering conclusion; distinct=$distinct)", distinct > 2)
-            val (focusRaw, xlorieFocused) = xlorieFocusState()
+            // Evidence BEFORE any action: the post-start capture above plus
+            // this pre-arm focus snapshot are recorded before anything clicks.
+            val preArm = xlorieFocusState()
+            Log.i(TAG, "m1-obstruction: pre-arm focus focused=" + preArm.second +
+                " raw=" + preArm.first)
+            if (!preArm.second && Shot.detectVerifiedLauncherAnr(device)) {
+                val dismissed = Shot.dismissVerifiedLauncherAnr(device, maxDismissals = 1)
+                Log.i(TAG, "m1-obstruction: verified launcher-ANR dismissals=" + dismissed +
+                    " (budget ONE for the whole test)")
+                if (Shot.detectVerifiedLauncherAnr(device)) {
+                    org.junit.Assert.fail("launcher-ANR dialog recurred after the test's ONE" +
+                        " verified dismissal - fail closed (obstruction is the finding)")
+                }
+            }
+            // Bounded focus settle poll: after a dismissal focus may take
+            // seconds to land; never manufacture it. A dialog during settle
+            // fails closed - the budget is spent.
+            var focusRaw = preArm.first
+            var xlorieFocused = preArm.second
+            val focusDeadline = System.currentTimeMillis() + 30_000
+            while (!xlorieFocused && System.currentTimeMillis() < focusDeadline) {
+                if (Shot.detectVerifiedLauncherAnr(device)) {
+                    org.junit.Assert.fail("launcher-ANR dialog present during focus settle" +
+                        " - the ONE dismissal budget is spent; fail closed (obstruction)")
+                }
+                Thread.sleep(2_000)
+                val f = xlorieFocusState()
+                focusRaw = f.first; xlorieFocused = f.second
+            }
             assertTrue("focused window IS the Xlorie display activity" +
                 " (positive component match, no contradiction; raw: $focusRaw)",
                 xlorieFocused)
