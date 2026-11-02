@@ -1745,26 +1745,6 @@ object GuestUbuntu {
             // read "stock" as llvmpipe-confirmed.)
             pb.environment()["GALLIUM_DRIVER"] = "virpipe"
         }
-        // DIAGNOSTIC EXPERIMENT E-cogl-gles2 (DEFAULT OFF; requires BOTH the
-        // virgl opt-in AND .ldoa-virgl-debug, so the stock launch and the
-        // plain virgl opt-in launch are byte-identical to before): force
-        // cogl's GLES2 driver. On this X11 session mutter's driver-selected
-        // winsys then takes GLES2 -> EGL_XLIB (meta-renderer-x11.c:59-61,
-        // mutter 46.2) and requests an ES2 context over EGL
-        // (cogl-winsys-egl.c:130-132,:373-375). The virgl route's advertised
-        // desktop-GL ceiling is GLSL-130-capped (host --use-gles GLES 3.0 ->
-        // caps.v1.glsl_level 130, virglrenderer 1.3.0 vrend_renderer.c
-        // :12863-12898 -> Mesa virgl_screen.c:355-359 -> version.c
-        // compute_version: GL 3.1 needs GLSL >= 140), so the default GL3
-        // path's desktop-GL request cannot be served there. (GLX-side
-        // request attributes are a separate source site, not assumed
-        // identical.) Guest ES2 capability is source-indicated
-        // (virgl_screen.c:290,:317 unconditional) but NOT runtime-verified,
-        // and noble package GLES2/EGL build availability is unverified -
-        // an unsupported-backend outcome is itself evidence.
-        if (virglSocket != null && XServer.ldoaDebugFlagOn(ctx, ".ldoa-virgl-debug")) {
-            pb.environment()["COGL_DRIVER"] = "gles2"
-        }
         // E1 opt-in session-diet experiment (DEFAULT OFF): the host flag
         // file gates the guest script's Wwan+Smartcard autostart masks.
         // Same flag-file pattern as .ldoa-virgl-optin; with no flag the
