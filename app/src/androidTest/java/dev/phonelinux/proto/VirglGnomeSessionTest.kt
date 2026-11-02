@@ -10,6 +10,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.LinkOption
 
 /**
  * P3 real-session qualification: an opted-IN GNOME session (the actual
@@ -453,6 +455,46 @@ class VirglGnomeSessionTest {
         android.system.Os.sysconf(android.system.OsConstants._SC_CLK_TCK)
     } catch (t: Throwable) { -1L }
 
+    /** Own-uid /proc scan: (pid, ppid, comm) triples + a partial flag.
+     *  partial=true when ANY own-uid entry was unreadable or
+     *  unparsable - completeness unproven (fail closed, never zero). */
+    private fun scanOwnUidProcs(): Pair<List<Triple<Int, Int, String>>, Boolean> {
+        val myUid = android.os.Process.myUid()
+        val out = ArrayList<Triple<Int, Int, String>>()
+        var partial = false
+        val dir = File("/proc").listFiles { f -> f.name.matches(Regex("[0-9]+")) }
+            ?: return Pair(out, true)
+        for (f in dir) {
+            val pid = try { f.name.toInt() } catch (t: Throwable) { continue }
+            val st = try { android.system.Os.stat(f.absolutePath) } catch (t: Throwable) { continue }
+            if (st.st_uid != myUid) continue
+            val statTxt = try { File(f, "stat").readText() } catch (t: Throwable) { partial = true; continue }
+            val close = statTxt.lastIndexOf(')')
+            if (close < 0) { partial = true; continue }
+            val name = statTxt.substring(statTxt.indexOf('(') + 1, close)
+            val rest = statTxt.substring(close + 1).trim().split(Regex("\\s+"))
+            if (rest.size < 2) { partial = true; continue }
+            val ppid = try { rest[1].toInt() } catch (t: Throwable) { partial = true; continue }
+            out.add(Triple(pid, ppid, name))
+        }
+        return Pair(out, partial)
+    }
+
+    /** Own-uid vtest server/worker pids (live cmdline carries the
+     *  binary name) + a partial flag: an unreadable own-uid cmdline
+     *  cannot be classified, so "no residual" is unproven. */
+    private fun scanOwnUidVirgl(): Pair<List<Int>, Boolean> {
+        val procs = scanOwnUidProcs()
+        val pids = ArrayList<Int>()
+        var partial = procs.second
+        for (t in procs.first) {
+            val cmd = try { File("/proc/" + t.first + "/cmdline").readText() }
+                catch (e: Throwable) { partial = true; continue }
+            if (cmd.contains("libvirgl_test_server.so")) pids.add(t.first)
+        }
+        return Pair(pids, partial)
+    }
+
     /** PPid-ancestry walk: TRUE = [ancestor] is on [pid]'s chain (owned
      *  by that process tree); FALSE = chain fully walked to init
      *  without it; NULL = walk broke (unreadable/depth-bound) =
@@ -554,6 +596,25 @@ class VirglGnomeSessionTest {
         val e1Requested = InstrumentationRegistry.getArguments().getString("ldoaE1") == "1"
         val e1Flag = File(ctx.filesDir, ".ldoa-session-diet-e1")
         val savedE1Flag = if (e1Flag.isFile) e1Flag.readText() else null
+        // VTEST-MC EVALUATION OPT-IN (explicit -e ldoaVtestMc 1 ONLY;
+        // default OFF = stock fork-per-client server, byte-identical).
+        // Flag file checked by XServer.launchOrReuseGnomeSession
+        // (DEBUG-only + regular non-symlink there). Exact NIO exception
+        // semantics here - NOT the inherited unchecked delete() pattern:
+        // a pre-existing flag that is not a regular non-symlink file is
+        // REFUSED (unexpected types are never managed); regular content
+        // is preserved byte-exactly for the finally restore; every
+        // write/delete below throws on failure (fail closed).
+        val vtestMcRequested = InstrumentationRegistry.getArguments().getString("ldoaVtestMc") == "1"
+        val vtestMcFlag = File(ctx.filesDir, "vtest-mc.optin")
+        val vtestMcPath = vtestMcFlag.toPath()
+        val savedVtestMcFlag: ByteArray? =
+            if (Files.exists(vtestMcPath, LinkOption.NOFOLLOW_LINKS)) {
+                if (!Files.isRegularFile(vtestMcPath, LinkOption.NOFOLLOW_LINKS))
+                    throw IllegalStateException("vtest-mc.optin exists but is not a regular " +
+                        "non-symlink file - refusing to manage an unexpected type (fail closed)")
+                Files.readAllBytes(vtestMcPath)
+            } else null
         var executed = false
         var checksPassed = false
         // Arm-scoped launch generation markers, hoisted so the finally
@@ -561,6 +622,11 @@ class VirglGnomeSessionTest {
         // whole append-log: old E1 lines are not the current outcome).
         var launchBase = -1L
         var launchGenId: String? = null
+        // BYTE base of files/virgl-server.log BEFORE this arm's launch:
+        // the product appends every generation's server output to that
+        // one file, so only bytes at/after this offset belong to THIS
+        // arm's server (the same binding discipline as launchBase).
+        var virglLogBase = -1L
         var rendererVerdict = "UNKNOWN (stage not reached)"
         var presentationVerdict = "REVIEWER-VERIFICATION PENDING (stage not reached)"
         var failure: Throwable? = null
@@ -633,6 +699,20 @@ class VirglGnomeSessionTest {
             // Opt IN for THIS launch only; flags are restored in finally
             // (independent attempts). E1 only when explicitly requested.
             flag.writeText("1")
+            if (vtestMcRequested) {
+                Files.write(vtestMcPath, byteArrayOf(0x31)) // "1"; NIO throws on failure
+                out.append("vtest-mc evaluation mode: ON (explicit instrumentation arg\n")
+                    .append("  ldoaVtestMc=1; opt-in --no-fork --multi-clients single-process\n")
+                    .append("  multi-client server UNDER EVALUATION - not a default)\n")
+            } else {
+                if (savedVtestMcFlag != null) {
+                    Files.delete(vtestMcPath) // NIO throws on failure (fail closed)
+                    out.append("vtest-mc evaluation mode: OFF (no ldoaVtestMc arg; removed a\n")
+                        .append("  STALE vtest-mc flag so this launch is the default fork mode)\n")
+                } else {
+                    out.append("vtest-mc evaluation mode: OFF (no ldoaVtestMc arg; default fork mode)\n")
+                }
+            }
             if (e1Requested) {
                 e1Flag.writeText("1")
                 out.append("E1 experiment mode: ON (explicit instrumentation arg ldoaE1=1;\n")
@@ -653,6 +733,10 @@ class VirglGnomeSessionTest {
             // freshness candidate check (runtime clk_tck, no USER_HZ).
             val base = (if (logFile.isFile) logFile.readText() else "").length.toLong()
             launchBase = base
+            virglLogBase = run {
+                val vf = File(ctx.filesDir, "virgl-server.log")
+                if (vf.isFile) vf.length() else 0L
+            }
             // Boot-relative uptime from the Android runtime - NEVER
             // /proc/uptime (EACCES for apps at targetSdk 34; that read
             // aborted this test's first CI execution before launch).
@@ -683,6 +767,70 @@ class VirglGnomeSessionTest {
             out.append("render-server: pid=").append(srvIdent!!.pid).append(" start=").append(srvIdent.start)
                 .append(" uid=").append(srvIdent.uid).append(" sock=")
                 .append(sock?.absolutePath ?: "?").append(" launchId=").append(launchId).append('\n')
+
+            // VTEST-MC EFFECTIVE MODE vs REQUESTED MODE, proven on the
+            // EXACT OWNED RUNNING server: the launch-captured identity
+            // (pid + /proc starttime + uid) is re-verified live BEFORE
+            // and AFTER the cmdline read (a reused/gone pid voids the
+            // attribution), then the running process's own args are
+            // matched against the requested mode. String presence in
+            // the packaged binary is NOT proof - only the live cmdline
+            // of the identity-verified server is.
+            run {
+                val srvPid = srvIdent!!.pid
+                fun liveStart(p: Int): String? {
+                    val st = try { File("/proc/" + p + "/stat").readText() } catch (t: Throwable) { return null }
+                    val close = st.lastIndexOf(')')
+                    if (close < 0) return null
+                    val rest = st.substring(close + 1).trim().split(Regex("\\s+"))
+                    return if (rest.size < 20) null else rest[19]
+                }
+                val startBefore = liveStart(srvPid)
+                val cmdArgs = try {
+                    String(File("/proc/" + srvPid + "/cmdline").readBytes())
+                        .split(0.toChar()).filter { a -> a.isNotEmpty() }
+                } catch (t: Throwable) { emptyList() }
+                val startAfter = liveStart(srvPid)
+                val uidNow = try { android.system.Os.stat("/proc/" + srvPid).st_uid } catch (t: Throwable) { -1 }
+                val identOk = startBefore != null && startBefore == srvIdent!!.start &&
+                    startAfter == startBefore && uidNow == srvIdent.uid
+                val isServerBin = cmdArgs.isNotEmpty() && cmdArgs[0].endsWith("libvirgl_test_server.so")
+                val effNoFork = cmdArgs.contains("--no-fork")
+                val effMulti = cmdArgs.contains("--multi-clients")
+                out.append("== VTEST-MC effective-mode: requested=")
+                    .append(if (vtestMcRequested) "ON" else "OFF")
+                    .append(" effective-args=")
+                    .append(if (cmdArgs.isEmpty()) "UNREADABLE" else cmdArgs.drop(1).joinToString(" "))
+                    .append(" identity=").append(if (identOk) "REVERIFIED-LIVE" else "MISMATCH-OR-GONE")
+                    .append(" server-binary=").append(if (isServerBin) "CONFIRMED" else "UNCONFIRMED")
+                    .append('\n')
+                assertTrue("vtest-mc effective-args attribution failed: the pid captured at launch " +
+                    "no longer holds the launch identity (reused/gone) or is not the vtest server " +
+                    "binary - cannot prove which mode the running server is in (fail closed)",
+                    identOk && isServerBin)
+                assertTrue("vtest-mc mode mismatch: requested=" + (if (vtestMcRequested) "ON" else "OFF") +
+                    " but the RUNNING server's effective args are [" + cmdArgs.drop(1).joinToString(" ") +
+                    "] - a silently-ignored opt-in or stale mode must never masquerade as the requested mode",
+                    if (vtestMcRequested) effNoFork && effMulti else !effNoFork && !effMulti)
+                // OWNED roster: actual children of the server (ppid
+                // scan of own-uid procs). Fork-mode workers ARE the
+                // live-client evidence; under --no-fork ANY child
+                // contradicts the fork path (vtest_server.c:548) being
+                // disabled. A partial scan = UNKNOWN, never zero.
+                val roster = scanOwnUidProcs()
+                val workers = roster.first.filter { it.second == srvPid }
+                out.append("== VTEST-MC roster: server=1 workers=")
+                    .append(if (roster.second) "UNKNOWN(own-uid scan partial - completeness not established)"
+                        else workers.size.toString())
+                    .append('\n')
+                if (!roster.second) {
+                    assertTrue("vtest-mc --no-fork roster violation: " + workers.size +
+                        " child process(es) parented by server pid " + srvPid +
+                        " - the fork-per-client path is active despite --no-fork, so the " +
+                        "effective mode is not what the args claim",
+                        !vtestMcRequested || workers.isEmpty())
+                }
+            }
 
             // EARLY ancestry: exact ppid startup chains of this uid's
             // processes seconds after spawn - the M3 census's runtime
@@ -855,6 +1003,54 @@ class VirglGnomeSessionTest {
                         else "NOT-PROVEN (no owned this-generation gnome-shell environ carried" +
                     " GALLIUM_DRIVER=virpipe)")
                 .append('\n')
+            // VTEST-MC SERVER-LOG EVIDENCE (pinned 1.3.0 protocol):
+            // vtest_server.c:217 prints the multi-clients startup line
+            // ONLY when the flag actually parsed; :759 prints "client
+            // context created." per new client context; :538 prints
+            // "client: ..." on disconnect. Scope = bytes appended to
+            // virgl-server.log since virglLogBase (THIS arm's server;
+            // the product appendTo()s every generation into one file).
+            run {
+                val vf = File(ctx.filesDir, "virgl-server.log")
+                val all = try { if (vf.isFile) vf.readBytes() else ByteArray(0) } catch (t: Throwable) { ByteArray(0) }
+                val bound = virglLogBase >= 0 && all.size.toLong() >= virglLogBase
+                val region = if (bound) String(all, virglLogBase.toInt(), all.size - virglLogBase.toInt()) else String(all)
+                val mcLine = region.contains("multi-clients enabled: clients must trust each other")
+                var created = 0
+                var gone = 0
+                var bal = 0
+                var maxLive = 0
+                for (ln in region.lines()) {
+                    if (ln.contains("client context created.")) {
+                        created++
+                        bal++
+                        if (bal > maxLive) maxLive = bal
+                    } else if (ln.startsWith("client: ")) {
+                        gone++
+                        bal--
+                    }
+                }
+                out.append("== VTEST-MC server-log (this arm, byte-base=")
+                    .append(if (bound) virglLogBase.toString() else "INVALID(base " + virglLogBase + ", parsed whole file - generation binding UNVERIFIED)")
+                    .append("): multi-clients-startup-line=").append(if (mcLine) "PRESENT" else "ABSENT")
+                    .append(" client-contexts-created=").append(created)
+                    .append(" client-disconnects=").append(gone)
+                    .append(" max-live-clients=").append(maxLive)
+                    .append('\n')
+                out.append("== VTEST-MC concurrency: ")
+                    .append(if (maxLive >= 2)
+                        "OBSERVED (>=2 simultaneously live client contexts from pinned server log evidence)"
+                        else "NOT-OBSERVED (max-live<2; readiness/shell/window lines do NOT prove " +
+                            "simultaneous clients - multi-client concurrency remains UNPROVEN)")
+                    .append('\n')
+                assertTrue("vtest-mc requested ON but this arm's running server never printed its " +
+                    "multi-clients startup line (vtest_server.c:217) - the flag did not take effect " +
+                    "in the RUNNING binary",
+                    !vtestMcRequested || mcLine)
+                assertTrue("vtest-mc requested OFF but the server log carries the multi-clients " +
+                    "startup line - a stale mode contaminated this launch",
+                    vtestMcRequested || !mcLine)
+            }
             out.append("VERDICT compositor-renderer: ").append(rendererVerdict).append('\n')
             assertTrue("owned this-generation gnome-shell environ lacks GALLIUM_DRIVER=virpipe - " +
                 "compositor was not launched on the virgl route", envProven > 0)
@@ -1368,6 +1564,29 @@ class VirglGnomeSessionTest {
                 out.append("== CLEANUP-ERROR teardown: ").append(ce.message ?: ce.toString()).append('\n')
                 if (failure == null) failure = ce else failure!!.addSuppressed(ce)
             }
+            // POST-STOP OWNED ROSTER: count own-uid processes whose
+            // live cmdline carries the vtest server binary (server or
+            // forked worker). Zero workers alone proves NOTHING about
+            // rendering or crash isolation - this checks ONLY teardown
+            // completeness (the identity-checked cleanup removed the
+            // whole server tree). A partial scan = UNKNOWN, never zero.
+            try {
+                val resid = scanOwnUidVirgl()
+                out.append("post-stop virgl roster: ")
+                    .append(if (resid.second)
+                        "UNKNOWN (own-uid scan partial - a residual server/worker cannot be excluded)"
+                        else if (resid.first.isEmpty())
+                            "zero residual virgl server/worker processes (owned teardown complete)"
+                        else "RESIDUAL " + resid.first.size + " virgl process(es) still owned: " +
+                            resid.first.joinToString(","))
+                    .append('\n')
+                if (!resid.second && resid.first.isNotEmpty())
+                    throw java.io.IOException("post-stop residual virgl processes owned by this uid: " +
+                        resid.first.joinToString(","))
+            } catch (re: Throwable) {
+                out.append("== CLEANUP-ERROR post-stop virgl roster: ").append(re.message ?: re.toString()).append('\n')
+                if (failure == null) failure = re else failure!!.addSuppressed(re)
+            }
             // Flag restores happen BEFORE the report write so their
             // outcome actually reaches the verdict file. INDEPENDENT
             // attempts: a failure restoring one never skips the other;
@@ -1391,6 +1610,28 @@ class VirglGnomeSessionTest {
                     throw java.io.IOException("e1 flag delete() returned false and the file still exists")
             } catch (fe: Throwable) {
                 out.append("== CLEANUP-ERROR e1-flag restore: ").append(fe.message ?: fe.toString()).append('\n')
+                if (failure == null) failure = fe else failure!!.addSuppressed(fe)
+            }
+            try {
+                // Exact NIO restore, independent attempt: saved regular
+                // content restored byte-exactly; an unexpected type is
+                // REFUSED (never overwritten or deleted); every failure
+                // throws (fail closed) and is preserved as a
+                // CLEANUP-ERROR like the other flag restores.
+                if (savedVtestMcFlag != null) {
+                    if (Files.exists(vtestMcPath, LinkOption.NOFOLLOW_LINKS) &&
+                        !Files.isRegularFile(vtestMcPath, LinkOption.NOFOLLOW_LINKS))
+                        throw java.io.IOException("vtest-mc.optin became a non-regular file during " +
+                            "the test - refusing to overwrite an unexpected type (fail closed)")
+                    Files.write(vtestMcPath, savedVtestMcFlag)
+                } else if (Files.exists(vtestMcPath, LinkOption.NOFOLLOW_LINKS)) {
+                    if (!Files.isRegularFile(vtestMcPath, LinkOption.NOFOLLOW_LINKS))
+                        throw java.io.IOException("vtest-mc.optin restore found a non-regular " +
+                            "file - refusing to delete an unexpected type (fail closed)")
+                    Files.delete(vtestMcPath)
+                }
+            } catch (fe: Throwable) {
+                out.append("== CLEANUP-ERROR vtest-mc-flag restore: ").append(fe.message ?: fe.toString()).append('\n')
                 if (failure == null) failure = fe else failure!!.addSuppressed(fe)
             }
             // Runtime mode + guest-side mask/rollback outcome, scoped to

@@ -24,7 +24,11 @@ import java.io.File
  *    the own-uid scan is not silently empty; it says nothing about the
  *    global list. (The old exec -a naming scheme was never observed in
  *    any run and is not expressible without shell quoting, so the probe
- *    is dropped by design; the marker no longer depends on it.)
+ *    is dropped by design; the marker no longer depends on it.) The
+ *    short marker can EXPIRE before a slow scan: an expired marker
+ *    (zombie or gone) makes the calibration UNKNOWN and the own-uid
+ *    counts UNCALIBRATED - raw values are kept and labeled, never
+ *    reported as measured and never zeroed.
  *  - uid-procs: every own-uid /proc entry as pid:ppid:name. Includes
  *    reparented orphans a PPid-walk misses. Count INCLUDES the sampler's
  *    own marker process while alive (+1 transient) - sampler overhead,
@@ -86,7 +90,16 @@ object PhantomSampler {
         var markerPid = -1
         var markerSpawnErr = ""
         try {
-            markerProc = ProcessBuilder("/system/bin/sleep", "25").start()
+            // Marker lifetime 3s (was 25s): stays OUT of the live
+            // session's phantom-budget window - a 25s marker spawned
+            // near launch survived into the trim window (run
+            // 41361883549 phantom record pid=17588 /system/bin/sleep 25,
+            // trimmed 23:41:15). NO hidden assumption that 3s covers
+            // the scan: an expiry before/during the scan is DETECTED
+            // below (zombie/absent state) and reported as calibration
+            // UNKNOWN. Spawn hygiene only; marker semantics (own-uid
+            // proc re-identified by pid) unchanged.
+            markerProc = ProcessBuilder("/system/bin/sleep", "3").start()
             Thread.sleep(300)
             markerPid = pidOf(markerProc)
         } catch (t: Throwable) {
@@ -110,6 +123,21 @@ object PhantomSampler {
             procs.add(Proc(pid, ppid, name))
         }
 
+        // Marker state AT SCAN TIME: 'Z'/'X' = expired but not yet
+        // reaped (still visible in /proc) - calibration UNKNOWN.
+        val markerSpawnStart = if (markerPid > 0) startTimeOf(markerPid) else null
+        var markerState: String? = null
+        if (markerPid > 0) {
+            val mst = try { File("/proc/" + markerPid + "/stat").readText() } catch (t: Throwable) { null }
+            if (mst != null) {
+                val mclose = mst.lastIndexOf(')')
+                if (mclose >= 0) {
+                    val mrest = mst.substring(mclose + 1).trim().split(Regex("\\s+"))
+                    if (mrest.isNotEmpty()) markerState = mrest[0]
+                }
+            }
+        }
+
         val appAdj = try { File("/proc/self/oom_score_adj").readText().trim() }
             catch (t: Throwable) { "unknown(read-failed)" }
 
@@ -122,33 +150,61 @@ object PhantomSampler {
             global = captureGlobal(device, myUid, myPid, label, wall)
         }
 
-        // Marker cleanup, identity-verified before the signal.
-        val markerSeen = markerPid > 0 && procs.any { it.pid == markerPid }
+        // Marker terminate + REAP (bounded): destroy() asks politely;
+        // SIGKILL by pid ONLY after re-verifying the pid still holds
+        // the SPAWN-CAPTURED (starttime, uid) identity; the final
+        // waitFor() reaps the child so no zombie leaks into later
+        // samples or the phantom census.
+        var markerCleanup = "not-spawned"
         if (markerProc != null) {
             try {
                 markerProc.destroy()
-                val end = System.currentTimeMillis() + 5_000
-                while (System.currentTimeMillis() < end && markerProc.isAlive) Thread.sleep(100)
-                if (markerProc.isAlive && markerPid > 0 &&
-                    startTimeOf(markerPid) != null &&
+                var end = System.currentTimeMillis() + 3_000
+                while (System.currentTimeMillis() < end && markerProc.isAlive) Thread.sleep(50)
+                if (markerProc.isAlive && markerPid > 0 && markerSpawnStart != null &&
+                    startTimeOf(markerPid) == markerSpawnStart &&
                     try { android.system.Os.stat("/proc/" + markerPid).st_uid == myUid } catch (t: Throwable) { false }) {
                     try { android.os.Process.sendSignal(markerPid, android.system.OsConstants.SIGKILL) } catch (t: Throwable) { }
+                    end = System.currentTimeMillis() + 2_000
+                    while (System.currentTimeMillis() < end && markerProc.isAlive) Thread.sleep(50)
+                }
+                if (!markerProc.isAlive) {
+                    try { markerProc.waitFor() } catch (t: Throwable) { }
+                    markerCleanup = "terminated+reaped"
+                } else {
+                    markerCleanup = "STILL-ALIVE(unknown leftover state)"
                 }
             } catch (t: Throwable) {
+                markerCleanup = "cleanup-failed(unknown leftover state: " + (t.message ?: t.javaClass.simpleName) + ")"
                 Log.w(TAG, "marker cleanup failed (unknown leftover state): " + t.message)
             }
         }
 
+        val markerInScan = markerPid > 0 && procs.any { it.pid == markerPid }
         val markerStatus = when {
             markerProc == null -> "INSTRUMENT-FAILURE(marker spawn failed: " + markerSpawnErr + " - counts untrusted)"
-            !markerSeen -> "INSTRUMENT-FAILURE(marker pid " + markerPid + " not observed - counts untrusted)"
+            !markerInScan ->
+                "CALIBRATION-UNKNOWN(marker pid " + markerPid + " absent from the own-uid scan - " +
+                    "expired before the scan OR scan blind; own-uid counts uncalibrated)"
+            markerState == "Z" || markerState == "X" || markerState == "x" ->
+                "CALIBRATION-UNKNOWN(marker pid " + markerPid + " expired (state " + markerState +
+                    ") before/during the scan; own-uid counts uncalibrated)"
+            markerState == null ->
+                "CALIBRATION-UNKNOWN(marker pid " + markerPid + " state unreadable; own-uid counts uncalibrated)"
             else -> "marker-verified"
         }
+        val calibrated = markerStatus == "marker-verified"
 
         val summary = buildString {
             append("phantom-sample[").append(label).append("] wall=").append(wall)
             append(' ').append(markerStatus)
-            append(" uid-procs=").append(procs.size).append("(+marker if alive)")
+            append(" marker-cleanup=").append(markerCleanup)
+            if (calibrated) {
+                append(" uid-procs=").append(procs.size).append("(+marker if alive)")
+            } else {
+                append(" uid-procs=UNCALIBRATED(raw=").append(procs.size)
+                    .append(" - not a measured count, never zero)")
+            }
             val g = global
             if (g != null) {
                 append(" global-active=")
@@ -172,6 +228,7 @@ object PhantomSampler {
         sb.append("=== phantom-sample[").append(label).append("] wall=").append(wall).append(" ===\n")
         maybeHeader(device, sb)
         sb.append("marker: ").append(markerStatus).append('\n')
+        sb.append("marker-cleanup: ").append(markerCleanup).append('\n')
         sb.append("app: pid=").append(myPid).append(" uid=").append(myUid).append(" oom_score_adj=").append(appAdj).append('\n')
         sb.append("memory: ").append(memoryRecord()).append('\n')
         val g = global
@@ -190,7 +247,12 @@ object PhantomSampler {
         } else {
             sb.append("global: skipped (cadence < ").append(GLOBAL_CADENCE_MS).append("ms)\n")
         }
-        sb.append("uid-procs(count=").append(procs.size).append(", includes sampler marker while alive):\n")
+        if (calibrated) {
+            sb.append("uid-procs(count=").append(procs.size).append(", includes sampler marker while alive):\n")
+        } else {
+            sb.append("uid-procs(UNCALIBRATED raw=").append(procs.size)
+                .append(" - calibration unknown/failed; not a measured count, never zero):\n")
+        }
         for (p in procs) sb.append("  ").append(p.pid).append(':').append(p.ppid).append(' ').append(p.name).append('\n')
         val dur = System.currentTimeMillis() - wall
         sb.append("sample-end wall=").append(System.currentTimeMillis()).append(" dur-ms=").append(dur)
