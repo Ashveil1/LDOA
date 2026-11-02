@@ -39,6 +39,13 @@ class EntrySeamGateTest {
         t("refuse: other durable marker set")
     }
 
+    @Test fun refuse_missingOwnerTag_nonAbsent() {
+        // A tracked session without an owner tag is never "same owner".
+        assertTrue(EntrySeamGate.refuseForOtherActive(false, EntrySeamGate.LiveKind.VERIFIED_LIVE, null, "apt:MOBILE"))
+        assertTrue(EntrySeamGate.refuseForOtherActive(false, EntrySeamGate.LiveKind.UNKNOWN, null, "apt:GNOME"))
+        t("refuse: non-ABSENT with MISSING owner tag (unattributed process)")
+    }
+
     @Test fun refuse_trackedOtherOwner_verifiedOrUnknown() {
         assertTrue(EntrySeamGate.refuseForOtherActive(false, EntrySeamGate.LiveKind.VERIFIED_LIVE, "apt:GNOME", "apt:MOBILE"))
         assertTrue(EntrySeamGate.refuseForOtherActive(false, EntrySeamGate.LiveKind.UNKNOWN, "apt:GNOME", "apt:MOBILE")) // dead GNOME root, tracees may live
@@ -54,28 +61,36 @@ class EntrySeamGateTest {
         t("proceed: same-owner (own machinery) or genuinely ABSENT")
     }
 
-    @Test fun mobile_reuse_onlyVerifiedLiveConfirmed() {
-        assertEquals(EntrySeamGate.MobileSameMode.REUSE, EntrySeamGate.mobileSameMode(true, EntrySeamGate.LiveKind.VERIFIED_LIVE))
-        t("mobile REUSE: marker + VERIFIED_LIVE")
+    @Test fun mobile_reuse_onlyVerifiedLiveConfirmedAndTagged() {
+        assertEquals(EntrySeamGate.MobileSameMode.REUSE, EntrySeamGate.mobileSameMode(true, EntrySeamGate.LiveKind.VERIFIED_LIVE, "apt:MOBILE"))
+        t("mobile REUSE: marker + VERIFIED_LIVE + apt:MOBILE tag")
+    }
+
+    @Test fun mobile_neverReuse_unattributedOrForeignLive() {
+        // A live process not attributed to MOBILE is never reused as one.
+        assertEquals(EntrySeamGate.MobileSameMode.REFUSE_UNKNOWN, EntrySeamGate.mobileSameMode(true, EntrySeamGate.LiveKind.VERIFIED_LIVE, null))
+        assertEquals(EntrySeamGate.MobileSameMode.REFUSE_UNKNOWN, EntrySeamGate.mobileSameMode(true, EntrySeamGate.LiveKind.VERIFIED_LIVE, "apt:GNOME"))
+        assertEquals(EntrySeamGate.MobileSameMode.REFUSE_UNKNOWN, EntrySeamGate.mobileSameMode(true, EntrySeamGate.LiveKind.VERIFIED_LIVE, "apk:alpine"))
+        t("mobile REFUSE_UNKNOWN: VERIFIED_LIVE but null/foreign tag (no reuse)")
     }
 
     @Test fun mobile_refuse_unconfirmedVerifiedLive() {
-        assertEquals(EntrySeamGate.MobileSameMode.REFUSE_UNCONFIRMED, EntrySeamGate.mobileSameMode(false, EntrySeamGate.LiveKind.VERIFIED_LIVE))
+        assertEquals(EntrySeamGate.MobileSameMode.REFUSE_UNCONFIRMED, EntrySeamGate.mobileSameMode(false, EntrySeamGate.LiveKind.VERIFIED_LIVE, "apt:MOBILE"))
         t("mobile REFUSE_UNCONFIRMED: live, no marker (mid-start/thrown)")
     }
 
     @Test fun mobile_refuse_unknown_neverAutoClears() {
-        assertEquals(EntrySeamGate.MobileSameMode.REFUSE_UNKNOWN, EntrySeamGate.mobileSameMode(true, EntrySeamGate.LiveKind.UNKNOWN))
-        assertEquals(EntrySeamGate.MobileSameMode.REFUSE_UNKNOWN, EntrySeamGate.mobileSameMode(false, EntrySeamGate.LiveKind.UNKNOWN))
+        assertEquals(EntrySeamGate.MobileSameMode.REFUSE_UNKNOWN, EntrySeamGate.mobileSameMode(true, EntrySeamGate.LiveKind.UNKNOWN, null))
+        assertEquals(EntrySeamGate.MobileSameMode.REFUSE_UNKNOWN, EntrySeamGate.mobileSameMode(false, EntrySeamGate.LiveKind.UNKNOWN, "apt:MOBILE"))
         // Post-restart stale marker: no handle in this process, but guest
         // tracees from the dead process may live (orphan root cause) -
         // fail closed to Stop-to-reset, never clear-and-launch.
-        assertEquals(EntrySeamGate.MobileSameMode.REFUSE_UNKNOWN, EntrySeamGate.mobileSameMode(true, EntrySeamGate.LiveKind.ABSENT))
+        assertEquals(EntrySeamGate.MobileSameMode.REFUSE_UNKNOWN, EntrySeamGate.mobileSameMode(true, EntrySeamGate.LiveKind.ABSENT, null))
         t("mobile REFUSE_UNKNOWN: UNKNOWN any marker + stale marker with no handle")
     }
 
     @Test fun mobile_proceed_onlyColdClean() {
-        assertEquals(EntrySeamGate.MobileSameMode.PROCEED, EntrySeamGate.mobileSameMode(false, EntrySeamGate.LiveKind.ABSENT))
+        assertEquals(EntrySeamGate.MobileSameMode.PROCEED, EntrySeamGate.mobileSameMode(false, EntrySeamGate.LiveKind.ABSENT, null))
         t("mobile PROCEED: no marker + nothing tracked")
     }
 }

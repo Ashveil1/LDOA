@@ -24,19 +24,22 @@ internal object EntrySeamGate {
 
     /** Cross-desktop mutual exclusion: refuse when the OTHER desktop's
      *  durable marker is set OR a tracked session in ANY non-absent state
-     *  belongs to a different owner tag (VERIFIED_LIVE other = active;
-     *  UNKNOWN other = its tracees may live). Same-owner UNKNOWN passes:
-     *  that mode's own machinery decides (GNOME: pre-existing fresh
-     *  launch; MOBILE: refused in the branch). */
+     *  has a DIFFERENT or MISSING owner tag (VERIFIED_LIVE other =
+     *  active; UNKNOWN other = its tracees may live; a missing tag is
+     *  never treated as "same owner"). Same-owner UNKNOWN passes: that
+     *  mode's own machinery decides (GNOME: pre-existing fresh launch;
+     *  MOBILE: refused in the branch). */
     fun refuseForOtherActive(otherMarkerActive: Boolean, liveKind: LiveKind, liveOwnerTag: String?, myOwnerTag: String): Boolean =
-        otherMarkerActive || (liveKind != LiveKind.ABSENT && liveOwnerTag != null && liveOwnerTag != myOwnerTag)
+        otherMarkerActive || (liveKind != LiveKind.ABSENT && liveOwnerTag != myOwnerTag)
 
     /** Same-mode decision for a MOBILE open (state after the cross-mode
      *  guard, so a non-absent tracked session here is tagged MOBILE). */
     enum class MobileSameMode { REUSE, REFUSE_UNCONFIRMED, REFUSE_UNKNOWN, PROCEED }
 
-    fun mobileSameMode(sameMarker: Boolean, liveKind: LiveKind): MobileSameMode = when {
+    fun mobileSameMode(sameMarker: Boolean, liveKind: LiveKind, liveOwnerTag: String?): MobileSameMode = when {
         liveKind == LiveKind.UNKNOWN -> MobileSameMode.REFUSE_UNKNOWN
+        liveKind == LiveKind.VERIFIED_LIVE && liveOwnerTag != "apt:MOBILE" ->
+            MobileSameMode.REFUSE_UNKNOWN // live process not attributed to MOBILE: never reuse it
         liveKind == LiveKind.VERIFIED_LIVE && sameMarker -> MobileSameMode.REUSE
         liveKind == LiveKind.VERIFIED_LIVE -> MobileSameMode.REFUSE_UNCONFIRMED
         sameMarker -> MobileSameMode.REFUSE_UNKNOWN // post-restart stale marker: orphan uncertainty, never auto-clear

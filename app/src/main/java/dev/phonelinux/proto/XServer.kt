@@ -1218,26 +1218,30 @@ object XServer {
                                 // ONLY - never the GNOME gate/bus/pref
                                 // world.
                                 //
-                                // Same-mode contract (mirrors the GNOME
-                                // parenting model: the guest session is a
-                                // child of the app process and dies with
-                                // it; a reparented-orphan leftover is the
-                                // pre-existing L2 orphan scope, same as
-                                // GNOME): REUSE a tracked-live confirmed
-                                // session (launch nothing, bring the X view
-                                // forward); FAIL CLOSED on a tracked-live
+                                // Same-mode contract: REUSE only a
+                                // VERIFIED_LIVE, marker-confirmed,
+                                // apt:MOBILE-tagged session (identity
+                                // match - launch nothing, bring the X view
+                                // forward); FAIL CLOSED on a VERIFIED_LIVE
                                 // UNCONFIRMED session (mid-start or an
                                 // attempt that threw - Stop session reaps
-                                // it by identity); CLEAR a stale marker
-                                // with nothing live and start fresh
-                                // (data-preserving: rootfs untouched; Stop
-                                // session remains the manual recovery).
-                                // (The cross-mode guard already refused a
-                                //  foreign-owner tracked session; a tracked
-                                //  session here is tagged MOBILE or absent.)
+                                // it by identity); FAIL CLOSED on UNKNOWN
+                                // state and on a stale marker with no
+                                // handle: guest tracees CAN outlive the
+                                // app process (proot can die while tracees
+                                // escape), so uncertainty is never
+                                // auto-cleared and never auto-relaunched.
+                                // Stop is the only marker clearer; when
+                                // its tree walk is skipped (identity
+                                // absent, dead or reused) that cleanup is
+                                // UNVERIFIED and the refusal message says
+                                // so. (The cross-mode guard already
+                                //  refused a foreign-owner or unattributed
+                                //  tracked session; the decision below
+                                //  still re-checks attribution.)
                                 val mobileMarker = desktopPrefs.getBoolean("mobile_desktop_active", false)
-                                val mobileKind = trackedSessionState().second
-                                when (EntrySeamGate.mobileSameMode(mobileMarker, mobileKind)) {
+                                val mobileState = trackedSessionState()
+                                when (EntrySeamGate.mobileSameMode(mobileMarker, mobileState.second, mobileState.first)) {
                                     EntrySeamGate.MobileSameMode.REUSE -> {
                                         gateLog("mobile: reusing VERIFIED_LIVE confirmed session (identity match) - nothing launched")
                                         launched = true
@@ -1255,8 +1259,8 @@ object XServer {
                                         // marker or auto-launch: Stop
                                         // session resets state, the next
                                         // open starts clean.
-                                        gateLog("mobile: marker/state uncertain (marker=" + mobileMarker + " kind=" + mobileKind + ") - fail closed, no auto-clear")
-                                        failure = "Mobile desktop state is unknown (the app may have restarted with a session still alive) - tap Stop session to reset, then start again."
+                                        gateLog("mobile: marker/state uncertain (marker=" + mobileMarker + " state=" + mobileState + ") - fail closed, no auto-clear")
+                                        failure = "Mobile desktop state is unknown - a previous session may still be running. Tap Stop session, then start again. Stop resets app state but CANNOT verify no guest processes survived; if the next start shows a stale or doubled desktop, Stop again and restart the app."
                                     }
                                     EntrySeamGate.MobileSameMode.PROCEED -> { }
                                 }
@@ -1785,6 +1789,7 @@ object XServer {
                         retainedSessionStarting = false
                         sessionGatePassed = true
                         sessionProcess = p
+                        sessionOwnerTag = "apt:GNOME"
                         ownershipGeneration++
                         sessionRootIdent = pidOf(p)?.let { identityOf(it) }
                         sessionBusIdent = captureOwnLaunchBusIdent(ctx, logBase).also { found ->
