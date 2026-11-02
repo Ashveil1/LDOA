@@ -184,6 +184,7 @@ jobs:
             virgl-session-xcontent.img
             virgl-session-xcontent.partial
             virgl-session-xmap.ppm
+            virgl-session-xov.ppm
             virgl-session-root.xwd
             xcontrol-check-drawing.txt
             /tmp/instr-xcontrol.log

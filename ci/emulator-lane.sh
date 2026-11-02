@@ -254,6 +254,29 @@ if [ "$LANE" = full ] || [ "$LANE" = session ]; then
     echo "XMAP-PIXELS-BUILD FAILED - test will record window-pixels NO-RECORD (arm continues)"
   fi
 fi
+# xmap-overlay helper: SAME delivery discipline as xmap-pixels above
+# (ci/xmap-overlay/BUILD.md). Links -lXcomposite -lXext for the gated
+# composite-overlay probe; guest runtime lib presence is probed by the
+# caller (XO_LDCONFIG lines) and the test records a SKIP (never a
+# failure) when absent. A build/push failure never fails the arm.
+if [ "$LANE" = full ] || [ "$LANE" = session ]; then
+  timeout 30 adb -s "$SERIAL" shell rm -f /data/local/tmp/ldoa-xmap-overlay || true
+  if sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libx11-dev libxcomposite-dev \
+     && gcc -O2 -Wall -Wextra -o /tmp/ldoa-xmap-overlay ci/xmap-overlay/xmap-overlay.c -lX11 -lXcomposite; then
+    BUILD_SHA=$(sha256sum /tmp/ldoa-xmap-overlay | cut -d' ' -f1)
+    echo "XMAP-OVERLAY-BUILD ok runner-sha256: $BUILD_SHA"
+    if timeout 60 adb -s "$SERIAL" push /tmp/ldoa-xmap-overlay /data/local/tmp/ldoa-xmap-overlay \
+       && timeout 60 adb -s "$SERIAL" pull /data/local/tmp/ldoa-xmap-overlay /tmp/ldoa-xmap-overlay.readback >/dev/null \
+       && [ "$(sha256sum /tmp/ldoa-xmap-overlay.readback | cut -d' ' -f1)" = "$BUILD_SHA" ]; then
+      echo "XMAP-OVERLAY-PUSH ok (readback sha256 EQUAL to build)"
+    else
+      timeout 30 adb -s "$SERIAL" shell rm -f /data/local/tmp/ldoa-xmap-overlay || true
+      echo "XMAP-OVERLAY-BUILD push/verify FAILED - device binary removed; test will record overlay-pixels NO-RECORD"
+    fi
+  else
+    echo "XMAP-OVERLAY-BUILD FAILED - test will record overlay-pixels NO-RECORD (arm continues)"
+  fi
+fi
 date -u +"VIRGL-SESSION start %H:%M:%S (lane=$LANE e1=$E1 vtestmc=$VTESTMC)"
 if [ "$LANE" = full ] || [ "$LANE" = session ]; then
   timeout -s KILL 1500 adb -s "$SERIAL" shell am instrument -w $E1ARG $VTESTMCARG -e class dev.phonelinux.proto.VirglGnomeSessionTest,dev.phonelinux.proto.GnomeSessionScriptSafetyTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl-session.log | tail -15 || echo "VIRGL-SESSION-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"
@@ -267,7 +290,7 @@ if [ "$LANE" = full ] || [ "$LANE" = session ]; then grep -q "OK (" /tmp/instr-v
 # payload REMOVES the target: a harvested file is intact device content or
 # ABSENT, never a masquerading partial/error payload.
 if [ "$LANE" = full ] || [ "$LANE" = session ]; then
-  for f in virgl-session.txt virgl-session-xcontent.img virgl-session-xcontent.partial virgl-session-xmap.ppm; do
+  for f in virgl-session.txt virgl-session-xcontent.img virgl-session-xcontent.partial virgl-session-xmap.ppm virgl-session-xov.ppm; do
     pull_or_absent "$f" "$f" 60 "VIRGL-SESSION-HARVEST"
   done
 fi

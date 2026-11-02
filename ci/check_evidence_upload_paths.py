@@ -45,6 +45,7 @@ from pathlib import Path
 # header-gate blocks pair exactly these verdicts with these files.
 CLAIM_RULES = [
     (re.compile(r"VERDICT window-pixels: SAMPLED"), "virgl-session-xmap.ppm"),
+    (re.compile(r"VERDICT overlay-pixels: SAMPLED"), "virgl-session-xov.ppm"),
     (re.compile(r"VERDICT guest-xcontent: CAPTURED"), "virgl-session-xcontent.img"),
 ]
 
@@ -56,6 +57,7 @@ PRODUCED_DIRS = ["screenshots"]
 
 SAMPLE_REPORT = """\
 VERDICT window-pixels: SAMPLED (5 of 5 patches; fixture sample)
+VERDICT overlay-pixels: SAMPLED (5 of 5 patches; fixture sample)
 VERDICT guest-xcontent: CAPTURED tool=xwd (fixture sample)
 """
 
@@ -174,15 +176,16 @@ def main() -> int:
 
     if "--negative-selftest" in sys.argv:
         mutated = [e.replace("virgl-session-xmap.ppm", "virgl-session-xmap.ppm.renamed")
+                          .replace("virgl-session-xov.ppm", "virgl-session-xov.ppm.renamed")
                    for e in upload_paths]
         if mutated == upload_paths:
-            print("NEGATIVE-SELFTEST: ERROR (xmap entry not found to mutate)")
+            print("NEGATIVE-SELFTEST: ERROR (pixel entries not found to mutate)")
             return 1
         mfail = run_pipeline(root, mutated, "mutated")
         if not mfail:
-            print("NEGATIVE-SELFTEST: FAIL (renaming the xmap upload entry was NOT caught)")
+            print("NEGATIVE-SELFTEST: FAIL (renaming the pixel upload entries was NOT caught)")
             return 1
-        print("NEGATIVE-SELFTEST: PASS (renamed xmap entry produced %d expected failure(s))"
+        print("NEGATIVE-SELFTEST: PASS (renamed pixel entries produced %d expected failure(s))"
               % len(mfail))
     return 0
 

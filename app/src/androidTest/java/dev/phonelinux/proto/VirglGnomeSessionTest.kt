@@ -1278,6 +1278,7 @@ class VirglGnomeSessionTest {
                 out.append("VERDICT window-topology: SKIPPED fail-closed: ")
                     .append(xmapGate).append('\n')
                 out.append("VERDICT window-pixels: SKIPPED fail-closed (same stale-owner gate)\n")
+                out.append("VERDICT overlay-pixels: SKIPPED fail-closed (same stale-owner gate)\n")
             } else {
                 val xmapScript = "ldoa-guest-xmap-" + launchId + ".sh"
                 val xmapBase = "/tmp/ldoa-xmap-" + launchId
@@ -1292,7 +1293,7 @@ class VirglGnomeSessionTest {
                             extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"),
                             extraEnv = mapOf("DISPLAY" to ":0"), timeoutMs = 45_000)
                         val xmapT1 = System.currentTimeMillis()
-                        out.append("window-topology probe (order 1 of 3: topology, pixels,")
+                        out.append("window-topology probe (order 1 of 4: topology, pixels, overlay,")
                             .append(" screencap; sequential ms timestamps start=").append(xmapT0)
                             .append(" end=").append(xmapT1)
                             .append(" launchId=").append(launchId)
@@ -1367,7 +1368,7 @@ class VirglGnomeSessionTest {
                                 extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"),
                                 extraEnv = mapOf("DISPLAY" to ":0"), timeoutMs = 30_000)
                             val pxT1 = System.currentTimeMillis()
-                            out.append("window-pixels probe (order 2 of 3; sequential ms timestamps")
+                            out.append("window-pixels probe (order 2 of 4; sequential ms timestamps")
                                 .append(" start=").append(pxT0).append(" end=").append(pxT1)
                                 .append(" helper-device-sha256=").append(pxSha)
                                 .append(" exit=").append(px.exitCode).append("):\n")
@@ -1434,6 +1435,147 @@ class VirglGnomeSessionTest {
                             out.append("guest pixel-ppm removal: ")
                                 .append(removeOwnedGuestFile(rootfs, pxPpmRel)).append('\n')
                         }
+
+                        // STEP 3 of 4: bounded COMPOSITE OVERLAY pixel sample
+                        // (xmap-overlay; ci/xmap-overlay/BUILD.md). Tiered:
+                        // Composite version + _NET_WM_CM_S0 selection owner are
+                        // READ-ONLY; XCompositeGetOverlayWindow is an
+                        // acquisition+mapping operation (it can create/map the
+                        // overlay window), issued ONLY when an owner exists,
+                        // with the owner re-read immediately before and after
+                        // and every acquisition matched by release+close on
+                        // all paths. The CM owner is a current selection state,
+                        // NOT an authenticated compositor producer; producer
+                        // attribution is always UNKNOWN (XC-MISC GetXIDRange is
+                        // an allocation range, not a resource mask; no XID
+                        // partition is assumed).
+                        // Post-get mapstate is never evidence of preexisting
+                        // viewability. Overlay patches are sampled drawable
+                        // content: NOT the Android-presented frame; black-or-
+                        // failed is NOT proof of absent content. The artifact
+                        // virgl-session-xov.ppm is SEPARATE from the root
+                        // virgl-session-xmap.ppm with its own retention check.
+                        val ovHelper = "ldoa-xmap-overlay-" + launchId
+                        val ovPpmRel = "tmp/ldoa-xov-" + launchId + ".ppm"
+                        val devOvPath = java.nio.file.Paths.get("/data/local/tmp/ldoa-xmap-overlay")
+                        if (!java.nio.file.Files.isRegularFile(devOvPath,
+                                java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                            out.append("VERDICT overlay-pixels: NO-RECORD (helper absent or not a" +
+                                " regular file at /data/local/tmp (NIO NOFOLLOW check) - CI" +
+                                " build/push failed or non-CI run; see XMAP-OVERLAY-BUILD lines" +
+                                " in the lane log)\n")
+                        } else {
+                            try {
+                                removeOwnedGuestFile(rootfs, ovPpmRel)
+                                removeOwnedGuestFile(rootfs, "tmp/" + ovHelper)
+                                val preOvPpm = File(rootfs, ovPpmRel).toPath()
+                                val preOvHelper = File(rootfs, "tmp/" + ovHelper).toPath()
+                                if (java.nio.file.Files.exists(preOvPpm,
+                                        java.nio.file.LinkOption.NOFOLLOW_LINKS) ||
+                                    java.nio.file.Files.exists(preOvHelper,
+                                        java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                                    out.append("VERDICT overlay-pixels: NO-RECORD (artifact path still" +
+                                        " present after removal (NIO NOFOLLOW check); refusing to sample)\n")
+                                } else {
+                                val ovSha = sha256Hex(devOvPath.toFile())
+                                File(rootfs, "tmp/" + ovHelper).writeBytes(devOvPath.toFile().readBytes())
+                                File(rootfs, "tmp/" + ovHelper).setExecutable(true, false)
+                                if (sha256Hex(File(rootfs, "tmp/" + ovHelper)) != ovSha) {
+                                    out.append("VERDICT overlay-pixels: NO-RECORD (guest helper copy" +
+                                        " hash mismatch against /data/local/tmp original;" +
+                                        " refusing to invoke)\n")
+                                } else {
+                                val ovT0 = System.currentTimeMillis()
+                                val ov = Proot.runGuest(ctx, rootfs,
+                                    listOf("/bin/sh", "-c",
+                                        "ldconfig -p 2>/dev/null | grep -i 'libXcomposite' |" +
+                                            " sed 's/^/XO_LDCONFIG /';" +
+                                            " if ! ldconfig -p 2>/dev/null | grep -q 'libXcomposite\\.so'; then" +
+                                            " echo 'XO_SKIPPED reason=guest-libs-absent'; exit 10; fi;" +
+                                            " exec /tmp/" + ovHelper + " /tmp/" +
+                                            ovPpmRel.removePrefix("tmp/")),
+                                    extraBinds = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix"),
+                                    extraEnv = mapOf("DISPLAY" to ":0"), timeoutMs = 30_000)
+                                val ovT1 = System.currentTimeMillis()
+                                out.append("overlay-pixels probe (order 3 of 4; sequential ms timestamps")
+                                    .append(" start=").append(ovT0).append(" end=").append(ovT1)
+                                    .append(" helper-device-sha256=").append(ovSha)
+                                    .append(" exit=").append(ov.exitCode).append("):\n")
+                                ov.stdout.lineSequence().filter { it.startsWith("XO_") }
+                                    .forEach { out.append("  ").append(it).append('\n') }
+                                val ovPpmGuest = File(rootfs, ovPpmRel)
+                                val ovResultLine = ov.stdout.lineSequence()
+                                    .firstOrNull { it.startsWith("XO_RESULT ") } ?: ""
+                                val ovPatchesOk = Regex("""patches-ok=(\d+)""").find(ovResultLine)
+                                    ?.groupValues?.get(1)?.toIntOrNull() ?: -1
+                                val ovSkipLine = ov.stdout.lineSequence()
+                                    .firstOrNull { it.startsWith("XO_SKIPPED ") } ?: ""
+                                // Exit taxonomy mirrors window-pixels, PLUS 10 =
+                                // SKIPPED (recorded outcome: no Composite ext, no
+                                // CM owner, owner lost, or guest libs absent; no
+                                // overlay request is issued in those states).
+                                val ovPpmReject = validateXmapPpm(ovPpmGuest, ovT0)
+                                val overlayVerdict = when {
+                                    XServer.currentLaunchIdForTest() != launchId ||
+                                        !gsStartMatches(gsPid, gsStartTick) ->
+                                        "STALE (generation changed during probe; sample discarded," +
+                                            " never read across generations)"
+                                    ov.exitCode == 6 ->
+                                        "NO-RECORD (helper deadline hit; see XO_ERROR stage lines)"
+                                    ov.exitCode == 10 ->
+                                        "SKIPPED (recorded outcome: " +
+                                            (if (ovSkipLine.isNotEmpty()) ovSkipLine.removePrefix("XO_SKIPPED ")
+                                             else ovResultLine.removePrefix("XO_RESULT ")) +
+                                            "; root-only fallback preserved; no overlay request is" +
+                                            " issued in skipped states (no Composite extension, no" +
+                                            " CM atom, owner None, owner lost, or guest libs absent)"
+                                    ov.exitCode == 2 || ov.exitCode == 3 || ov.exitCode == 4 ||
+                                        ov.exitCode == 5 || ov.exitCode == 8 ->
+                                        "NO-RECORD (helper exit " + ov.exitCode +
+                                            "; see XO_ERROR/XO_XERROR stage lines)"
+                                    ov.exitCode != 0 && ov.exitCode != 7 ->
+                                        "NO-RECORD (unexpected helper exit " + ov.exitCode + ")"
+                                    ovResultLine.isEmpty() ->
+                                        "NO-RECORD (no XO_RESULT line at exit " + ov.exitCode + ")"
+                                    ovPpmReject != null ->
+                                        "NO-RECORD (artifact rejected: " + ovPpmReject + ")"
+                                    ov.exitCode == 7 -> {
+                                        File(ctx.filesDir, "virgl-session-xov.ppm")
+                                            .writeBytes(ovPpmGuest.readBytes())
+                                        "SAMPLED-PARTIAL (exit 7: " + ovPatchesOk + " of 5 patches valid;" +
+                                            " PARTIAL sample - valid patches logged, NOT full success;" +
+                                            " sampled composite-overlay drawable content per XO_ATTRIB" +
+                                            " attribution only; NOT the Android-presented frame;" +
+                                            " black-or-failed is NOT proof of absent content; artifact" +
+                                            " virgl-session-xov.ppm header-gated CI-side; reviewer" +
+                                            " pixel inspection required)"
+                                    }
+                                    else -> {
+                                        File(ctx.filesDir, "virgl-session-xov.ppm")
+                                            .writeBytes(ovPpmGuest.readBytes())
+                                        "SAMPLED (5 of 5 patches; sampled composite-overlay drawable" +
+                                            " content per XO_ATTRIB attribution only; NOT the" +
+                                            " Android-presented frame; black-or-failed is NOT proof" +
+                                            " of absent content; artifact virgl-session-xov.ppm" +
+                                            " header-gated CI-side; reviewer pixel inspection still" +
+                                            " required)"
+                                    }
+                                }
+                                out.append("VERDICT overlay-pixels: ").append(overlayVerdict).append('\n')
+                                }
+                                }
+                            } catch (t: Throwable) {
+                                out.append("VERDICT overlay-pixels: NO-RECORD (probe threw ")
+                                    .append(t.javaClass.simpleName).append(": ")
+                                    .append(t.message ?: "no-message")
+                                    .append("; Android-side evidence continues)\n")
+                            } finally {
+                                out.append("guest overlay-helper removal: ")
+                                    .append(removeOwnedGuestFile(rootfs, "tmp/" + ovHelper)).append('\n')
+                                out.append("guest overlay-ppm removal: ")
+                                    .append(removeOwnedGuestFile(rootfs, ovPpmRel)).append('\n')
+                            }
+                        }
                     }
                 } finally {
                     out.append("guest xmap script removal: ")
@@ -1492,7 +1634,7 @@ class VirglGnomeSessionTest {
                     finalBind.isNotEmpty())
             val shotAt = System.currentTimeMillis()
             Shot.save("virgl-session-desktop")
-            out.append("screencap-order: 3 of 3, requested at ").append(shotAt)
+            out.append("screencap-order: 4 of 4, requested at ").append(shotAt)
                 .append(" (sequential after topology + pixel probes; no same-instant claim)\n")
             presentationVerdict = "capture via Android-display screencap (shot pipeline, name" +
                 " virgl-session-desktop); capture-target identity ESTABLISHED [" + ident.summary + "];" +
