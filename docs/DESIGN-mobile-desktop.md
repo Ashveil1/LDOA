@@ -297,3 +297,48 @@ feature and performance impact is UNMEASURED; do not read this as "benign".
 Session dbus is per-launch (dbus-launch under proot, no systemd/logind);
 anything in the guest that assumes a full systemd/logind environment must
 degrade on its own absence path, not be assumed present.
+
+## M2: frame/input measurement (P2 probe, emulator-labeled)
+
+`mobileInputToPixelProbe` (MobileShellSpikeTest) is the custom lane's primary
+smoothness signal, per the approved measurement plan (P2 primary, P1 proxy,
+P3 context-only):
+
+- **What it measures**: time from a scripted two-finger drag (MotionEvent
+  dispatch, app-side `uptimeMillis`) to the first pixel change on the
+  captured screen (UiAutomation `takeScreenshot`, completion timestamps),
+  and from there to settled content (3 consecutive samples back under
+  threshold vs their predecessor). Reports `t_first_change_ms`,
+  `t_settled_ms`, sample count, peak diff, and the actual sampling periods.
+- **Noise handling**: a 4-shot baseline series before injection sets the
+  threshold (`max(500, noiseMax*6)`); the ROI is the xterm content area
+  (tray/clock excluded). xterm's block cursor does not blink by default;
+  the baseline guard measures whatever actually moves without input.
+- **Direction handling**: if the first drag's wheel button is a no-op at
+  the current scroll position (no threshold crossing), the probe retries
+  once with the opposite sign and logs the retry.
+- **Honesty labels (logged with every run)**: x86_64 CI emulator only;
+  app-side clocks; capture-completion timestamps; sample-index x measured
+  period, never vsync frames. Asserts cover measurement validity only
+  (capture stable, threshold crossed, content settled) - never a
+  millisecond value.
+- **Fixed conservative timing semantics**: the first threshold-crossing
+  frame can be the button1-held SELECTION appearing before any scroll
+  (the open input defect), so `t_first_roi_change_ms` is ALWAYS
+  dispatch-to-first-ROI-change - never claimed as scroll latency.
+- **Outcome validation**: after sampling, a correlation shift check (the
+  scroll outcome test's measureScroll machinery) compares pre/post row
+  content, with a no-gesture negative control as the capture stability
+  precondition, and reports `scroll_confirmed`: whether the drag
+  EVENTUALLY moved content by at least one measured line. It validates
+  the outcome, never the first frame. Even after the input defect is
+  fixed, this probe stays dispatch-to-first-ROI-change until a
+  first-frame content-shift/noise qualification exists - it is not
+  scroll-latency or smoothness evidence as written.
+- **Artifacts**: `p2-pre`, `p2-first`, `p2-settled` frames via the
+  PHONESHOT logcat channel (`p2-first`/`p2-settled` persist the actual
+  captured bitmaps through a local encoder mirroring Shot.save; Shot.save
+  itself only re-captures the live screen).
+- **Comparisons**: the GNOME same-stack baseline on the same emulator
+  image is the consolidated plan's piece. No number from this probe is a
+  smoothness claim; POCO-class hardware data is a separate, gated step.

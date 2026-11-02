@@ -832,6 +832,374 @@ class MobileShellSpikeTest {
         }
     }
 
+    /** P2 INPUT-TO-PIXEL PROBE (M2, primary signal): measures the time from
+     *  a scripted two-finger drag (MotionEvent dispatch, app-side clock) to
+     *  real pixel change on the captured screen (UiAutomation
+     *  takeScreenshot), and from there to settled content. Produces a
+     *  labeled measurement only - x86_64 emulator, app-side clocks,
+     *  capture-completion timestamps; NO smoothness/FPS/ARM claim and NO
+     *  assertion on any millisecond value (asserts cover measurement
+     *  validity only). Timing semantics are FIXED and conservative: the
+     *  first threshold-crossing frame can be the button1-held SELECTION
+     *  appearing before any scroll (the open input defect), so
+     *  t_first_roi_change_ms is always dispatch-to-first-ROI-change -
+     *  never claimed as scroll latency. Separately, a post-sample
+     *  correlation shift check (same measureScroll machinery as the
+     *  scroll outcome test, with a no-gesture negative control) reports
+     *  scroll_confirmed: whether the drag EVENTUALLY moved content by at
+     *  least one measured line. scroll_confirmed validates the outcome,
+     *  never the first frame. Even after the input defect is fixed this
+     *  probe stays dispatch-to-first-ROI-change until a first-frame
+     *  content-shift/noise qualification exists - it is NOT scroll
+     *  latency or smoothness evidence as written.
+     *  Sampling is takeScreenshot-bound (~150ms target; actual periods
+     *  logged) - results are sample indices times measured periods, never
+     *  vsync frames. P1 (Choreographer app-side pacing) is the shared
+     *  XServer/lorie lane's optional proxy, deliberately absent here. */
+    @Test
+    fun mobileInputToPixelProbe(): Unit = runBlocking {
+        val instr = InstrumentationRegistry.getInstrumentation()
+        val ctx = instr.targetContext
+        val device = UiDevice.getInstance(instr)
+        val d = Distros.UBUNTU
+        val installer = DistroInstaller(ctx)
+        if (!installer.isInstalled(d)) {
+            var last: InstallState = InstallState.NotInstalled
+            val ok = installer.install(d) { last = it }
+            assertTrue("p2: ubuntu install failed at state=" + last, ok)
+        }
+        assertTrue(installer.isInstalled(d))
+        val rootfs = installer.rootfsDir(d)
+        if (!GuestMobileShell.hasMobileShell(rootfs)) {
+            val r = GuestMobileShell.provisionMobileShell(ctx, rootfs)
+            Log.i(TAG, "p2: provision exit=" + r.exitCode)
+            assertTrue("p2: mobile provision failed exit=" + r.exitCode, r.exitCode == 0)
+        }
+        XServer.start(ctx) // idempotent: a live server is reused
+        val xtermBind = listOf(XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix")
+        val defaultPrefs = MobileModeSettings.read(ctx)
+        val logFile = File(ctx.filesDir, "mobile-desktop.log")
+        var logOffset = if (logFile.isFile) logFile.length() else 0L
+
+        fun guest(cmd: String): String = GuestDesktop.guestShell(ctx, rootfs, cmd, extraBinds = xtermBind)
+
+        val xDeadline = System.currentTimeMillis() + 90_000
+        var xUp = false
+        while (System.currentTimeMillis() < xDeadline) {
+            if (GuestDesktop.guestOk(ctx, rootfs, "DISPLAY=:0 xset q")) { xUp = true; break }
+            Thread.sleep(2_000)
+        }
+        assertTrue("p2: X :0 never became ready", xUp)
+
+        MobileModeSettings.write(ctx, defaultPrefs.copy(scale = 1.0f, windowMode = "maximized"))
+        val proc = GuestMobileShell.launchMobileSession(ctx, rootfs)
+        logOffset = awaitJwmAlive(proc, logFile, logOffset)
+        Thread.sleep(20_000) // session clients map
+        val rootPid = hostPidOf(proc)
+        assertTrue("p2: proot root unreadable", rootPid != null)
+        val rootIdent = identityOf(rootPid!!)
+        assertTrue("p2: proot root identity unreadable", rootIdent != null)
+        val busIdentity = File(rootfs, "root/.mobile-bus.pid")
+            .takeIf { it.isFile }?.readText()?.trim()?.toIntOrNull()
+            ?.let { identityOf(it) }
+        ctx.startActivity(Intent(ctx, com.termux.x11.MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        Thread.sleep(15_000)
+        Shot.dismissSystemDialogs(device)
+
+        var xtermProc: Process? = null
+        val heldIdents = HashSet<PIdent?>()
+        val xtermLog = File(ctx.filesDir, "p2-xterm.log")
+        val fpFile = File(rootfs, "root/p2-fingerprint.sh")
+        var fpCreated = false
+        try {
+            // device<->guest affine map from two pointer probes (probes run
+            // BEFORE the test xterm maps; same proven pattern as the
+            // scroll outcome test).
+            fun probeX(devX: Int, devY: Int): Pair<Int, Int>? {
+                device.swipe(devX, devY, devX + 1, devY, 5)
+                Thread.sleep(600)
+                val out = guest("DISPLAY=:0 xdotool getmouselocation --shell 2>/dev/null || true")
+                val x = Regex("X=(-?\\d+)").find(out)?.groupValues?.get(1)?.toIntOrNull()
+                val y = Regex("Y=(-?\\d+)").find(out)?.groupValues?.get(1)?.toIntOrNull()
+                return if (x != null && y != null) Pair(x, y) else null
+            }
+            val pm1 = probeX(300, 1200)
+            val pm2 = probeX(700, 1700)
+            Log.i(TAG, "p2: mapping probes dev(300,1200)->" + pm1 + " dev(700,1700)->" + pm2)
+            assertTrue("p2: mapping probes failed", pm1 != null && pm2 != null)
+            assertTrue("p2: probe delta too small for a stable map",
+                Math.abs(pm2!!.first - pm1!!.first) >= 10 && Math.abs(pm2.second - pm1.second) >= 10)
+            fun guestToDevice(gx: Double, gy: Double): Pair<Int, Int> {
+                val a = pm1!!; val b = pm2!!
+                val ax = (700 - 300).toDouble() / (b.first - a.first)
+                val bx = 300 - ax * a.first
+                val ay = (1700 - 1200).toDouble() / (b.second - a.second)
+                val by = 1200 - ay * a.second
+                return Pair((ax * gx + bx).toInt(), (ay * gy + by).toInt())
+            }
+
+            // Fail-closed: the session's own ctty launch shape is a hard
+            // dependency (xterm refuses to map without a controlling
+            // terminal - scroll sub-cell B evidence).
+            assertTrue("p2: script pty helper missing - FAIL CLOSED",
+                guest("command -v script >/dev/null 2>&1 && echo ok").contains("ok"))
+            // Same dash-safe fingerprint arithmetic as the scroll test,
+            // own file (ownership guard identical: unknown pre-existing
+            // content fails closed and is never deleted).
+            val fpContent =
+                "#!/bin/sh\n" +
+                "# Test-owned P2 probe content (MobileShellSpikeTest).\n" +
+                "i=0\n" +
+                "while [ ${'$'}i -lt 240 ]; do\n" +
+                "  k=${'$'}(( ( (i * 2654435761 + 12345) % 2147483648 ) % 41 ))\n" +
+                "  printf 'P%03d ' ${'$'}i\n" +
+                "  j=0\n" +
+                "  while [ ${'$'}j -lt ${'$'}k ]; do printf '#'; j=${'$'}((j+1)); done\n" +
+                "  printf '\\n'\n" +
+                "  i=${'$'}((i+1))\n" +
+                "done\n" +
+                "exec /bin/sh\n"
+            val fpPre = if (fpFile.exists()) fpFile.readText() else null
+            assertTrue("p2: fingerprint path holds unknown content - preserved, FAIL CLOSED",
+                fpPre == null || fpPre == fpContent)
+            if (fpPre == null) { fpFile.writeText(fpContent); fpCreated = true }
+            // Direct argv, no sh -c wrapper (flat reaped tree, same shape
+            // as the scroll test's xterm).
+            xtermProc = heldGuest(listOf("/usr/bin/script", "-qec",
+                "xterm -sl 2000 -fa \"DejaVu Sans Mono\" -fs 13" +
+                " -T ldoa-p2probe -e /bin/sh /root/p2-fingerprint.sh",
+                "/dev/null"), xtermLog)
+            val xtermRootPid = hostPidOf(xtermProc!!)
+            assertTrue("p2: test xterm proot root unreadable", xtermRootPid != null)
+            val xtermRootIdent = identityOf(xtermRootPid!!)
+            heldIdents.add(xtermRootIdent)
+            var xt: WinGeom? = null
+            val xtDeadline = System.currentTimeMillis() + 60_000
+            while (System.currentTimeMillis() < xtDeadline && xt == null) {
+                xt = windowGeom(guest("DISPLAY=:0 xwininfo -root -tree 2>/dev/null || true"), "ldoa-p2probe")
+                if (xt == null) Thread.sleep(2_500)
+            }
+            assertTrue("p2: test xterm never mapped", xt != null)
+            val mapState = guest("DISPLAY=:0 xwininfo -id " + xt!!.id + " 2>/dev/null | grep 'Map State' || true")
+            assertTrue("p2: test xterm not IsViewable: " + mapState, mapState.contains("IsViewable"))
+            val xtG = xt!!
+            assertTrue("p2: test xterm geometry implausible (expected maximized): " + xtG,
+                xtG.w > 400 && xtG.h > 800)
+            val xtermTreeIdents = treeOf(xtermRootPid, scanProc()).mapNotNull { identityOf(it) }.toSet()
+            heldIdents.addAll(xtermTreeIdents)
+            Thread.sleep(10_000) // fingerprint print settles
+
+            // Content ROI (guest coords): inside the client window, inset
+            // 8px, bottom 196px excluded (prompt + cursor rows); the tray
+            // and its clock stay outside the measured region.
+            val roiX = xtG.x + 8; val roiY = xtG.y + 8
+            val roiW = xtG.w - 16; val roiH = xtG.h - 196
+            assertTrue("p2: ROI degenerate", roiW > 200 && roiH > 400)
+            val tl = guestToDevice(roiX.toDouble(), roiY.toDouble())
+            val br = guestToDevice((roiX + roiW).toDouble(), (roiY + roiH).toDouble())
+
+            // Changed-pixel diff inside the device-space ROI, stride 2.
+            // getPixels once per shot into IntArrays: per-pixel getPixel
+            // JNI calls would dominate the sampling period.
+            fun roiDiff(a: android.graphics.Bitmap, b: android.graphics.Bitmap): Int {
+                val x0 = tl.first.coerceIn(0, a.width - 1)
+                val y0 = tl.second.coerceIn(0, a.height - 1)
+                val x1 = br.first.coerceIn(x0 + 1, a.width)
+                val y1 = br.second.coerceIn(y0 + 1, a.height)
+                val w = x1 - x0; val h = y1 - y0
+                val pa = IntArray(w * h); val pb = IntArray(w * h)
+                a.getPixels(pa, 0, w, x0, y0, w, h)
+                b.getPixels(pb, 0, w, x0, y0, w, h)
+                var n = 0
+                var i = 0
+                while (i < h) {
+                    var j = 0
+                    while (j < w) {
+                        if (pa[i * w + j] != pb[i * w + j]) n++
+                        j += 2
+                    }
+                    i += 2
+                }
+                return n
+            }
+            fun shot(): android.graphics.Bitmap = instr.uiAutomation.takeScreenshot()
+                ?: throw AssertionError("p2: takeScreenshot null")
+
+            // Baseline noise floor: 4 shots 300ms apart, consecutive
+            // diffs. xterm's block cursor does not blink by default; this
+            // guard measures whatever actually moves without input.
+            val baseShots = ArrayList<android.graphics.Bitmap>()
+            val baseDiffs = ArrayList<Int>()
+            baseShots.add(shot())
+            repeat(3) {
+                Thread.sleep(300)
+                baseShots.add(shot())
+                baseDiffs.add(roiDiff(baseShots[baseShots.size - 2], baseShots[baseShots.size - 1]))
+            }
+            val noiseMax = baseDiffs.maxOrNull() ?: 0
+            val threshold = maxOf(500, noiseMax * 6)
+            Log.i(TAG, "p2: baseline consecutive diffs=" + baseDiffs +
+                " noiseMax=" + noiseMax + " threshold=" + threshold)
+            val ref = baseShots[baseShots.size - 1]
+            Shot.save("p2-pre")
+
+            // Inject + sample. t0 is MotionEvent dispatch time (app-side
+            // clock); sample timestamps are capture-COMPLETION times on
+            // the same clock. A drag whose wheel button does nothing at
+            // the current scroll position crosses no threshold - retry
+            // once with the opposite sign and record the retry.
+            var t0: Long
+            var dySign = 1
+            var crossed = false
+            var tFirst = -1L
+            var tSettled = -1L
+            var samples = 0
+            var peak = 0
+            var firstBmp: android.graphics.Bitmap? = null
+            var settledBmp: android.graphics.Bitmap? = null
+            var prev: android.graphics.Bitmap? = null
+            val loopBitmaps = ArrayList<android.graphics.Bitmap>()
+            val periods = ArrayList<Long>()
+            var attempt = 0
+            while (attempt < 2 && !crossed) {
+                attempt++
+                val cx = (tl.first + br.first) / 2f
+                val cy = (tl.second + br.second) / 2f
+                t0 = android.os.SystemClock.uptimeMillis()
+                twoFingerDrag(instr, cx, cy, 300f * dySign)
+                prev = ref
+                var stableRun = 0
+                val deadline = t0 + 12_000
+                var lastT = t0
+                while (android.os.SystemClock.uptimeMillis() < deadline) {
+                    Thread.sleep(150)
+                    val b = shot()
+                    loopBitmaps.add(b)
+                    val t = android.os.SystemClock.uptimeMillis()
+                    periods.add(t - lastT); lastT = t
+                    samples++
+                    val vsRef = roiDiff(ref, b)
+                    val vsPrev = roiDiff(prev!!, b)
+                    if (vsRef > peak) peak = vsRef
+                    if (!crossed && vsRef > threshold) {
+                        crossed = true
+                        tFirst = t - t0
+                        firstBmp = b
+                        Log.i(TAG, "p2: FIRST ROI CHANGE t=" + tFirst + "ms diff=" + vsRef +
+                            " (threshold=" + threshold + "; may be selection highlight, not scroll)")
+                    } else if (crossed && vsPrev <= threshold) {
+                        stableRun++
+                        if (stableRun >= 3) {
+                            tSettled = t - t0
+                            settledBmp = b
+                            break
+                        }
+                    } else if (crossed) {
+                        stableRun = 0
+                    }
+                    prev = b
+                }
+                if (!crossed) {
+                    Log.i(TAG, "p2: drag sign " + dySign + " crossed no threshold - retrying opposite sign")
+                    dySign = -dySign
+                }
+            }
+            // CONTENT-SHIFT CHECK (review rounds 1-2): validates the
+            // EVENTUAL outcome only (final sample vs pre-injection ref) -
+            // it cannot vouch for the FIRST threshold frame, which may be
+            // the earlier selection highlight. The timings therefore keep
+            // the dispatch-to-first-ROI-change label unconditionally;
+            // scroll_confirmed is a separate outcome boolean. Negative
+            // control: two no-gesture baseline shots must show ~0 shift
+            // (capture stability precondition).
+            val rx0 = tl.first.coerceIn(0, ref.width - 1)
+            val ry0 = tl.second.coerceIn(0, ref.height - 1)
+            val rx1 = br.first.coerceIn(rx0 + 1, ref.width)
+            val ry1 = br.second.coerceIn(ry0 + 1, ref.height)
+            val ctrlRows = rowBrightness(baseShots[baseShots.size - 2], rx0, ry0, rx1 - rx0, ry1 - ry0)
+            val preRows = rowBrightness(ref, rx0, ry0, rx1 - rx0, ry1 - ry0)
+            val postRows = rowBrightness(prev ?: ref, rx0, ry0, rx1 - rx0, ry1 - ry0)
+            val lhEst = estLineHeight(preRows)
+            val ctrl = if (lhEst != null) measureScroll(ctrlRows, preRows, lhEst, 4 * lhEst) else null
+            val shift = if (lhEst != null) measureScroll(preRows, postRows, lhEst, 24 * lhEst) else null
+            val controlOk = ctrl != null && ctrl.status == "ACCEPT" && ctrl.shiftPx <= 2
+            val scrollConfirmed = controlOk && lhEst != null && shift != null &&
+                shift.status == "ACCEPT" && Math.abs(shift.shiftPx) >= lhEst
+            val classification = if (scrollConfirmed) "eventual-scroll-confirmed"
+                else "no-scroll-confirmed-selection-or-noop"
+            Log.i(TAG, "p2: content-shift control ctrl=" + ctrl + " shift=" + shift +
+                " lh=" + lhEst + " scroll_confirmed=" + scrollConfirmed +
+                " classification=" + classification)
+
+            // Persist decisive frames BEFORE any assert (logcat PHONESHOT
+            // channel, same encoding as Shot.save but for already-captured
+            // bitmaps - Shot.save itself only re-captures the live screen).
+            if (firstBmp != null) saveBmp("p2-first", firstBmp!!)
+            if (settledBmp != null) saveBmp("p2-settled", settledBmp!!)
+            Log.i(TAG, "P2PROBE t_first_roi_change_ms=" + tFirst +
+                " t_settled_ms=" + tSettled +
+                " timing_meaning=dispatch-to-first-ROI-change-always" +
+                " samples=" + samples + " peak_diff=" + peak +
+                " periods_ms=" + periods +
+                " baseline_noise_max=" + noiseMax + " threshold=" + threshold +
+                " attempts=" + attempt + " dySign_final=" + dySign +
+                " confound=button1-held-selection-during-drag" +
+                " scroll_confirmed=" + scrollConfirmed +
+                " classification=" + classification +
+                " clock=app-side-uptimeMillis capture=completion-timestamp" +
+                " (CI x86_64 emulator only - no smoothness/FPS/ARM claim)")
+            loopBitmaps.forEach { it.recycle() }
+            baseShots.forEach { it.recycle() }
+            assertTrue("p2: capture unstable without gesture - measurement invalid: ctrl=" + ctrl,
+                controlOk)
+            assertTrue("p2: input never produced pixel change above threshold - measurement invalid (frames dumped)",
+                crossed)
+            assertTrue("p2: content never settled within deadline - measurement invalid: tFirst=" + tFirst,
+                tSettled >= 0)
+            Log.i(TAG, "P2-PROBE-OK first-roi-change=" + tFirst + "ms settled=" + tSettled + "ms " +
+                "timing=dispatch-to-first-ROI-change classification=" + classification + " " +
+                "(emulator-labeled measurement; the GNOME same-stack baseline is the consolidated plan's piece)")
+        } finally {
+            try { xtermProc?.destroy() } catch (t: Throwable) { }
+            try {
+                val left = killTreeVerified(rootIdent, heldIdents + setOfNotNull(busIdentity))
+                if (left.isEmpty()) Log.i(TAG, "p2: finally cleanup no-op - all captured identities already reaped")
+                else Log.e(TAG, "p2: finally reaped leaked identities: " + left)
+            } catch (t: Throwable) {
+                Log.e(TAG, "p2: finally cleanup failed - primary result preserved", t)
+            }
+            try { dumpLogTail("p2-xterm.log", xtermLog, 16384) } catch (t: Throwable) { }
+            try { if (fpCreated) fpFile.delete() } catch (t: Throwable) { }
+            MobileModeSettings.write(ctx, defaultPrefs)
+        }
+    }
+
+    /** Save an ALREADY-CAPTURED bitmap through the same logcat PHONESHOT
+     *  channel Shot.save uses (Shot.save itself only re-captures the live
+     *  screen, which cannot persist a mid-probe frame). Same encoding:
+     *  720-wide JPEG 75, base64 NO_WRAP, 3000-char chunks. */
+    private fun saveBmp(name: String, bmp: android.graphics.Bitmap) {
+        val w = 720
+        val h = bmp.height * w / bmp.width
+        val scaled = android.graphics.Bitmap.createScaledBitmap(bmp, w, h, true)
+        val baos = java.io.ByteArrayOutputStream()
+        scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, 75, baos)
+        val bytes = baos.toByteArray()
+        if (bytes.isEmpty()) throw AssertionError("p2: frame " + name + " encoded empty")
+        val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+        val chunk = 3000
+        val total = (b64.length + chunk - 1) / chunk
+        var seq = 0
+        while (seq < total) {
+            val end = minOf((seq + 1) * chunk, b64.length)
+            Log.i("PHONESHOT", name + "|" + String.format("%04d|%04d|", seq, total) + b64.substring(seq * chunk, end))
+            seq++
+        }
+        Log.i("PHONESHOT", name + " exported: " + bytes.size + " bytes, " + total + " chunks")
+        scaled.recycle()
+    }
+
     /** Held guest process for test-owned X clients (xev control, the
      *  scrolltest xterm): its own proot root with --kill-on-exit so
      *  destroy() reaps the whole tree, PLINUX_SESSION tag for the tagged
