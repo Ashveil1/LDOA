@@ -93,7 +93,8 @@ class MobileDesktopEntryTest {
         // is NOT the launcher-ANR dialog the ONE-dismissal budget exists for
         // (run 41457173978 failed at the FIRST tap on exactly this, zero
         // dialog clicks - correct fail-closed, wrong setup). Granting keeps
-        // the dialog policy untouched: no extra budget, no earlier arm.
+        // the dialog policy untouched: it is never dismissed; the ONE shared
+        // launcher-ANR budget covers verified ANRs from the first gate on.
         val ciOptIn = InstrumentationRegistry.getArguments()
             .getString("ldoa_ci_emulator") == "true"
         val looksEmulator = listOf(android.os.Build.FINGERPRINT, android.os.Build.MODEL,
@@ -212,16 +213,19 @@ class MobileDesktopEntryTest {
             val out = ctx.getExternalMediaDirs().firstOrNull()
                 ?.let { File(it, "additional_test_output") }
             if (out != null && (out.isDirectory || out.mkdirs())) {
-                val tmp = "/data/local/tmp/m1-uidump-" + unique + ".xml"
-                device.executeShellCommand("uiautomator dump " + tmp)
-                val xml = device.executeShellCommand("cat " + tmp)
-                // Validate the dump is a real hierarchy before archiving:
-                // a shell/uiautomator error string must never be saved as
-                // .xml evidence (same defect class as the run-as pulls).
+                // UiDevice.dumpWindowHierarchy rides the test's OWN
+                // UiAutomation connection. A shell `uiautomator dump`
+                // cannot coexist with it - the shell process crashes
+                // ("UiAutomationService already registered", run
+                // 41468632672) and yields nothing. Validate the written
+                // file: an error payload must never be archived as .xml.
+                val dest = File(out, "m1-failure-" + unique + "-uihierarchy.xml")
+                device.dumpWindowHierarchy(dest)
+                val xml = if (dest.isFile) dest.readText() else ""
                 if (xml.startsWith("<?xml") && xml.contains("<hierarchy")) {
-                    File(out, "m1-failure-" + unique + "-uihierarchy.xml").writeText(xml)
                     Log.i(TAG, "m1-evidence: UI hierarchy at '" + site + "' exported (" + xml.length + " chars)")
                 } else {
+                    dest.delete()
                     Log.i(TAG, "m1-evidence: hierarchy capture at '" + site +
                         "' INVALID (not a hierarchy dump; first chars: " + xml.take(80) + ")")
                 }
@@ -231,13 +235,79 @@ class MobileDesktopEntryTest {
         }
     }
 
+    // Shared obstruction budget for the WHOLE M1 test: exactly ONE verified
+    // launcher-ANR Wait dismissal, armed from the earliest entry/navigation
+    // obstruction (the readiness gate before the first tap) through the
+    // final focus gate. Any recurrence after that one action fails closed;
+    // nothing else is ever clicked (no watchers, no close-app, no launcher
+    // suppress/replace, and never a blind tap on an unrelated permission
+    // window - those stay evidence-only failures).
+    private var anrDismissalsSpent = 0
+
+    /** The one permitted obstruction action: a VERIFIED launcher-ANR Wait
+     *  dismissal. Shot's detection evidence chain runs first; the click is
+     *  the fresh in-container Wait; the shared test-wide budget is spent.
+     *  Fails closed when the budget is already spent. */
+    private fun dismissVerifiedLauncherAnrOnce(site: String) {
+        if (anrDismissalsSpent > 0) {
+            captureFailureEvidence(site)
+            org.junit.Assert.fail("verified launcher-ANR dialog present at '" + site + "' after" +
+                " the test's ONE dismissal was already spent (persistent or new recurrence -" +
+                " instantaneous detection cannot distinguish) - fail closed")
+        }
+        // Pre-action DURABLE evidence: detection is not visual proof, so save
+        // an observation screenshot + raw focus/foreground log BEFORE the one
+        // permitted click. Deliberately NOT captureFailureEvidence - that
+        // sets failureEvidenceSite and would suppress the true failure hook;
+        // this is a recoverable action, observation only (Shot.save guarded).
+        val preFg = try { device.currentPackageName } catch (t: Throwable) { "unavailable" }
+        val preFocus = xlorieFocusState()
+        try {
+            Shot.save("m1-obstruction-anr-" + site.replace(Regex("[^A-Za-z0-9_-]"), "_") +
+                "-" + System.currentTimeMillis())
+        } catch (t: Throwable) {
+            Log.i(TAG, "m1-obstruction: pre-action shot at '" + site + "' failed (auxiliary): " +
+                t.javaClass.simpleName)
+        }
+        Log.i(TAG, "m1-obstruction: pre-action evidence at '" + site + "' foreground=" + preFg +
+            " focus=" + preFocus.second + " raw=" + preFocus.first)
+        val dismissed = Shot.dismissVerifiedLauncherAnr(device, maxDismissals = 1)
+        anrDismissalsSpent += dismissed
+        Log.i(TAG, "m1-obstruction: verified launcher-ANR dismissal at '" + site + "'=" +
+            dismissed + " (shared budget " + anrDismissalsSpent + "/1 for the whole test)")
+    }
+
     /** Readiness gate before ANY navigation: the app must be foreground
      *  (bounded wait for the launch transition) before scrolling. A wrong
      *  foreground (dialog, permission prompt, launcher) is EVIDENCE, not a
      *  reason to scroll blindly - capture and fail closed. */
     private fun requireForegroundApp(site: String) {
         device.wait(Until.hasObject(By.pkg(ctx.packageName)), UI_WAIT_MS)
-        val fg = try { device.currentPackageName } catch (t: Throwable) { null }
+        var fg = try { device.currentPackageName } catch (t: Throwable) { null }
+        // Foreground blocked (before the first tap or later): if it is a
+        // VERIFIED launcher ANR (evidence chain first, inside Shot) and the
+        // shared budget is unspent, the single Wait dismissal happens HERE -
+        // the earliest obstruction - then one bounded re-wait. Anything else
+        // (permission window, launcher, unknown) falls through to evidence +
+        // fail closed; a recurrence after the one dismissal also fails closed.
+        if (fg != ctx.packageName && anrDismissalsSpent == 0 &&
+            Shot.detectVerifiedLauncherAnr(device)) {
+            dismissVerifiedLauncherAnrOnce(site)
+            device.wait(Until.hasObject(By.pkg(ctx.packageName)), UI_WAIT_MS)
+            fg = try { device.currentPackageName } catch (t: Throwable) { null }
+        }
+        // Post-spend: a verified ANR dialog fails closed EVEN WHEN the
+        // foreground reads as our app - the dialog can hold window focus
+        // while currentPackageName matches; never tap through it. Detection
+        // is instantaneous: "persistent or new recurrence", no old-vs-new
+        // assumption.
+        if (anrDismissalsSpent > 0 && Shot.detectVerifiedLauncherAnr(device)) {
+            captureFailureEvidence(site)
+            org.junit.Assert.fail("verified launcher-ANR dialog present at '" + site + "' after" +
+                " the test's ONE dismissal was spent (persistent or new recurrence -" +
+                " instantaneous detection cannot distinguish; foreground='" + fg + "')" +
+                " - fail closed, no taps through the dialog")
+        }
         if (fg != ctx.packageName) {
             captureFailureEvidence(site)
             org.junit.Assert.fail("readiness at '" + site + "': foreground is '" + fg +
@@ -379,17 +449,19 @@ class MobileDesktopEntryTest {
     fun mobileEntryLifecycle() {
         val prefs = ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-            // Obstruction policy for the WHOLE test (setUp helpers included):
-            // exactly ONE verified launcher-ANR dismissal, armed only at the
-            // pre-focus-gate site below. No broad dismissal (dismissSystemDialogs
-            // is NOT called - it would register the auto-clicking watcher and
-            // add silent clicks), no watchers, no close-app, no launcher
-            // disable/replace. The watcher is removed explicitly in case any
-            // harness path registered it.
+            // Obstruction policy for the WHOLE test: exactly ONE verified
+            // launcher-ANR Wait dismissal total (shared counter), armed from
+            // the EARLIEST entry/navigation obstruction - the readiness gate
+            // before the first tap - through the pre-focus gate below. No
+            // broad dismissal (dismissSystemDialogs is NOT called - it would
+            // register the auto-clicking watcher and add silent clicks), no
+            // watchers, no close-app, no launcher disable/replace, no extra
+            // clicks beyond that one Wait. The watcher is removed explicitly
+            // in case any harness path registered it.
             device.removeWatcher("phonelinux-anr")
             Log.i(TAG, "m1-arm: policy INSTALLED (init) - ANR watcher removed; dialog" +
-                " handling = ONE verified launcher-ANR dismissal armed at the" +
-                " pre-focus-gate site (NOT yet reached), nothing else")
+                " handling = ONE verified launcher-ANR dismissal shared across the" +
+                " whole test, armed from the first readiness gate, nothing else")
 
             // 1. Picker entry (bounded scroll), then the mobile start.
             tapByDesc("show-picker")
@@ -448,12 +520,14 @@ class MobileDesktopEntryTest {
             Log.i(TAG, "m1-obstruction: pre-arm focus focused=" + preArm.second +
                 " raw=" + preArm.first)
             if (!preArm.second && Shot.detectVerifiedLauncherAnr(device)) {
-                val dismissed = Shot.dismissVerifiedLauncherAnr(device, maxDismissals = 1)
-                Log.i(TAG, "m1-obstruction: verified launcher-ANR dismissals=" + dismissed +
-                    " (budget ONE for the whole test)")
+                // Shared budget: if the readiness gate already spent the ONE
+                // dismissal, this call fails closed on the recurrence.
+                dismissVerifiedLauncherAnrOnce("pre-focus-gate")
                 if (Shot.detectVerifiedLauncherAnr(device)) {
-                    org.junit.Assert.fail("launcher-ANR dialog recurred after the test's ONE" +
-                        " verified dismissal - fail closed (obstruction is the finding)")
+                    captureFailureEvidence("pre-focus-gate")
+                    org.junit.Assert.fail("launcher-ANR dialog present after the test's ONE" +
+                        " verified dismissal (persistent or new recurrence - instantaneous" +
+                        " detection cannot distinguish) - fail closed (obstruction is the finding)")
                 }
             }
             // Bounded focus settle poll: after a dismissal focus may take
@@ -465,7 +539,8 @@ class MobileDesktopEntryTest {
             while (!xlorieFocused && System.currentTimeMillis() < focusDeadline) {
                 if (Shot.detectVerifiedLauncherAnr(device)) {
                     org.junit.Assert.fail("launcher-ANR dialog present during focus settle" +
-                        " - the ONE dismissal budget is spent; fail closed (obstruction)")
+                        " after the ONE dismissal was spent (persistent or new recurrence -" +
+                        " instantaneous detection cannot distinguish) - fail closed")
                 }
                 Thread.sleep(2_000)
                 val f = xlorieFocusState()
