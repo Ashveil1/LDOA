@@ -1161,7 +1161,7 @@ class MobileDesktopEntryTest {
         Log.i(TAG, "render-evidence: session profile $sessName verified on disk")
 
         // 5. Guest tooling gate (provisioning gap fails distinctly).
-        for (tool in listOf("xdotool", "xwininfo", "xprop"))
+        for (tool in listOf("xdotool", "xwininfo", "xprop", "xrandr", "xdpyinfo"))
             assertTrue("render tooling: guest $tool present (provisioning gap if not)",
                 File(rootfs, "usr/bin/$tool").isFile)
 
@@ -1170,32 +1170,133 @@ class MobileDesktopEntryTest {
         assertNotNull("render/geometry: root stats parseable with positive dims", rootStats)
         val rs = rootStats!!
 
-        // 7. Desktop window: linked to the tracked pcmanfm PROCESS via
-        //    _NET_WM_PID; class Pcmanfm; mapped; covers the root (actual
-        //    intersection, not raw w*h). Without the link/coverage a passing
-        //    band could be xsetroot only - painter indistinguishable = fail.
+        // 7. Desktop window identity, TOPOLOGY-ANCHORED (run 41526200813:
+        //    TWO pcmanfm windows PID-linked on the AOSP image; counting
+        //    alone cannot distinguish legitimate multi-head - pcmanfm:
+        //    one FmDesktop per enabled GDK monitor, DESKTOP type hint per
+        //    window, source desktop.c - from duplicated/phantom windows).
+        //    Evidence BEFORE any decision: xrandr --listmonitors +
+        //    xdpyinfo -ext XINERAMA, raw logged and strictly parsed
+        //    against SOURCE-VERIFIED output formats (xrandr.c /
+        //    xdpyinfo.c); malformed NEVER falls back. Qualification:
+        //    PID-linked to the tracked pcmanfm + Pcmanfm class + DESKTOP
+        //    type + IsViewable. Consistency: qualified count == ACTIVE
+        //    RandR monitor count (Xinerama cross-checked when it declares
+        //    heads) AND an EXACT desktop-to-monitor geometry bijection.
+        //    Selection: the desktop corresponding to the UNIQUE
+        //    primary-marked active monitor (single-head: the sole
+        //    correspondence); no primary marker fails closed - never
+        //    first-is-primary.
+        val rrRaw = guest("xrandr", "--listmonitors")
+        Log.i(TAG, "render-evidence: xrandr --listmonitors RAW:\n" + rrRaw)
+        val rrMonitors = RenderProbeParse.xrandrListMonitors(rrRaw)
+            ?: throw AssertionError("render/geometry: xrandr --listmonitors UNPARSEABLE -" +
+                " topology unknown, never guessed")
+        val rrActive = rrMonitors.filter { it.active }
+        assertTrue("render/geometry: ZERO active RandR monitors - no intended" +
+            " display exists to anchor a selection on", rrActive.isNotEmpty())
+        val monRects = rrActive.map { intArrayOf(it.x, it.y, it.w, it.h) }
+        assertTrue("render/geometry: active monitor rects OVERLAP - clone/overlap" +
+            " topology makes desktop attribution ambiguous",
+            !RenderProbeParse.anyOverlap(monRects))
+        // RandR server invariant: an active CRTC viewport lies INSIDE the
+        // screen; a monitor outside the root framebuffer is bogus topology.
+        // Transitively this puts the selected-monitor ROI inside the root.
+        assertTrue("render/geometry: active monitor outside the root framebuffer " +
+            rs.w + "x" + rs.h + ": " + monRects.joinToString { it.contentToString() } +
+            " - bogus topology, never sampled",
+            monRects.all { it[0] >= 0 && it[1] >= 0 &&
+                it[0] + it[2] <= rs.w && it[1] + it[3] <= rs.h })
+        val xinRaw = guest("xdpyinfo", "-ext", "XINERAMA")
+        Log.i(TAG, "render-evidence: xdpyinfo -ext XINERAMA RAW:\n" + xinRaw)
+        val xin = RenderProbeParse.xdpyinfoXinerama(xinRaw)
+            ?: throw AssertionError("render/geometry: xdpyinfo XINERAMA section MALFORMED" +
+                " - declared-but-unparseable topology NEVER falls back to RandR")
+        when (xin.state) {
+            RenderProbeParse.XineramaState.ABSENT ->
+                Log.i(TAG, "render-evidence: XINERAMA extension ABSENT (declared)" +
+                    " - RandR governs topology")
+            RenderProbeParse.XineramaState.INACTIVE ->
+                Log.i(TAG, "render-evidence: XINERAMA declared INACTIVE -" +
+                    " RandR governs topology")
+            RenderProbeParse.XineramaState.ACTIVE ->
+                if (xin.heads.isEmpty())
+                    Log.i(TAG, "render-evidence: XINERAMA ACTIVE with ZERO heads" +
+                        " (lorie PseudoramiX no-registered-screens state, expected per" +
+                        " vendored pseudoramiX.c) - RandR governs topology")
+                else {
+                    if (xin.heads.size != monRects.size)
+                        throw AssertionError("render/geometry: topology sources DISAGREE" +
+                            " (xinerama heads=" + xin.heads.size + " vs randr active=" +
+                            monRects.size + ") - monitor count unanchored")
+                    if (RenderProbeParse.matchMonitorBijection(xin.heads, monRects) == null)
+                        throw AssertionError("render/geometry: topology sources DISAGREE" +
+                            " GEOMETRICALLY - no exact xinerama-to-randr bijection -" +
+                            " intended display unanchored")
+                    Log.i(TAG, "render-evidence: topology sources AGREE: xinerama heads" +
+                        " == randr active monitors (exact bijection)")
+                }
+        }
+        val enabledMonitors = rrActive.size
+        Log.i(TAG, "render-evidence: topology randr-active=" + enabledMonitors +
+            " xinerama-state=" + xin.state + " heads=" + xin.heads.size)
+
         val pcmanCandidates = (RenderProbeParse.searchIds(guest("xdotool", "search", "--class", "pcmanfm"))
             ?: throw AssertionError("render/geometry: pcmanfm search output unparseable")) +
             (RenderProbeParse.searchIds(guest("xdotool", "search", "--class", "Pcmanfm"))
             ?: throw AssertionError("render/geometry: Pcmanfm search output unparseable"))
-        val deskLinked = pcmanCandidates.distinct().filter { id ->
-            RenderProbeParse.xpropPid(guest("xprop", "-id", id.toString(), "_NET_WM_PID", "WM_CLASS"))
-                ?.toInt() == pcmanPid
+        val qualified = mutableListOf<Pair<Long, RenderProbeParse.WinStats>>()
+        val identities = StringBuilder()
+        for (id in pcmanCandidates.distinct()) {
+            val xp = guest("xprop", "-id", id.toString(), "_NET_WM_PID", "WM_CLASS", "_NET_WM_WINDOW_TYPE")
+            val pid = RenderProbeParse.xpropPid(xp)
+            val pidAbsent = RenderProbeParse.xpropPidAbsent(xp)
+            val cls = RenderProbeParse.xpropClass(xp)
+            val types = RenderProbeParse.xpropWmTypes(xp)
+            val st = RenderProbeParse.winStats(guest("xwininfo", "-id", id.toString()))
+            identities.append("candidate 0x").append(java.lang.Long.toHexString(id))
+                .append(" pid=").append(pid?.toString() ?: if (pidAbsent) "ABSENT" else "UNREADABLE")
+                .append(" class=").append(cls)
+                .append(" types=").append(types?.toString() ?: "UNREADABLE")
+                .append(" stats=").append(st?.toString() ?: "UNREADABLE").append('\n')
+            if ((pid == null && !pidAbsent) || cls == null || types == null || st == null)
+                throw AssertionError("render/geometry: candidate 0x" +
+                    java.lang.Long.toHexString(id) + " probe UNREADABLE - unknown," +
+                    " never skipped; identities so far:\n" + identities)
+            if (pid == null) continue  // property explicitly ABSENT: not owned, documented above
+            if (pid.toInt() == pcmanPid && cls.second == "Pcmanfm" &&
+                types.contains("_NET_WM_WINDOW_TYPE_DESKTOP") && st.mapState == "IsViewable")
+                qualified.add(id to st)
         }
-        assertTrue("render/geometry: exactly one pcmanfm window owned by tracked pid $pcmanPid" +
-            " (candidates=${pcmanCandidates.size}, linked=${deskLinked.size})", deskLinked.size == 1)
-        val deskId = deskLinked[0]
-        val deskClass = RenderProbeParse.xpropClass(guest("xprop", "-id", deskId.toString(), "WM_CLASS"))
-        assertEquals("render/geometry: desktop window class", "Pcmanfm", deskClass?.second)
-        val deskStats0 = RenderProbeParse.winStats(guest("xwininfo", "-id", deskId.toString()))
-        assertNotNull("render/geometry: desktop window stats parseable", deskStats0)
-        val ds = deskStats0!!
-        assertEquals("render/geometry: desktop window MAPPED", "IsViewable", ds.mapState)
-        val iw = maxOf(0, minOf(ds.absX + ds.w, rs.w) - maxOf(ds.absX, 0))
-        val ih = maxOf(0, minOf(ds.absY + ds.h, rs.h) - maxOf(ds.absY, 0))
-        Log.i(TAG, "render-evidence: desktop window " + ds + " vs root " + rs.w + "x" + rs.h)
-        assertTrue("render/geometry: desktop window covers >=80% of the root" +
-            " (intersection ${iw}x${ih} of ${rs.w}x${rs.h})", iw.toLong() * ih >= rs.w.toLong() * rs.h * 4 / 5)
+        Log.i(TAG, "render-evidence: pcmanfm candidate identities:\n" + identities)
+        assertTrue("render/geometry: qualified DESKTOP windows ${qualified.size} !=" +
+            " enabled monitors $enabledMonitors - duplicate/missing desktop vs topology;" +
+            " identities logged", qualified.size == enabledMonitors)
+        val qualifiedRects = qualified.map { intArrayOf(it.second.absX, it.second.absY, it.second.w, it.second.h) }
+        val deskToMon = RenderProbeParse.matchMonitorBijection(qualifiedRects, monRects)
+            ?: throw AssertionError("render/geometry: no EXACT desktop-to-monitor" +
+                " geometry bijection - phantom/mis-realized desktop vs server topology;" +
+                " desktop rects " + qualifiedRects.joinToString { it.contentToString() } +
+                " vs active monitors " + monRects.joinToString { it.contentToString() })
+        val deskId: Long
+        val ds: RenderProbeParse.WinStats
+        val selMon: IntArray
+        if (qualified.size == 1) {
+            deskId = qualified[0].first; ds = qualified[0].second
+            selMon = monRects[deskToMon[0]]
+        } else {
+            val primIdx = rrActive.withIndex().filter { it.value.primary }.map { it.index }
+            assertTrue("render/geometry: ${qualified.size} qualified desktops require" +
+                " EXACTLY ONE primary-marked active monitor (found ${primIdx.size}) -" +
+                " multi-head selection unanchored, never first-is-primary",
+                primIdx.size == 1)
+            val di = deskToMon.indexOf(primIdx[0])
+            deskId = qualified[di].first; ds = qualified[di].second
+            selMon = monRects[primIdx[0]]
+        }
+        Log.i(TAG, "render-evidence: desktop window " + ds + " selected on monitor " +
+            selMon.contentToString() + " over root " + rs.w + "x" + rs.h +
+            " (monitors=" + enabledMonitors + ")")
 
         // 8. xterm window identity via a VERIFIED channel - never a class
         //    or uniqueness heuristic: xterm sets WINDOWID (the X window id
@@ -1253,6 +1354,14 @@ class MobileDesktopEntryTest {
         val roiY = ds.absY + (ds.h * 0.35).toInt()
         val roiW = (ds.w * 0.6).toInt()
         val roiH = (ds.h * 0.3).toInt()
+
+        assertTrue("render/geometry: ROI degenerate (non-positive extent)",
+            roiW > 0 && roiH > 0)
+        assertTrue("render/geometry: ROI [" + roiX + "," + roiY + " " + roiW + "x" + roiH +
+            "] not INSIDE the selected monitor " + selMon.contentToString() +
+            " - sample region must lie in the actual intended display",
+            roiX >= selMon[0] && roiY >= selMon[1] &&
+            roiX + roiW <= selMon[0] + selMon[2] && roiY + roiH <= selMon[1] + selMon[3])
 
         var primary: Throwable? = null
         try {
