@@ -755,6 +755,569 @@ class MobileDesktopEntryTest {
 
     /** Distinct-color count over a coarse grid: a uniform (black/frozen)
      *  screen is NOT desktop evidence. */
+    /** Result of a one-shot guest command. code=-1 on timeout; leftover =
+     *  pids from THIS invocation's subtree still alive after reap. Cleanup
+     *  after a TIMEOUT is best-effort only: an orphaned tracee can be
+     *  reparented out of the captured subtree and escape verification, so a
+     *  timeout aborts the whole probe (guestAborted) - no further guest
+     *  work runs on top of possible helpers. */
+    private data class GuestOut(val code: Int, val text: String, val leftover: List<Int>)
+
+    /** Latched by guestExec on the FIRST timeout OR unverifiable cleanup:
+     *  the probe fails closed and no further guest commands run (unresolved
+     *  state is reported, never buried under more helper processes). */
+    private var guestAborted = false
+
+    /** Direct children of THIS process via /proc ppid walk (same parsing as
+     *  pidTreeSnapshot), pid -> starttime for ownership anchoring.
+     *  NULL = the capture is incomplete or unreadable (UNKNOWN): a silent
+     *  partial capture could hide the just-launched helper, so callers
+     *  fail closed. ENOENT between list and read = the process exited -
+     *  not unknown. */
+    private fun selfChildren(): Map<Int, String>? {
+        val me = android.os.Process.myPid()
+        val out = mutableMapOf<Int, String>()
+        val dirs = File("/proc").listFiles { f -> f.name.matches(Regex("[0-9]+")) }
+            ?: return null
+        for (f in dirs) {
+            val pid = f.name.toInt()
+            val (content, errno) = readProcStat(pid)
+            if (content == null) {
+                if (errno == android.system.OsConstants.ENOENT) continue
+                return null
+            }
+            val close = content.lastIndexOf(')')
+            val rest = if (close >= 0) content.substring(close + 1).trim().split(Regex("\\s+")) else return null
+            if (rest.size <= 20) return null
+            if (rest[1].toIntOrNull() == me) out[pid] = rest[19]
+        }
+        return out
+    }
+
+    /** Run one command inside the Ubuntu rootfs against the SAME X display
+     *  (:0 socket bind identical to the session launch). Evidence collection
+     *  only: no --kill-on-exit; cleanup is VERIFIED per call. */
+    private fun guestExec(rootfs: File, timeoutMs: Long, vararg args: String): GuestOut {
+        val nd = ctx.applicationInfo.nativeLibraryDir
+        val pb = ProcessBuilder(mutableListOf(
+            File(nd, "libproot.so").absolutePath,
+            "--link2symlink", "-0", "-r", rootfs.absolutePath,
+            "-b", "/dev", "-b", "/proc", "-b", "/sys",
+            "-b", XServer.socketDir(ctx).absolutePath + ":/tmp/.X11-unix",
+            "-w", "/root") + args.toList())
+        pb.environment().putAll(mapOf(
+            "PROOT_LOADER" to File(nd, "libproot_loader.so").absolutePath,
+            "PROOT_LOADER_32" to File(nd, "libproot_loader32.so").absolutePath,
+            "LD_LIBRARY_PATH" to nd,
+            "HOME" to "/root", "DISPLAY" to ":0",
+            "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "PROOT_TMP_DIR" to Proot.prootTmpDir(ctx).absolutePath,
+            "TMPDIR" to "/tmp"))
+        pb.redirectErrorStream(true)
+        // Baseline capture BEFORE start; a failed baseline means the later
+        // diff can never be trusted - abort before any process exists.
+        val preKids = selfChildren()
+            ?: throw AssertionError("render-evidence: pre-spawn child capture UNREADABLE -" +
+                " refusing to launch an untrackable helper")
+        val p = pb.start()
+        // Post-spawn capture: on ANY uncertainty the just-launched process
+        // gets a bounded stop/reap ladder BEFORE the failure propagates -
+        // never thrown and abandoned.
+        val postKids = selfChildren()
+        if (postKids == null) {
+            p.destroy()
+            if (!p.waitFor(2_000, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                p.destroyForcibly(); p.waitFor(2_000, java.util.concurrent.TimeUnit.MILLISECONDS)
+            }
+            guestAborted = true
+            throw AssertionError("render-evidence: post-spawn child capture UNREADABLE -" +
+                " helper stopped/reaped best-effort (destroy ladder), probe aborted")
+        }
+        var helperKids = postKids - preKids.keys
+        var completedEarlyCode: Int? = null
+        if (helperKids.isEmpty()) {
+            // Empty diff is only meaningful if the helper ALREADY exited
+            // and was reaped (exitValue returns) - an alive but uncaptured
+            // helper is UNKNOWN: bounded stop/reap, latch abort.
+            try {
+                completedEarlyCode = p.exitValue()
+            } catch (alive: IllegalThreadStateException) {
+                p.destroy()
+                if (!p.waitFor(2_000, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                    p.destroyForcibly(); p.waitFor(2_000, java.util.concurrent.TimeUnit.MILLISECONDS)
+                }
+                guestAborted = true
+                throw AssertionError("render-evidence: live helper NOT captured in post-spawn" +
+                    " scan - stopped/reaped best-effort, probe aborted")
+            }
+        }
+        val out = StringBuilder()
+        val drain = kotlin.concurrent.thread {
+            try { p.inputStream.bufferedReader().forEachLine { out.append(it).append('\n') } } catch (_: Throwable) {}
+        }
+        val code: Int
+        if (completedEarlyCode != null) {
+            code = completedEarlyCode
+        } else if (!p.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+            p.destroy()
+            if (!p.waitFor(2_000, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                p.destroyForcibly(); p.waitFor(2_000, java.util.concurrent.TimeUnit.MILLISECONDS)
+            }
+            code = -1
+            guestAborted = true
+        } else code = p.exitValue()
+        drain.join(2_000)
+        // waitFor only proves the DIRECT child exited; the helper subtree
+        // (proot root + tracee descendants) must be GONE. Every check is
+        // errno-aware: ENOENT = gone; any other read error = UNKNOWN, which
+        // latches the probe abort (cleanup not verifiable) instead of
+        // claiming a verified-absent subtree. A live pid whose starttime
+        // differs from the captured one is a REUSED pid, not our helper.
+        val leftover = mutableListOf<Int>()
+        var unknown = false
+        val stats = HashMap<Int, Pair<Int, String>>() // pid -> (ppid, starttime)
+        val procDirs = File("/proc").listFiles { f -> f.name.matches(Regex("[0-9]+")) }
+        if (procDirs == null) {
+            guestAborted = true
+            return GuestOut(code, out.toString(), leftover)
+        }
+        procDirs.forEach { f ->
+            val pid = f.name.toInt()
+            val (content, errno) = readProcStat(pid)
+            if (content == null) {
+                if (errno != android.system.OsConstants.ENOENT) unknown = true
+                return@forEach
+            }
+            val close = content.lastIndexOf(')')
+            val rest = if (close >= 0) content.substring(close + 1).trim().split(Regex("\\s+")) else emptyList()
+            val ppid = if (rest.size > 20) rest[1].toIntOrNull() else null
+            if (ppid != null) stats[pid] = ppid to rest[19]
+            else { unknown = true; return@forEach }
+        }
+        var frontier = helperKids.keys.toList()
+        val seen = mutableSetOf<Int>()
+        while (frontier.isNotEmpty()) {
+            val next = mutableListOf<Int>()
+            for ((pid, ps) in stats) {
+                if (ps.first in frontier && pid !in seen) { seen.add(pid); next.add(pid) }
+            }
+            frontier = next
+        }
+        for (k in helperKids.keys) {
+            if (stats[k]?.second != null && stats[k]?.second == helperKids[k]) leftover.add(k)
+        }
+        for (d in seen) {
+            if (d in helperKids.keys) continue
+            if (stats[d]?.second != null) leftover.add(d)
+        }
+        if (unknown) guestAborted = true
+        return GuestOut(code, out.toString(), leftover)
+    }
+
+    private fun requireGuest(out: GuestOut, what: String): String {
+        if (out.code == -1) throw AssertionError("render-evidence: guest [$what] TIMED OUT;" +
+            " cleanup UNRESOLVED (best-effort kill ladder done, leftover=${out.leftover});" +
+            " probe aborted - no further guest work")
+        if (guestAborted) throw AssertionError("render-evidence: guest [$what] cleanup" +
+            " UNVERIFIABLE (/proc scan error) - probe aborted, no further guest work")
+        assertTrue("render-evidence: guest [$what] cleanup verified (leftover=${out.leftover})",
+            out.leftover.isEmpty())
+        assertTrue("render-evidence: guest [$what] exit=0 (was ${out.code}): ${out.text.take(200)}",
+            out.code == 0)
+        return out.text
+    }
+
+    /** /proc/<pid>/<file> read with identity re-verification around the
+     *  read: the pid must carry the SNAPSHOT starttime before AND after,
+     *  else the read is not of the tracked process - fail closed (null). */
+    private fun anchoredRead(pid: Int, snapshotStart: String, file: String): String? {
+        if (procStartTime(pid) != snapshotStart) return null
+        val bytes = try { File("/proc/$pid/$file").readBytes() } catch (t: Throwable) { return null }
+        if (procStartTime(pid) != snapshotStart) return null
+        return String(bytes, Charsets.ISO_8859_1)
+    }
+
+    /** Save THE ANALYZED bitmap (never a second capture instant) through
+     *  the proven PHONESHOT logcat channel (same chunking as Shot). */
+    private fun saveAnalyzedShot(name: String, bmp: Bitmap) {
+        val w = 720; val h = bmp.height * w / bmp.width
+        val scaled = Bitmap.createScaledBitmap(bmp, w, h, true)
+        val baos = java.io.ByteArrayOutputStream()
+        scaled.compress(Bitmap.CompressFormat.JPEG, 75, baos)
+        val bytes = baos.toByteArray()
+        assertTrue("analyzed shot $name encoded non-empty", bytes.isNotEmpty())
+        val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+        val chunk = 3000
+        val total = (b64.length + chunk - 1) / chunk
+        var seq = 0
+        while (seq < total) {
+            val end = minOf((seq + 1) * chunk, b64.length)
+            android.util.Log.i("PHONESHOT", name + "|" + String.format("%04d|%04d|", seq, total) +
+                b64.substring(seq * chunk, end))
+            seq++
+        }
+        android.util.Log.i("PHONESHOT", name + " exported: " + bytes.size + " bytes, " + total + " chunks")
+    }
+
+    /** Render qualification evidence for the production-pair run. Proves
+     *  SessionConfig is actually CONSUMED by this session (profile on disk,
+     *  process args/environment, all scoped to the tracked pid+starttime
+     *  tree), then captures the UNCOVERED root via a non-destructive
+     *  iconify+restore with identity preserved. Geometry (window tree,
+     *  coverage, occluders) SUPPORTS, never replaces, the pixels. Tray
+     *  pixels are never asserted: the tray is a separate painter and can
+     *  never prove the pcmanfm desktop background. The "modules directory
+     *  is not accessible" warning is logged as a DIAGNOSTIC only. */
+    private fun renderQualification(rootPid: Int, openTapAt: Long, launchRootStart: String) {
+        val rootfs = DistroInstaller(ctx).rootfsDir(Distros.UBUNTU)
+        val deadlineEnd = System.nanoTime() + 120_000_000_000L
+        fun rem(): Long {
+            val r = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(deadlineEnd - System.nanoTime())
+            if (r <= 0) throw AssertionError("render/probe: overall deadline exhausted")
+            return r
+        }
+        fun guest(vararg a: String): String {
+            if (guestAborted) throw AssertionError("render-evidence: probe already aborted by an" +
+                " earlier guest timeout - refusing further guest work")
+            return requireGuest(guestExec(rootfs, rem(), *a), a.joinToString(" "))
+        }
+        fun guestR(vararg a: String): String {
+            if (guestAborted) throw AssertionError("render-evidence: probe already aborted by an" +
+                " earlier guest timeout - refusing further guest work")
+            return requireGuest(guestExec(rootfs, 15_000, *a), a.joinToString(" "))
+        }
+
+        // 0. Persisted-choice state. CORRECT store: MobileModeSettings reads
+        //    "plinux_mobile" ("plinux_desktop" is the seam/marker store).
+        //    A fresh CI emulator carries no choices -> DEFAULTS path only.
+        val persisted = ctx.getSharedPreferences("plinux_mobile", Context.MODE_PRIVATE)
+            .all.keys.sorted()
+        Log.i(TAG, "render-evidence: plinux_mobile persisted keys=" + persisted +
+            " (empty = fresh emulator, defaults path; explicit saved-settings path NOT" +
+            " exercised at runtime - unit contract: MobileModeSettingsTest)")
+        val ui = MobileModeSettings.read(ctx)
+
+        // 1. Tracked-tree process identity: COMPLETE snapshot or fail.
+        val unread = mutableMapOf<Int, String>()
+        val tree = pidTreeSnapshot(rootPid, unread)
+        assertTrue("render/process: tracked tree capture complete (unreadable=$unread)",
+            unread.isEmpty())
+        // The snapshot root must BE the original launch anchor, before and
+        // after the snapshot - never a fresh recapture as authority.
+        assertEquals("render/process: snapshot root identity is the launch anchor",
+            launchRootStart, tree[rootPid])
+        assertEquals("render/process: root identity stable across the snapshot",
+            launchRootStart, procStartTime(rootPid))
+        var jwmPid = -1; var pcmanPid = -1; var xtermPid = -1; var shellPid = -1
+        var jwmCmd = ""
+        for ((pid, st) in tree) {
+            val cmd = anchoredRead(pid, st, "cmdline")?.replace(0.toChar(), ' ')?.trim()
+                ?: throw AssertionError("render/process: tracked member $pid unreadable or" +
+                    " identity-churned during classification - UNKNOWN, never treated as absent")
+            when {
+                cmd.startsWith("jwm -f ") -> {
+                    assertTrue("render/process: ambiguous jwm in tree", jwmPid < 0)
+                    jwmPid = pid; jwmCmd = cmd
+                }
+                cmd == "pcmanfm --desktop" -> {
+                    assertTrue("render/process: ambiguous pcmanfm in tree", pcmanPid < 0)
+                    pcmanPid = pid
+                }
+                cmd.startsWith("xterm ") -> {
+                    assertTrue("render/process: ambiguous xterm in tree", xtermPid < 0)
+                    xtermPid = pid
+                }
+                cmd.startsWith("/bin/sh /root/.config-ldoa/") -> {
+                    assertTrue("render/process: ambiguous session shell in tree", shellPid < 0)
+                    shellPid = pid
+                }
+            }
+        }
+        assertTrue("render/process: jwm found in the tracked tree", jwmPid > 0)
+        assertTrue("render/process: pcmanfm found in the tracked tree", pcmanPid > 0)
+        assertTrue("render/process: xterm found in the tracked tree", xtermPid > 0)
+        assertTrue("render/process: session shell found in the tracked tree", shellPid > 0)
+
+        // 2. Session dir: identity comes from the RUNNING jwm's -f argument;
+        //    the embedded millis is corroboration, never the authority.
+        val sessName = Regex("^jwm -f /root/\\.config-ldoa/(session-[0-9]+-[0-9a-f]{1,4})/jwmrc$")
+            .find(jwmCmd)?.groupValues?.get(1)
+        assertNotNull("render/process: jwm -f consumes a session-managed jwmrc (was: $jwmCmd)", sessName)
+        val sess = File(rootfs, "root/.config-ldoa/" + sessName)
+        assertTrue("render/session-profile: dir $sessName exists on disk", sess.isDirectory)
+        val sessMillis = sessName!!.removePrefix("session-").substringBefore('-').toLongOrNull() ?: 0L
+        assertTrue("render/session-profile: $sessName created by THIS launch" +
+            " (millis=$sessMillis vs open tap at $openTapAt)", sessMillis >= openTapAt - 5_000)
+
+        // 3. Environment consumption, identity-anchored, selected keys only.
+        val shellEnv = anchoredRead(shellPid, tree.getValue(shellPid), "environ")
+        val sessionCfg = shellEnv?.split(0.toChar())
+            ?.firstOrNull { it.startsWith("SESSION_CFG=") }?.substringAfter('=')
+        assertEquals("render/process: session shell SESSION_CFG is THIS session's dir",
+            "/root/.config-ldoa/$sessName", sessionCfg)
+        val pcmanEnv = anchoredRead(pcmanPid, tree.getValue(pcmanPid), "environ")
+        val xdg = pcmanEnv?.split(0.toChar())
+            ?.firstOrNull { it.startsWith("XDG_CONFIG_HOME=") }?.substringAfter('=')
+        Log.i(TAG, "render-evidence: pcmanfm[$pcmanPid] XDG_CONFIG_HOME=$xdg (only this key read)")
+        assertEquals("render/process: pcmanfm XDG_CONFIG_HOME is THIS session's profile dir",
+            "/root/.config-ldoa/$sessName", xdg)
+
+        // 4. Generated profile on disk.
+        assertTrue("render/session-profile: mobile-session.sh present",
+            File(sess, "mobile-session.sh").isFile)
+        val jwmrc = File(sess, "jwmrc")
+        assertTrue("render/session-profile: jwmrc present and non-empty",
+            jwmrc.isFile && jwmrc.length() > 0)
+        if (ui.panelPosition == "top") {
+            assertTrue("render/session-profile: jwmrc carries the configured top tray",
+                jwmrc.readText().contains("<Tray x=\"0\" y=\"0\""))
+        }
+        assertTrue("render/session-profile: Xresources carries Xft.dpi",
+            File(sess, "Xresources").readText().contains("Xft.dpi:"))
+        val desktopItems = File(sess, "pcmanfm/default/desktop-items-0.conf")
+        assertTrue("render/session-profile: pcmanfm profile present", desktopItems.isFile)
+        val di = desktopItems.readText()
+        assertTrue("render/session-profile: wallpaper_mode=color",
+            di.contains("wallpaper_mode=color"))
+        assertTrue("render/session-profile: desktop_bg is the configured ${ui.background}",
+            di.contains("desktop_bg=${ui.background}"))
+        Log.i(TAG, "render-evidence: session profile $sessName verified on disk")
+
+        // 5. Guest tooling gate (provisioning gap fails distinctly).
+        for (tool in listOf("xdotool", "xwininfo", "xprop"))
+            assertTrue("render tooling: guest $tool present (provisioning gap if not)",
+                File(rootfs, "usr/bin/$tool").isFile)
+
+        // 6. Geometry ground truth: POSITIVE root dims, parser-verified.
+        val rootStats = RenderProbeParse.winStats(guest("xwininfo", "-root"))
+        assertNotNull("render/geometry: root stats parseable with positive dims", rootStats)
+        val rs = rootStats!!
+
+        // 7. Desktop window: linked to the tracked pcmanfm PROCESS via
+        //    _NET_WM_PID; class Pcmanfm; mapped; covers the root (actual
+        //    intersection, not raw w*h). Without the link/coverage a passing
+        //    band could be xsetroot only - painter indistinguishable = fail.
+        val pcmanCandidates = (RenderProbeParse.searchIds(guest("xdotool", "search", "--class", "pcmanfm"))
+            ?: throw AssertionError("render/geometry: pcmanfm search output unparseable")) +
+            (RenderProbeParse.searchIds(guest("xdotool", "search", "--class", "Pcmanfm"))
+            ?: throw AssertionError("render/geometry: Pcmanfm search output unparseable"))
+        val deskLinked = pcmanCandidates.distinct().filter { id ->
+            RenderProbeParse.xpropPid(guest("xprop", "-id", id.toString(), "_NET_WM_PID", "WM_CLASS"))
+                ?.toInt() == pcmanPid
+        }
+        assertTrue("render/geometry: exactly one pcmanfm window owned by tracked pid $pcmanPid" +
+            " (candidates=${pcmanCandidates.size}, linked=${deskLinked.size})", deskLinked.size == 1)
+        val deskId = deskLinked[0]
+        val deskClass = RenderProbeParse.xpropClass(guest("xprop", "-id", deskId.toString(), "WM_CLASS"))
+        assertEquals("render/geometry: desktop window class", "Pcmanfm", deskClass?.second)
+        val deskStats0 = RenderProbeParse.winStats(guest("xwininfo", "-id", deskId.toString()))
+        assertNotNull("render/geometry: desktop window stats parseable", deskStats0)
+        val ds = deskStats0!!
+        assertEquals("render/geometry: desktop window MAPPED", "IsViewable", ds.mapState)
+        val iw = maxOf(0, minOf(ds.absX + ds.w, rs.w) - maxOf(ds.absX, 0))
+        val ih = maxOf(0, minOf(ds.absY + ds.h, rs.h) - maxOf(ds.absY, 0))
+        Log.i(TAG, "render-evidence: desktop window " + ds + " vs root " + rs.w + "x" + rs.h)
+        assertTrue("render/geometry: desktop window covers >=80% of the root" +
+            " (intersection ${iw}x${ih} of ${rs.w}x${rs.h})", iw.toLong() * ih >= rs.w.toLong() * rs.h * 4 / 5)
+
+        // 8. xterm window identity via a VERIFIED channel - never a class
+        //    or uniqueness heuristic: xterm sets WINDOWID (the X window id
+        //    of the xterm window, xterm(1) ENVIRONMENT) in the environment
+        //    of the shell it spawns. Chain: tracked tree -> xterm's direct
+        //    child (ppid-anchored) -> its environ WINDOWID -> THE window.
+        //    noble's xterm (390) does NOT set _NET_WM_PID on its own window
+        //    (source-verified: main.c names the atom only in a list), so
+        //    _NET_WM_PID is not usable here. Absent/ambiguous linkage fails
+        //    closed - there is no fallback identity.
+        var xtId = -1L
+        var xtChildPid = -1
+        run {
+            val linked = mutableListOf<Pair<Int, Long>>()
+            for ((pid, st) in tree) {
+                if (pid == xtermPid) continue
+                val stat = anchoredRead(pid, st, "stat")
+                    ?: throw AssertionError("render/process: tracked member $pid unreadable or" +
+                        " identity-churned during linkage - UNKNOWN, never treated as absent")
+                val close = stat.lastIndexOf(')')
+                val rest = if (close >= 0) stat.substring(close + 1).trim()
+                    .split(Regex("\\s+")) else continue
+                if (rest.size <= 1 || rest[1].toIntOrNull() != xtermPid) continue
+                val env = anchoredRead(pid, st, "environ")
+                    ?: throw AssertionError("render/process: xterm child $pid environ unreadable" +
+                        " or identity-churned - UNKNOWN, never treated as absent")
+                val wid = env.split(0.toChar())
+                    .firstOrNull { it.startsWith("WINDOWID=") }?.substringAfter('=')
+                    ?.toLongOrNull() ?: continue
+                linked.add(pid to wid)
+            }
+            assertTrue("render/geometry: exactly one xterm child carries WINDOWID" +
+                " (found ${linked.size} - absent/ambiguous linkage fails closed, no fallback)",
+                linked.size == 1)
+            xtChildPid = linked[0].first
+            xtId = linked[0].second
+        }
+        val xtProp = guest("xprop", "-id", xtId.toString(), "WM_CLASS")
+        assertEquals("render/geometry: WINDOWID-linked window is XTerm class", "XTerm",
+            RenderProbeParse.xpropClass(xtProp)?.second)
+        // Consistency, not identity: the XTerm-class window SET must be
+        // exactly the linked window - any other XTerm-class client makes the
+        // session shape ambiguous and fails the probe.
+        val xtCandidates = RenderProbeParse.searchIds(guest("xdotool", "search", "--class", "XTerm"))
+            ?: throw AssertionError("render/geometry: XTerm search output unparseable")
+        assertEquals("render/geometry: XTerm-class window set is exactly the linked window",
+            listOf(xtId), xtCandidates.sorted())
+        val xtStats = RenderProbeParse.winStats(guest("xwininfo", "-id", xtId.toString()))
+        assertEquals("render/uncover: xterm viewable before iconify", "IsViewable", xtStats?.mapState)
+        val xtStart = tree.getValue(xtermPid)
+
+        // 9. Uncovered root: ROI = central band of the desktop window in
+        //    X coords (avoids the tray strip and the extra-keys bar).
+        val roiX = ds.absX + (ds.w * 0.2).toInt()
+        val roiY = ds.absY + (ds.h * 0.35).toInt()
+        val roiW = (ds.w * 0.6).toInt()
+        val roiH = (ds.h * 0.3).toInt()
+
+        var primary: Throwable? = null
+        try {
+            // Restore obligation is armed BEFORE the minimize attempt: a
+            // command can minimize and still exit nonzero. Anchors are
+            // rechecked immediately before the action, not only after
+            // the restore.
+            assertEquals("render/uncover: xterm anchor unchanged before minimize",
+                xtStart, procStartTime(xtermPid))
+            assertEquals("render/uncover: xterm child anchor unchanged before minimize",
+                tree.getValue(xtChildPid), procStartTime(xtChildPid))
+            guest("xdotool", "windowminimize", xtId.toString())
+            var mst = RenderProbeParse.winStats(guest("xwininfo", "-id", xtId.toString()))
+            while (mst?.mapState != "IsUnMapped" && System.nanoTime() < deadlineEnd) {
+                Thread.sleep(500)
+                mst = RenderProbeParse.winStats(guest("xwininfo", "-id", xtId.toString()))
+            }
+            assertEquals("render/uncover: xterm iconified within budget", "IsUnMapped", mst?.mapState)
+            Thread.sleep(1_000) // paint settle after unmap
+
+            // No OTHER MAPPED top-level window may intersect the sample ROI.
+            val kids = RenderProbeParse.topLevelChildren(guest("xwininfo", "-root", "-children"))
+            assertNotNull("render/geometry: root children listing parseable", kids)
+            val occluders = mutableListOf<String>()
+            for (kid in kids!!) {
+                if (kid.id == deskId) continue
+                val ks = RenderProbeParse.winStats(guest("xwininfo", "-id", kid.id.toString()))
+                    ?: throw AssertionError("render/geometry: top-level window 0x" +
+                        java.lang.Long.toHexString(kid.id) + " stats UNPARSEABLE - unknown," +
+                        " never skipped (a potentially covering window could be hidden)")
+                if (ks.mapState == "IsViewable" && ks.overlaps(roiX, roiY, roiW, roiH))
+                    occluders.add("0x" + java.lang.Long.toHexString(kid.id) + " " + ks)
+            }
+            assertTrue("render/geometry: no other mapped window intersects the sample ROI:" +
+                " $occluders", occluders.isEmpty())
+
+            // X->screenshot transform from the ACTUAL lorie view bounds;
+            // ambiguous mapping fails, never silently sampled.
+            val lv = device.findObject(By.res("dev.phonelinux.proto:id/lorieView"))
+            assertNotNull("render/roi: lorie view present", lv)
+            val vb = lv!!.visibleBounds
+            val bmp0 = InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
+            assertNotNull("render/uncover screenshot", bmp0)
+            val bmp = bmp0!!
+            try {
+                val sx = vb.width().toFloat() / rs.w
+                val sy = vb.height().toFloat() / rs.h
+                assertTrue("render/roi: surface bounds plausible" +
+                    " (${vb.width()}x${vb.height()} vs bitmap ${bmp.width}x${bmp.height})",
+                    vb.width() >= bmp.width / 2)
+                assertTrue("render/roi: uniform X->screen scaling (sx=$sx sy=$sy)",
+                    kotlin.math.abs(sx / sy - 1f) <= 0.03f)
+                val mapped = RenderProbeParse.mapRect(roiX, roiY, roiW, roiH, sx, sy,
+                    vb.left, vb.top, bmp.width, bmp.height)
+                assertNotNull("render/roi: mapped ROI must be positive and ENTIRELY inside" +
+                    " the bitmap (no clamping, no vacuous pass)", mapped)
+                val bl = mapped!![0]; val bt = mapped[1]; val br = mapped[2]; val bb = mapped[3]
+                // The decisive bitmap is archived BEFORE the color asserts:
+                // a failing sample keeps its own evidence.
+                saveAnalyzedShot("m1-render-uncovered-root", bmp)
+                val exp = android.graphics.Color.parseColor(ui.background)
+                val er = android.graphics.Color.red(exp)
+                val eg = android.graphics.Color.green(exp)
+                val eb = android.graphics.Color.blue(exp)
+                var minMaxChannel = 255; var maxDev = 0; val cols = HashSet<Int>()
+                var py = bt
+                while (py < bb) {
+                    var px = bl
+                    while (px < br) {
+                        val c = bmp.getPixel(px, py)
+                        cols.add(c)
+                        val r = android.graphics.Color.red(c)
+                        val g = android.graphics.Color.green(c)
+                        val bc = android.graphics.Color.blue(c)
+                        maxDev = maxOf(maxDev, kotlin.math.abs(r - er),
+                            kotlin.math.abs(g - eg), kotlin.math.abs(bc - eb))
+                        minMaxChannel = minOf(minMaxChannel, maxOf(r, g, bc))
+                        px += 32
+                    }
+                    py += 32
+                }
+                Log.i(TAG, "render-evidence: ROI bitmap=[$bl,$bt..$br,$bb] distinct=" + cols.size +
+                    " maxDev=" + maxDev + " minMaxChannel=" + minMaxChannel + " expected=" +
+                    ui.background + " (RAW bitmap analysis; JPEG applies only to the artifact)")
+                assertTrue("render/desktop-color: uncovered desktop ROI matches the configured" +
+                    " ${ui.background} (raw-pixel maxDev=$maxDev, tolerance 8)", maxDev <= 8)
+                assertTrue("render/desktop-color: uncovered desktop ROI is NOT near-black" +
+                    " (black-paint hypothesis refuted at capture instant;" +
+                    " minMaxChannel=$minMaxChannel)", minMaxChannel > 40)
+            } finally { bmp.recycle() }
+        } catch (t: Throwable) {
+            primary = t
+            throw t
+        } finally {
+            // Restore ALWAYS attempted once minimize succeeded; a restore
+            // failure is recorded separately and never masks the primary.
+            if (guestAborted) {
+                Log.e(TAG, "render/restore SKIPPED: unresolved guest-helper cleanup after" +
+                    " timeout - xterm may remain minimized; later stages are invalid")
+            } else try {
+                // Independent finite restore deadline; every call gets the
+                // REMAINING time, success can never pass over budget.
+                val restoreEnd = System.nanoTime() + 30_000_000_000L
+                fun remR(): Long {
+                    val r = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                        restoreEnd - System.nanoTime())
+                    if (r <= 0) throw AssertionError("render/restore: deadline exhausted")
+                    return r
+                }
+                requireGuest(guestExec(rootfs, remR(), "xdotool", "windowactivate", xtId.toString()),
+                    "xdotool windowactivate")
+                var rst = RenderProbeParse.winStats(requireGuest(
+                    guestExec(rootfs, remR(), "xwininfo", "-id", xtId.toString()), "xwininfo restore-poll"))
+                while (rst?.mapState != "IsViewable") {
+                    Thread.sleep(minOf(500, remR()))
+                    rst = RenderProbeParse.winStats(requireGuest(
+                        guestExec(rootfs, remR(), "xwininfo", "-id", xtId.toString()), "xwininfo restore-poll"))
+                }
+                if (rst?.mapState != "IsViewable")
+                    throw AssertionError("render/restore: xterm not viewable after windowactivate: " +
+                        rst?.mapState)
+                if (procStartTime(xtermPid) != xtStart)
+                    throw AssertionError("render/restore: xterm process identity changed" +
+                        " across minimize/restore")
+            } catch (rt: Throwable) {
+                if (primary != null) Log.e(TAG, "render/restore ALSO failed (suppressed): " + rt.message)
+                else throw AssertionError("render/restore failed: " + rt.message, rt)
+            }
+        }
+        if (System.nanoTime() >= deadlineEnd)
+            throw AssertionError("render/probe: completed OVER the overall budget - timing" +
+                " evidence invalid")
+        Thread.sleep(1_000)
+        Shot.save("m1-render-restored")
+
+        // 10. Diagnostic separation: the modules-directory warning is a
+        //     DIAGNOSTIC, never a mandatory proof of config usage.
+        val glog = File(ctx.filesDir, "mobile-desktop.log").let { if (it.isFile) it.readText() else "" }
+        Log.i(TAG, "render-diagnostic (NOT a correctness proof): 'modules directory is not" +
+            " accessible' present=" + glog.contains("modules directory is not accessible"))
+    }
+
     private fun distinctSampledColors(b: Bitmap): Int {
         val seen = HashSet<Int>()
         var y = 0
@@ -874,6 +1437,11 @@ class MobileDesktopEntryTest {
             assertTrue("guest session log exists", log.isNotEmpty())
             assertFalse("guest session log has no FAIL CLOSED marker", log.contains("FAIL CLOSED"))
             Shot.save("m1-evidence-post-start-screen")
+
+            // Render qualification (production-pair run): generated profile
+            // on disk, identity-anchored process args/environment, and the
+            // uncovered root via a non-destructive iconify+restore.
+            renderQualification(rootPid, openTapAt, launchRootStart!!)
 
             // 2. Repeat open REUSES the tracked session (same handle).
             //    pressBack is a source-verified no-op in the X view (empty
