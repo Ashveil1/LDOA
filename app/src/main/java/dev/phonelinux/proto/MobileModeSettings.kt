@@ -28,9 +28,16 @@ import kotlin.math.roundToInt
 data class MobileUiPrefs(
     val scale: Float = 1.0f,
     val panelSize: String = "normal",     // normal | large
-    val panelPosition: String = "bottom", // bottom | top
+    // Defaults ARE the product: a fresh entry launches with these
+    // (compatible with the run-41449407107 frame - floating xterm,
+    // bottom tray under termux-x11's extra-keys bar, no maximize
+    // rules - reads as bare X). Maximized windows are the Phase A
+    // design; top tray because the extra-keys bar overlays the bottom
+    // of the X surface. Explicitly saved bottom/floating choices are
+    // preserved by read().
+    val panelPosition: String = "top",      // top | bottom
     val background: String = "#2E3440",
-    val windowMode: String = "floating"   // floating | maximized
+    val windowMode: String = "maximized"    // maximized | floating
 )
 
 object MobileModeSettings {
@@ -51,9 +58,9 @@ object MobileModeSettings {
         return MobileUiPrefs(
             scale = p.getFloat(KEY_SCALE, 1.0f).coerceIn(0.75f, 2.0f),
             panelSize = if (p.getString(KEY_PANEL_SIZE, "normal") == "large") "large" else "normal",
-            panelPosition = if (p.getString(KEY_PANEL_POSITION, "bottom") == "top") "top" else "bottom",
+            panelPosition = if (p.getString(KEY_PANEL_POSITION, "top") == "bottom") "bottom" else "top",
             background = if (HEX.matches(bg)) bg else BACKGROUNDS[0],
-            windowMode = if (p.getString(KEY_WINDOW_MODE, "floating") == "maximized") "maximized" else "floating")
+            windowMode = if (p.getString(KEY_WINDOW_MODE, "maximized") == "floating") "floating" else "maximized")
     }
 
     fun write(ctx: Context, ui: MobileUiPrefs) {

@@ -136,17 +136,22 @@ object GuestMobileShell {
         val dpi = xftDpi(ctx, ui)
         val trayH = if (ui.panelSize == "large") 64 else 48
         val xtermGeometry = GuestMobileWindows.xtermGeometryArg(ui)
-        File(rootfs, "root/.jwmrc").writeText(jwmrc(ui))
-        File(rootfs, "root/.Xresources").writeText(
-            "Xft.dpi: $dpi\nXft.antialias: 1\nXft.hinting: 1\nXft.rgba: rgb\n")
-        File(rootfs, "root/mobile-session.sh").writeText(
-            """
+        val sessionScript = ("""
+
             #!/bin/sh
             export DISPLAY=:0 HOME=/root XDG_RUNTIME_DIR=/tmp/xdg
             # Session identity: mobile lane. Teardown walks host parentage
             # from the tracked proot root - never a guest-global tag scan
             # (GNOME/Alpine share the host /proc through the proot bind).
             export PLINUX_SESSION=mobile
+            # Managed session config (jwmrc/Xresources/pcmanfm profile)
+            # lives in this launch's per-session dir; without it there
+            # is no config we may use - fail closed with evidence, never
+            # degrade into an unmanaged session.
+            if [ -z "${'$'}SESSION_CFG" ]; then
+              echo "mobile-launch: session config dir unavailable - FAIL CLOSED"
+              exit 1
+            fi
             mkdir -p /tmp/xdg
             chmod 0700 /tmp/xdg
             # Identity fix (cloned from GuestUbuntu): GTK components call
@@ -186,10 +191,10 @@ object GuestMobileShell {
             eval ${'$'}(dbus-launch --sh-syntax) 2>&1
             echo "mobile-launch: session bus ${'$'}DBUS_SESSION_BUS_ADDRESS"
             echo ${'$'}DBUS_SESSION_BUS_PID > /root/.mobile-bus.pid 2>/dev/null
-            xrdb -merge /root/.Xresources 2>&1
+            xrdb -merge "${'$'}SESSION_CFG/Xresources" 2>&1
             xsetroot -solid "${ui.background}"
             echo "mobile-launch: starting jwm (tray=${trayH}px dpi=$dpi scale=${ui.scale})"
-            jwm &
+            jwm -f "${'$'}SESSION_CFG/jwmrc" &
             WMPID=${'$'}!
             sleep 5
             if kill -0 ${'$'}WMPID 2>/dev/null; then
@@ -201,12 +206,39 @@ object GuestMobileShell {
               exit 1
             fi
             fc-cache -f >/dev/null 2>&1
-            pcmanfm --desktop &
+            # App-owned per-launch profile (SessionConfig), never the
+            # user's ~/.config/pcmanfm.
+            XDG_CONFIG_HOME="${'$'}SESSION_CFG" pcmanfm --desktop &
             xterm -fa "DejaVu Sans Mono" -fs ${'$'}{TERM_FONT:-13}$xtermGeometry &
             XTPID=${'$'}!
             echo "mobile-launch: xterm pid=${'$'}XTPID ctty-fd0=${'$'}(readlink /proc/${'$'}XTPID/fd/0 2>/dev/null)"
             wait
             """.trimIndent() + "\n")
+        // App-owned per-launch session config dir (SessionConfig):
+        // jwmrc, Xresources, the session script and the pcmanfm profile
+        // live in a fresh uniquely named dir, exclusive creates only -
+        // the user's /root/.jwmrc, /root/.Xresources,
+        // /root/mobile-session.sh and ~/.config/pcmanfm are never read,
+        // written, replaced, or deleted (a planted symlink at any of
+        // those paths is never followed). Null when unsafe or failed:
+        // the launch then FAILS CLOSED with a distinct marker (no
+        // managed session config, no session - running jwm without our
+        // layout IS the run-41449407107 symptom).
+        // pcmanfm mechanism note, source-verified on 1.3.2 (noble): with
+        // NO config file the loader leaves desktop_bg zeroed (#000000)
+        // and a live pcmanfm --desktop paints solid black over the
+        // xsetroot color; whether pcmanfm was the painter of the black
+        // root in that frame remains HYPOTHESIS pending the run log.
+        val sessionCfg = SessionConfig.prepare(
+            rootfs.toPath(), ui.background, jwmrc(ui),
+            "Xft.dpi: $dpi\nXft.antialias: 1\nXft.hinting: 1\nXft.rgba: rgb\n",
+            sessionScript) { Log.w(TAG, it) }
+        val sessionCfgGuest = sessionCfg?.let { "/" + rootfs.toPath().relativize(it).toString() } ?: ""
+        // sessionCfgGuest is millis+hex only - safe to interpolate.
+        val launchCmd = if (sessionCfgGuest.isNotEmpty())
+            "command -v script >/dev/null 2>&1 || { echo 'mobile-launch: script helper missing - FAIL CLOSED'; exit 1; }; exec script -qec '/bin/sh $sessionCfgGuest/mobile-session.sh' /dev/null"
+        else
+            "echo 'mobile-launch: session config dir unavailable - FAIL CLOSED'; exit 1"
         val nd = ctx.applicationInfo.nativeLibraryDir
         val log = File(ctx.filesDir, "mobile-desktop.log")
         val pb = ProcessBuilder(
@@ -230,7 +262,7 @@ object GuestMobileShell {
             "-b", XServer.socketDir(ctx).absolutePath + ":/tmp/.X11-unix",
             "-w", "/root",
             "/bin/sh", "-c",
-            "command -v script >/dev/null 2>&1 || { echo 'mobile-launch: script helper missing - FAIL CLOSED'; exit 1; }; exec script -qec '/bin/sh /root/mobile-session.sh' /dev/null"
+            launchCmd
         )
         pb.environment().putAll(mapOf(
             "PROOT_LOADER" to File(nd, "libproot_loader.so").absolutePath,
@@ -243,7 +275,10 @@ object GuestMobileShell {
             // Same TMPDIR leak as Proot.exec (see there).
             "TMPDIR" to "/tmp",
             // Passed through proot into the session script's xterm launch.
-            "TERM_FONT" to termFontSize(ui).toString()
+            "TERM_FONT" to termFontSize(ui).toString(),
+            // Guest path of this launch's app-owned session config dir;
+            // empty when blocked, and the session script skips pcmanfm.
+            "SESSION_CFG" to sessionCfgGuest
         ))
         pb.redirectErrorStream(true)
         pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))
