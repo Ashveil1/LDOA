@@ -157,43 +157,6 @@ object GuestUbuntu {
             find /tmp/xdg -maxdepth 1 -name 'ldoa-owned-tree.*' -mmin +60 -delete 2>/dev/null
             # A stale fail-closed marker from a previous launch must never
             # suppress THIS launch's fallback.
-            # EVIDENCE + dock recovery: dump session state, then enable the
-            # ubuntu dock ADDITIVELY (enabled-extensions=@as [] in run
-            # f81bd1a; wallpaper+top bar already render). The recovery is
-            # gnome-extensions enable alone: its D-Bus path
-            # (shellDBus.js -> extensionManager.enableExtension) and its
-            # gsettings fallback (settings_list_add) both no-op when the
-            # uuid is present and append it when missing - verified against
-            # gnome-shell 46.0 source, the exact guest package
-            # (46.0-0ubuntu6~24.04.16; Ubuntu noble ships no extensions-tool
-            # patches). The earlier full-array gsettings set was removed
-            # 2026-11-01: it silently dropped any user-added extension on
-            # every launch while adding nothing beyond the additive enable.
-            ( sleep 25
-              echo "=== gnome-diag begin ==="
-              echo "XDG_CURRENT_DESKTOP=${'$'}XDG_CURRENT_DESKTOP"
-              echo "-- shell mode (before) --"
-              gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Properties.Get org.gnome.Shell Mode 2>&1
-              echo "-- enabled-extensions (before) --"
-              gsettings get org.gnome.shell enabled-extensions 2>&1
-              echo "-- extensions on disk --"
-              ls /usr/share/gnome-shell/extensions/ 2>&1
-              echo "-- gnome-extensions list --"
-              gnome-extensions list 2>&1
-              echo "-- FIX ATTEMPT: enable ubuntu-dock --"
-              gnome-extensions enable ubuntu-dock@ubuntu.com 2>&1; echo "ext-enable rc=${'$'}?"
-              sleep 15
-              echo "-- enabled-extensions (after) --"
-              gsettings get org.gnome.shell enabled-extensions 2>&1
-              echo "-- shell mode (after) --"
-              gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Properties.Get org.gnome.Shell Mode 2>&1
-              echo "-- look --"
-              gsettings get org.gnome.desktop.background picture-uri 2>&1
-              gsettings get org.gnome.desktop.interface gtk-theme 2>&1
-              echo "-- gsd processes --"
-              pgrep -a -f gsd 2>&1 || echo "no gsd processes"
-              echo "=== gnome-diag end ==="
-            ) &
             # Same identity fix as the Alpine session: GNOME components call
             # getpwuid(getuid()) and fail for the Android app uid.
             UID_NOW=${'$'}(id -u); GID_NOW=${'$'}(id -g)
@@ -370,6 +333,49 @@ object GuestUbuntu {
                 "${'$'}BUS_NONCE" \
                 > /root/.gnome-bus.ident.tmp \
               && mv /root/.gnome-bus.ident.tmp /root/.gnome-bus.ident; } 2>/dev/null
+            # EVIDENCE + dock recovery: dump session state, then enable the
+            # ubuntu dock ADDITIVELY (enabled-extensions=@as [] in run
+            # f81bd1a; wallpaper+top bar already render). The recovery is
+            # gnome-extensions enable alone: its D-Bus path
+            # (shellDBus.js -> extensionManager.enableExtension) and its
+            # gsettings fallback (settings_list_add) both no-op when the
+            # uuid is present and append it when missing - verified against
+            # gnome-shell 46.0 source, the exact guest package
+            # (46.0-0ubuntu6~24.04.16; Ubuntu noble ships no extensions-tool
+            # patches). The earlier full-array gsettings set was removed
+            # 2026-11-01: it silently dropped any user-added extension on
+            # every launch while adding nothing beyond the additive enable.
+            # EVIDENCE + dock recovery (moved 2026-11-02 to after this
+            # launch's bus address exists: a forked subshell captures its env
+            # at fork time, so spawned before the eval it cannot inherit the
+            # later export; its bus clients would then run without this
+            # launch's address and could autolaunch or query a non-session
+            # bus. Guard: fork only once the address exists.)
+            if [ -n "${'$'}DBUS_SESSION_BUS_ADDRESS" ]; then ( sleep 25
+              echo "=== gnome-diag begin ==="
+              echo "XDG_CURRENT_DESKTOP=${'$'}XDG_CURRENT_DESKTOP"
+              echo "-- shell mode (before) --"
+              gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Properties.Get org.gnome.Shell Mode 2>&1
+              echo "-- enabled-extensions (before) --"
+              gsettings get org.gnome.shell enabled-extensions 2>&1
+              echo "-- extensions on disk --"
+              ls /usr/share/gnome-shell/extensions/ 2>&1
+              echo "-- gnome-extensions list --"
+              gnome-extensions list 2>&1
+              echo "-- FIX ATTEMPT: enable ubuntu-dock --"
+              gnome-extensions enable ubuntu-dock@ubuntu.com 2>&1; echo "ext-enable rc=${'$'}?"
+              sleep 15
+              echo "-- enabled-extensions (after) --"
+              gsettings get org.gnome.shell enabled-extensions 2>&1
+              echo "-- shell mode (after) --"
+              gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.freedesktop.DBus.Properties.Get org.gnome.Shell Mode 2>&1
+              echo "-- look --"
+              gsettings get org.gnome.desktop.background picture-uri 2>&1
+              gsettings get org.gnome.desktop.interface gtk-theme 2>&1
+              echo "-- gsd processes --"
+              pgrep -a -f gsd 2>&1 || echo "no gsd processes"
+              echo "=== gnome-diag end ==="
+            ) & fi
             # LDOA DIAGNOSTIC SAMPLER (bounded, read-only): recurring
             # session-state samples for the export ZIP, written to
             # /tmp/ldoa-probes.log (rootfs-local tmp; the app picks it up at
