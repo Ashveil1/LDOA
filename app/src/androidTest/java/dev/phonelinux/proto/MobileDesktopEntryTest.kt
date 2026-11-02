@@ -112,13 +112,26 @@ class MobileDesktopEntryTest {
                 Log.i(TAG, "m1-evidence: $stage guest-log export SKIPPED - cannot create " + out.absolutePath)
                 return
             }
+            // Stage-distinct subdirectory: pre-stop and post-stop exports
+            // must never overwrite each other (the launch evidence IS the
+            // pre-stop copy). Each file is independent - one failure must
+            // not skip the other.
+            val stageDir = File(out, stage)
+            if (!stageDir.isDirectory && !stageDir.mkdirs()) {
+                Log.i(TAG, "m1-evidence: $stage guest-log export SKIPPED - cannot create " + stageDir.absolutePath)
+                return
+            }
             for (name in listOf("mobile-desktop.log", "xserver.log")) {
-                val f = File(ctx.filesDir, name)
-                if (f.isFile) {
-                    f.copyTo(File(out, name), overwrite = true)
-                    Log.i(TAG, "m1-evidence: $stage exported " + name + " (" + f.length() + " bytes)")
-                } else {
-                    Log.i(TAG, "m1-evidence: $stage " + name + " ABSENT - nothing to export")
+                try {
+                    val f = File(ctx.filesDir, name)
+                    if (f.isFile) {
+                        f.copyTo(File(stageDir, name), overwrite = true)
+                        Log.i(TAG, "m1-evidence: $stage exported " + name + " (" + f.length() + " bytes)")
+                    } else {
+                        Log.i(TAG, "m1-evidence: $stage " + name + " ABSENT - nothing to export")
+                    }
+                } catch (t: Throwable) {
+                    Log.i(TAG, "m1-evidence: $stage " + name + " export failed (auxiliary): " + t.javaClass.simpleName)
                 }
             }
         } catch (t: Throwable) {
@@ -297,12 +310,6 @@ class MobileDesktopEntryTest {
             val bmp = InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
             assertNotNull("post-start screenshot", bmp)
             val distinct: Int = try { distinctSampledColors(bmp!!) } finally { bmp!!.recycle() }
-            // Pixel content is OBSERVATION ONLY: a color count is not desktop
-            // identity (run 41449407107: the approved Phase-A shell rendered
-            // jwm tray + xterm + empty pcmanfm desktop = 13 raw grid colors).
-            // Content qualification is manual, from the saved shots. The only
-            // hard gate retained is the uniform-screen NEGATIVE observation:
-            // a one/two-color screen means nothing drew at all.
             Log.i(TAG, "m1-observe: capture stage=post-start at +" +
                 (System.currentTimeMillis() - openTapAt) + "ms after open tap (+" +
                 (System.currentTimeMillis() - liveAt) + "ms after marker); 32px-grid distinct=" +
