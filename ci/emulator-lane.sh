@@ -221,6 +221,11 @@ fi
 # default is OFF everywhere - regression/full/session runs stay stock.
 E1ARG=""
 if [ "$E1" = "on" ]; then E1ARG="-e ldoaE1 1"; fi
+# VTEST-MC evaluation arg: EXPLICIT opt-in only (dispatch input
+# vtestmc=on -> -e ldoaVtestMc 1). Default off = stock fork-per-client
+# server everywhere; regression/full runs keep this off.
+VTESTMCARG=""
+if [ "$VTESTMC" = "on" ]; then VTESTMCARG="-e ldoaVtestMc 1"; fi
 # xmap-pixels helper: CI-built on THIS ubuntu-24.04 runner (noble ABI =
 # the guest rootfs; ci/xmap-pixels/BUILD.md) and pushed for the session
 # arm's bounded root pixel probe. A build/push failure does NOT fail the
@@ -249,9 +254,9 @@ if [ "$LANE" = full ] || [ "$LANE" = session ]; then
     echo "XMAP-PIXELS-BUILD FAILED - test will record window-pixels NO-RECORD (arm continues)"
   fi
 fi
-date -u +"VIRGL-SESSION start %H:%M:%S (lane=$LANE e1=$E1)"
+date -u +"VIRGL-SESSION start %H:%M:%S (lane=$LANE e1=$E1 vtestmc=$VTESTMC)"
 if [ "$LANE" = full ] || [ "$LANE" = session ]; then
-  timeout -s KILL 1500 adb -s "$SERIAL" shell am instrument -w $E1ARG -e class dev.phonelinux.proto.VirglGnomeSessionTest,dev.phonelinux.proto.GnomeSessionScriptSafetyTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl-session.log | tail -15 || echo "VIRGL-SESSION-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"
+  timeout -s KILL 1500 adb -s "$SERIAL" shell am instrument -w $E1ARG $VTESTMCARG -e class dev.phonelinux.proto.VirglGnomeSessionTest,dev.phonelinux.proto.GnomeSessionScriptSafetyTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl-session.log | tail -15 || echo "VIRGL-SESSION-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"
 else
   echo "virgl-session SKIPPED (lane=$LANE)" > /tmp/instr-virgl-session.log
 fi

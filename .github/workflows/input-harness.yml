@@ -27,6 +27,11 @@ on:
         default: 'off'
         type: choice
         options: ['off', 'on']
+      vtestmc:
+        description: 'VTEST-MC evaluation EXPERIMENT: on = pass -e ldoaVtestMc 1 to VirglGnomeSessionTest only (the session render server launches with upstream --no-fork --multi-clients for THAT launch; flag file restored after); off (DEFAULT) = every lane keeps the stock fork-per-client server. Regression/full runs must keep this off.'
+        default: 'off'
+        type: choice
+        options: ['off', 'on']
 
 jobs:
   lorie-mouse-attribution:
@@ -35,6 +40,7 @@ jobs:
     env:
       LANE: ${{ github.event.inputs.lane || 'full' }}
       E1: ${{ github.event.inputs.e1 || 'off' }}
+      VTESTMC: ${{ github.event.inputs.vtestmc || 'off' }}
     steps:
       - uses: actions/checkout@v4
         with:
