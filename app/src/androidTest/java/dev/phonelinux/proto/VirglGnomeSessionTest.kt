@@ -1460,29 +1460,53 @@ class VirglGnomeSessionTest {
                         val devOvPath = java.nio.file.Paths.get("/data/local/tmp/ldoa-xmap-overlay")
                         if (!java.nio.file.Files.isRegularFile(devOvPath,
                                 java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
-                            out.append("VERDICT overlay-pixels: NO-RECORD (helper absent or not a" +
-                                " regular file at /data/local/tmp (NIO NOFOLLOW check) - CI" +
-                                " build/push failed or non-CI run; see XMAP-OVERLAY-BUILD lines" +
-                                " in the lane log)\n")
+                            out.append("VERDICT overlay-pixels: NO-RECORD (helper unavailable or" +
+                                " not verified as a regular file at /data/local/tmp (NIO" +
+                                " NOFOLLOW check; absence is not asserted) - CI build/push" +
+                                " failed or non-CI run; see XMAP-OVERLAY-BUILD lines in the" +
+                                " lane log)\n")
                         } else {
                             try {
                                 removeOwnedGuestFile(rootfs, ovPpmRel)
                                 removeOwnedGuestFile(rootfs, "tmp/" + ovHelper)
                                 val preOvPpm = File(rootfs, ovPpmRel).toPath()
                                 val preOvHelper = File(rootfs, "tmp/" + ovHelper).toPath()
-                                if (java.nio.file.Files.exists(preOvPpm,
-                                        java.nio.file.LinkOption.NOFOLLOW_LINKS) ||
-                                    java.nio.file.Files.exists(preOvHelper,
-                                        java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
-                                    out.append("VERDICT overlay-pixels: NO-RECORD (artifact path still" +
-                                        " present after removal (NIO NOFOLLOW check); refusing to sample)\n")
+                                val preOvStateUnknown = listOf(preOvPpm, preOvHelper).any { pre ->
+                                    try {
+                                        java.nio.file.Files.readAttributes(pre,
+                                            java.nio.file.BasicFileAttributes::class.java,
+                                            java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                                        true
+                                    } catch (e: java.nio.file.NoSuchFileException) {
+                                        false
+                                    } catch (e: java.io.IOException) {
+                                        true
+                                    }
+                                }
+                                if (preOvStateUnknown) {
+                                    out.append("VERDICT overlay-pixels: NO-RECORD (artifact/helper path" +
+                                        " present or access state UNKNOWN after removal" +
+                                        " (readAttributes NOFOLLOW; only NoSuchFileException proves" +
+                                        " absence); refusing to sample)\n")
                                 } else {
                                 val ovSha = sha256Hex(devOvPath.toFile())
-                                File(rootfs, "tmp/" + ovHelper).writeBytes(devOvPath.toFile().readBytes())
+                                // CREATE_NEW + NOFOLLOW: creation fails
+                                // (FileAlreadyExistsException) rather than following a link
+                                // raced in after the absence gate.
+                                java.nio.file.Files.write(preOvHelper,
+                                    devOvPath.toFile().readBytes(),
+                                    java.nio.file.StandardOpenOption.CREATE_NEW,
+                                    java.nio.file.StandardOpenOption.WRITE,
+                                    java.nio.file.LinkOption.NOFOLLOW_LINKS)
                                 File(rootfs, "tmp/" + ovHelper).setExecutable(true, false)
-                                if (sha256Hex(File(rootfs, "tmp/" + ovHelper)) != ovSha) {
+                                val ovCopyAttrs = java.nio.file.Files.readAttributes(preOvHelper,
+                                    java.nio.file.BasicFileAttributes::class.java,
+                                    java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                                if (!ovCopyAttrs.isRegularFile ||
+                                    sha256Hex(File(rootfs, "tmp/" + ovHelper)) != ovSha) {
                                     out.append("VERDICT overlay-pixels: NO-RECORD (guest helper copy" +
-                                        " hash mismatch against /data/local/tmp original;" +
+                                        " not verified (NOFOLLOW regular-file check and/or sha256" +
+                                        " mismatch against /data/local/tmp original);" +
                                         " refusing to invoke)\n")
                                 } else {
                                 val ovT0 = System.currentTimeMillis()
