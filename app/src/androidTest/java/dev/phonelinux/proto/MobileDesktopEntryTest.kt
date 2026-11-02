@@ -7,7 +7,9 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.By
+import androidx.test.uiautomator.BySelector
 import androidx.test.uiautomator.UiDevice
+import androidx.test.uiautomator.UiObjectNotFoundException
 import androidx.test.uiautomator.UiScrollable
 import androidx.test.uiautomator.UiSelector
 import androidx.test.uiautomator.Until
@@ -44,6 +46,24 @@ class MobileDesktopEntryTest {
     private lateinit var device: UiDevice
     private lateinit var ctx: Context
 
+    /** Backstop evidence for failures OUTSIDE the tap sites (setUp asserts,
+     *  stage asserts): fires for any test failure not already captured at a
+     *  precise site. Runs AFTER tearDown (JUnit rule ordering), so its
+     *  screen state is post-teardown - the tap-site captures remain the
+     *  failure-instant record; this hook never replaces them. */
+    @get:org.junit.Rule
+    val failureEvidenceHook = object : org.junit.rules.TestWatcher() {
+        override fun failed(e: Throwable?, description: org.junit.runner.Description?) {
+            if (!::device.isInitialized || !::ctx.isInitialized) return
+            if (failureEvidenceSite != null) return
+            try {
+                captureFailureEvidence("junit-hook-" + (description?.methodName ?: "unknown"))
+            } catch (t: Throwable) {
+                Log.i(TAG, "m1-evidence: junit-hook capture failed (auxiliary): " + t.javaClass.simpleName)
+            }
+        }
+    }
+
     companion object {
         private const val TAG = "MobileDesktopEntryTest"
         private const val START_BUDGET_MS = 15 * 60_000L
@@ -62,6 +82,32 @@ class MobileDesktopEntryTest {
         assertFalse("fresh world required: ubuntu marker set", prefs.getBoolean("ubuntu_desktop_active", false))
         assertFalse("fresh world required: mobile marker set", prefs.getBoolean("mobile_desktop_active", false))
         assertFalse("fresh world required: recovery block set", prefs.getBoolean("mobile_recovery_blocked", false))
+
+        // Deterministic permission setup - ENFORCED disposable-CI-emulator
+        // gate, not a comment: pm grant MUTATES device permission state and
+        // must never touch a physical/personal device. Require BOTH the
+        // explicit runner opt-in (-e ldoa_ci_emulator true, set only by the
+        // CI workflow) AND emulator build indicators; fail closed BEFORE any
+        // mutation. MainActivity requests POST_NOTIFICATIONS at launch; on a
+        // fresh emulator its GrantPermissionsActivity covers the picker and
+        // is NOT the launcher-ANR dialog the ONE-dismissal budget exists for
+        // (run 41457173978 failed at the FIRST tap on exactly this, zero
+        // dialog clicks - correct fail-closed, wrong setup). Granting keeps
+        // the dialog policy untouched: no extra budget, no earlier arm.
+        val ciOptIn = InstrumentationRegistry.getArguments()
+            .getString("ldoa_ci_emulator") == "true"
+        val looksEmulator = listOf(android.os.Build.FINGERPRINT, android.os.Build.MODEL,
+            android.os.Build.PRODUCT).any {
+            it.contains("sdk", true) || it.contains("emulator", true) || it.contains("generic", true)
+        }
+        assertTrue("refusing permission mutation: not an opted-in CI emulator" +
+            " (runnerArg=" + ciOptIn + ", fingerprint=" + android.os.Build.FINGERPRINT + ")",
+            ciOptIn && looksEmulator)
+        device.executeShellCommand("pm grant " + ctx.packageName + " android.permission.POST_NOTIFICATIONS")
+        val notifGranted = device.executeShellCommand("dumpsys package " + ctx.packageName)
+            .contains("android.permission.POST_NOTIFICATIONS: granted=true")
+        assertTrue("deterministic setup: POST_NOTIFICATIONS grant did not land (disposable CI emulator)", notifGranted)
+        Log.i(TAG, "m1-setup: POST_NOTIFICATIONS pre-granted (deterministic, CI emulator only)")
 
         // Rootfs bootstrap: the mobile-desktop picker button exists ONLY when
         // Ubuntu is installed; a fresh emulator has none, and no button means
@@ -139,33 +185,100 @@ class MobileDesktopEntryTest {
         }
     }
 
-    private fun tapByDesc(desc: String) {
-        var obj = device.wait(Until.findObject(By.desc(desc)), 2_000)
+    /** Failure evidence at ANY stage, pre-consent included (run 41457173978
+     *  failed at the first tap with zero captured screen state): screenshot
+     *  via the proven logcat channel, foreground package, raw focus excerpt,
+     *  and a best-effort UI hierarchy into additional_test_output. Auxiliary:
+     *  every piece is individually guarded and never masks the real failure. */
+    @Volatile private var failureEvidenceSite: String? = null
+
+    private fun captureFailureEvidence(site: String) {
+        failureEvidenceSite = site
+        // Filenames/shell args get a sanitized token ONLY ([A-Za-z0-9_-]:
+        // a label like "Download and start" would break the tmp path
+        // argument and the saved name); the unique suffix prevents a stale
+        // dump from an earlier capture being archived as THIS failure.
+        // The original human label rides the log lines, never the paths.
+        val token = site.replace(Regex("[^A-Za-z0-9_-]"), "_")
+        val unique = token + "-" + System.currentTimeMillis()
+        try { Shot.save("m1-failure-" + unique) } catch (t: Throwable) {
+            Log.i(TAG, "m1-evidence: failure shot at '" + site + "' failed (auxiliary): " + t.javaClass.simpleName)
+        }
+        val fg = try { device.currentPackageName } catch (t: Throwable) { "unavailable" }
+        val focus = xlorieFocusState()
+        Log.i(TAG, "m1-evidence: failure at '" + site + "' (token=" + unique + ") foreground=" + fg +
+            " focus=" + focus.second + " raw=" + focus.first)
+        try {
+            val out = ctx.getExternalMediaDirs().firstOrNull()
+                ?.let { File(it, "additional_test_output") }
+            if (out != null && (out.isDirectory || out.mkdirs())) {
+                val tmp = "/data/local/tmp/m1-uidump-" + unique + ".xml"
+                device.executeShellCommand("uiautomator dump " + tmp)
+                val xml = device.executeShellCommand("cat " + tmp)
+                // Validate the dump is a real hierarchy before archiving:
+                // a shell/uiautomator error string must never be saved as
+                // .xml evidence (same defect class as the run-as pulls).
+                if (xml.startsWith("<?xml") && xml.contains("<hierarchy")) {
+                    File(out, "m1-failure-" + unique + "-uihierarchy.xml").writeText(xml)
+                    Log.i(TAG, "m1-evidence: UI hierarchy at '" + site + "' exported (" + xml.length + " chars)")
+                } else {
+                    Log.i(TAG, "m1-evidence: hierarchy capture at '" + site +
+                        "' INVALID (not a hierarchy dump; first chars: " + xml.take(80) + ")")
+                }
+            }
+        } catch (t: Throwable) {
+            Log.i(TAG, "m1-evidence: hierarchy capture at '" + site + "' failed (auxiliary): " + t.javaClass.simpleName)
+        }
+    }
+
+    /** Readiness gate before ANY navigation: the app must be foreground
+     *  (bounded wait for the launch transition) before scrolling. A wrong
+     *  foreground (dialog, permission prompt, launcher) is EVIDENCE, not a
+     *  reason to scroll blindly - capture and fail closed. */
+    private fun requireForegroundApp(site: String) {
+        device.wait(Until.hasObject(By.pkg(ctx.packageName)), UI_WAIT_MS)
+        val fg = try { device.currentPackageName } catch (t: Throwable) { null }
+        if (fg != ctx.packageName) {
+            captureFailureEvidence(site)
+            org.junit.Assert.fail("readiness at '" + site + "': foreground is '" + fg +
+                "', not " + ctx.packageName + " - evidence captured, no blind scroll")
+        }
+    }
+
+    /** Shared bounded-scroll tap with readiness + evidence. UiScrollable
+     *  THROWS UiObjectNotFoundException when no scrollable container exists
+     *  at all (run 41457173978) - that escape is caught, evidenced, and
+     *  reported as a wrong-screen failure instead of a bare exception. */
+    private fun tapAffordance(label: String, by: BySelector, sel: UiSelector) {
+        requireForegroundApp(label)
+        var obj = device.wait(Until.findObject(by), 2_000)
         if (obj == null) {
             val sc = UiScrollable(UiSelector().scrollable(true)).setMaxSearchSwipes(6)
-            if (sc.scrollIntoView(UiSelector().description(desc))) {
-                obj = device.wait(Until.findObject(By.desc(desc)), UI_WAIT_MS)
+            val scrolled = try {
+                sc.scrollIntoView(sel)
+            } catch (e: UiObjectNotFoundException) {
+                captureFailureEvidence(label)
+                org.junit.Assert.fail("no scrollable container while seeking '" + label +
+                    "' - wrong screen (evidence captured), never a blind scroll")
+                false // unreachable (fail throws); keeps the try/catch Boolean-typed
+            }
+            if (scrolled) {
+                obj = device.wait(Until.findObject(by), UI_WAIT_MS)
             }
         }
-        assertNotNull("affordance reachable (bounded scroll): $desc", obj)
+        if (obj == null) captureFailureEvidence(label)
+        assertNotNull("affordance reachable (bounded scroll): $label", obj)
         obj.click()
         device.waitForIdle(1_000)
     }
 
+    private fun tapByDesc(desc: String) =
+        tapAffordance(desc, By.desc(desc), UiSelector().description(desc))
+
     /** Same bounded-scroll tap, matched on VISIBLE TEXT (no contentDescription
      *  on the consent confirm button in MainActivity). */
-    private fun tapByText(text: String) {
-        var obj = device.wait(Until.findObject(By.text(text)), 2_000)
-        if (obj == null) {
-            val sc = UiScrollable(UiSelector().scrollable(true)).setMaxSearchSwipes(6)
-            if (sc.scrollIntoView(UiSelector().text(text))) {
-                obj = device.wait(Until.findObject(By.text(text)), UI_WAIT_MS)
-            }
-        }
-        assertNotNull("affordance reachable (bounded scroll, by text): $text", obj)
-        obj.click()
-        device.waitForIdle(1_000)
-    }
+    private fun tapByText(text: String) =
+        tapAffordance(text, By.text(text), UiSelector().text(text))
 
     /** /proc/<pid>/stat content with the errno preserved: ENOENT = the
      *  process is GONE (the only clean "dead"); any other errno is UNKNOWN,
@@ -274,8 +387,9 @@ class MobileDesktopEntryTest {
             // disable/replace. The watcher is removed explicitly in case any
             // harness path registered it.
             device.removeWatcher("phonelinux-anr")
-            Log.i(TAG, "m1-arm: ANR watcher removed; dialog handling = ONE verified" +
-                " launcher-ANR dismissal at the focus gate, nothing else")
+            Log.i(TAG, "m1-arm: policy INSTALLED (init) - ANR watcher removed; dialog" +
+                " handling = ONE verified launcher-ANR dismissal armed at the" +
+                " pre-focus-gate site (NOT yet reached), nothing else")
 
             // 1. Picker entry (bounded scroll), then the mobile start.
             tapByDesc("show-picker")
@@ -329,6 +443,7 @@ class MobileDesktopEntryTest {
                 " observation only, no rendering conclusion; distinct=$distinct)", distinct > 2)
             // Evidence BEFORE any action: the post-start capture above plus
             // this pre-arm focus snapshot are recorded before anything clicks.
+            Log.i(TAG, "m1-arm: pre-focus-gate arm site REACHED")
             val preArm = xlorieFocusState()
             Log.i(TAG, "m1-obstruction: pre-arm focus focused=" + preArm.second +
                 " raw=" + preArm.first)
