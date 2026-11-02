@@ -1020,6 +1020,14 @@ class VirglGnomeSessionTest {
                 if (hasVirgl) envProven++
                 out.append("shell ").append(p.pid).append(" environ GALLIUM_DRIVER=virpipe: ")
                     .append(if (env == null) "UNKNOWN(read-failed)" else hasVirgl.toString()).append('\n')
+                // Delivery evidence ONLY (not renderer proof): the two env
+                // vars that steer cogl/clutter driver selection. Reported
+                // enum-or-OTHER from the same already-read, already-identity-
+                // revalidated environ bytes; no new /proc read.
+                out.append("shell ").append(p.pid).append(" environ COGL_DRIVER: ")
+                    .append(EnvTokenEvidence.envEnumToken(env, "COGL_DRIVER", EnvTokenEvidence.COGL_DRIVER_TOKENS, caseInsensitive = true)).append('\n')
+                out.append("shell ").append(p.pid).append(" environ CLUTTER_DRIVER: ")
+                    .append(EnvTokenEvidence.envEnumToken(env, "CLUTTER_DRIVER", EnvTokenEvidence.CLUTTER_DRIVER_TOKENS, caseInsensitive = false)).append('\n')
                 // fd-to-inode correlation: THIS process's socket inodes vs
                 // net/unix rows. A bare name row is namespace table
                 // content, never attribution.
