@@ -471,6 +471,14 @@ class MobileDesktopEntryTest {
         return re.findAll(raw).map { it.groupValues[1] }.toSet()
     }
 
+    /** Fresh picker UI state (no caching): the panel state survives in the
+     *  preserved MainActivity instance, so after returning from the X view
+     *  it can be EXPANDED already - both markers at once is contradictory,
+     *  neither is absent; both fail closed via classifyPickerUi. */
+    private fun pickerUiState(): PickerUiState =
+        classifyPickerUi(device.hasObject(By.desc("show-picker")),
+            device.hasObject(By.desc("open-mobile-desktop")))
+
     private fun lorieViewPresent(): Boolean =
         device.findObject(By.res("dev.phonelinux.proto:id/lorieView")) != null
 
@@ -556,12 +564,24 @@ class MobileDesktopEntryTest {
                         org.junit.Assert.fail("tracked session handle changed during" +
                             " return-to-picker at '" + site + "' - evidence captured")
                     }
-                    // Known picker UI, not just the component string.
-                    if (!device.wait(Until.hasObject(By.desc("show-picker")), 5_000)) {
+                    // Known picker UI, not just the component string: the
+                    // panel state survives in the preserved instance, so
+                    // EITHER collapsed (show-picker) OR expanded
+                    // (open-mobile-desktop) proves the picker; both at once
+                    // (AMBIGUOUS) and neither (NEITHER) fail closed.
+                    var uiState = pickerUiState()
+                    val uiDeadline = System.currentTimeMillis() + 5_000
+                    while (uiState == PickerUiState.NEITHER &&
+                        System.currentTimeMillis() < uiDeadline) {
+                        Thread.sleep(500)
+                        uiState = pickerUiState()
+                    }
+                    if (uiState != PickerUiState.COLLAPSED && uiState != PickerUiState.EXPANDED) {
                         captureFailureEvidence(site)
                         org.junit.Assert.fail("picker component verified at '" + site +
-                            "' but the show-picker marker is absent - no scroll inside" +
-                            " navigation; evidence captured")
+                            "' but picker UI state=" + uiState + " (need collapsed" +
+                            " show-picker or expanded open-mobile-desktop) - evidence" +
+                            " captured, no scroll inside navigation")
                     }
                     dismissImeIfShownOnPicker(site)
                     // A guarded back is still an action: re-verify the picker
@@ -758,7 +778,20 @@ class MobileDesktopEntryTest {
                 " (anchor comparison, not recapture authority)",
                 launchRootStart, procStartTime(rootPid))
             assertTrue("tracked session alive after return-to-picker", proc!!.isAlive)
-            tapByDesc("show-picker")
+            // Expand ONLY when collapsed: on a preserved instance the panel
+            // can be expanded already, and toggling show-picker then would
+            // COLLAPSE it (run 41483779768 evidence). Neither/contradictory
+            // state fails closed.
+            when (pickerUiState()) {
+                PickerUiState.COLLAPSED -> tapByDesc("show-picker")
+                PickerUiState.EXPANDED ->
+                    Log.i(TAG, "m1-nav: picker already expanded at stage-2 - no toggle")
+                else -> {
+                    captureFailureEvidence("stage-2-reentry")
+                    org.junit.Assert.fail("picker UI state=" + pickerUiState() +
+                        " at stage-2 reentry - evidence captured, no blind toggle")
+                }
+            }
             tapByDesc("open-mobile-desktop")
             Thread.sleep(8_000)
             assertTrue("repeat open REUSED the tracked session (same handle, alive)",

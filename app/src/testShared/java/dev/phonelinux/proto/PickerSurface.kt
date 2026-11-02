@@ -33,3 +33,21 @@ internal fun classifyPickerSurface(
         else -> PickerSurface.WRONG_SURFACE
     }
 }
+
+/** Collapsed/expanded state of the picker panel on the VERIFIED picker
+ *  component. The panel state survives in the preserved MainActivity
+ *  instance: returning from the X view can find it already expanded, and
+ *  toggling show-picker then would COLLAPSE it - never toggle blindly.
+ *  Both markers at once is contradictory (AMBIGUOUS); neither means the
+ *  picker content is absent (NEITHER). Both fail closed. */
+internal enum class PickerUiState { COLLAPSED, EXPANDED, NEITHER, AMBIGUOUS }
+
+internal fun classifyPickerUi(
+    showPickerPresent: Boolean,
+    openMobileDesktopPresent: Boolean,
+): PickerUiState = when {
+    showPickerPresent && openMobileDesktopPresent -> PickerUiState.AMBIGUOUS
+    openMobileDesktopPresent -> PickerUiState.EXPANDED
+    showPickerPresent -> PickerUiState.COLLAPSED
+    else -> PickerUiState.NEITHER
+}

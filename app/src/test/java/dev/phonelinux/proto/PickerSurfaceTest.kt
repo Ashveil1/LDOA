@@ -51,4 +51,20 @@ class PickerSurfaceTest {
         assertEquals(PickerSurface.WRONG_SURFACE, classifyPickerSurface(null, false))
         assertEquals(PickerSurface.WRONG_SURFACE, classifyPickerSurface("", false))
     }
+
+    @Test fun `picker ui collapsed - show-picker only`() {
+        assertEquals(PickerUiState.COLLAPSED, classifyPickerUi(true, false))
+    }
+
+    @Test fun `picker ui expanded - open-mobile-desktop only, no toggle needed`() {
+        assertEquals(PickerUiState.EXPANDED, classifyPickerUi(false, true))
+    }
+
+    @Test fun `picker ui neither - fail closed`() {
+        assertEquals(PickerUiState.NEITHER, classifyPickerUi(false, false))
+    }
+
+    @Test fun `picker ui both markers is contradictory - ambiguous, fail closed`() {
+        assertEquals(PickerUiState.AMBIGUOUS, classifyPickerUi(true, true))
+    }
 }
