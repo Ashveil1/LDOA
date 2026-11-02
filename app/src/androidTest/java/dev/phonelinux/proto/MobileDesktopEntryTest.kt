@@ -1,6 +1,7 @@
 package dev.phonelinux.proto
 
 import android.content.Context
+import android.content.Intent
 import android.util.Log
 import android.graphics.Bitmap
 import androidx.test.core.app.ActivityScenario
@@ -323,6 +324,18 @@ class MobileDesktopEntryTest {
         requireForegroundApp(label)
         var obj = device.wait(Until.findObject(by), 2_000)
         if (obj == null) {
+            // Never swipe an unverified surface: with the X view up, swipes
+            // inject into the focused guest (run 41476451666: arrow-key
+            // escapes echoed into xterm). Scroll ONLY on the verified picker
+            // component; anything else is evidence + fail closed.
+            val comp = focusedComponent()
+            val lorie = lorieViewPresent()
+            if (classifyPickerSurface(comp, lorie) != PickerSurface.PICKER_COMPONENT) {
+                captureFailureEvidence(label)
+                org.junit.Assert.fail("refusing bounded scroll for '" + label + "' on an" +
+                    " unverified surface (component=" + comp + " lorieView=" + lorie +
+                    ") - never inject swipes into a live session; evidence captured")
+            }
             val sc = UiScrollable(UiSelector().scrollable(true)).setMaxSearchSwipes(6)
             val scrolled = try {
                 sc.scrollIntoView(sel)
@@ -338,7 +351,25 @@ class MobileDesktopEntryTest {
         }
         if (obj == null) captureFailureEvidence(label)
         assertNotNull("affordance reachable (bounded scroll): $label", obj)
-        obj.click()
+        // Pre-click sanity at COMPONENT level (not package-only), then a
+        // FRESH find: a cached UiObject2's bounds can belong to a surface
+        // that changed underneath it - clicking stale bounds on the X
+        // surface injects into the live session.
+        val preComp = focusedComponent()
+        val preLorie = lorieViewPresent()
+        if (classifyPickerSurface(preComp, preLorie) != PickerSurface.PICKER_COMPONENT) {
+            captureFailureEvidence(label)
+            org.junit.Assert.fail("pre-click surface for '" + label + "' is not the" +
+                " verified picker (component=" + preComp + " lorieView=" + preLorie +
+                ") - no click; evidence captured")
+        }
+        val fresh = device.wait(Until.findObject(by), 1_000)
+        if (fresh == null) {
+            captureFailureEvidence(label)
+            org.junit.Assert.fail("'" + label + "' vanished between find and click -" +
+                " evidence captured, no stale-bounds click")
+        }
+        fresh.click()
         device.waitForIdle(1_000)
     }
 
@@ -419,6 +450,165 @@ class MobileDesktopEntryTest {
      *  unparseable display state is FALSE, never a pass. Mirrors the
      *  tri-state parser in VirglGnomeSessionTest (full dump filtered
      *  in-process: executeShellCommand has no shell). */
+    /** EXACT normalized "pkg/Class" token from mCurrentFocus; null when
+     *  dumpsys fails, no line, or the token is unparseable - callers treat
+     *  null as UNVERIFIED (fail closed), and classification is exact-token
+     *  allowlist only, never substring matching. */
+    private fun focusedComponent(): String? {
+        val raw = try { device.executeShellCommand("dumpsys window") } catch (t: Throwable) { return null }
+        val line = raw.lineSequence().firstOrNull { it.contains("mCurrentFocus") } ?: return null
+        val token = line.substringAfter("u0 ", "").substringBefore("}").trim()
+        return token.takeIf { it.matches(Regex("[A-Za-z0-9_.]+/[A-Za-z0-9_.$]+")) }
+    }
+
+    /** ActivityRecord tokens of the dev MainActivity instances on the device
+     *  (dumpsys activity activities). The X activity's component
+     *  (com.termux.x11.MainActivity) cannot match this pattern. Empty on
+     *  dumpsys failure - callers treat != exactly-1 as fail closed. */
+    private fun mainActivityRecords(): Set<String> {
+        val raw = try { device.executeShellCommand("dumpsys activity activities") } catch (t: Throwable) { return emptySet() }
+        val re = Regex("ActivityRecord\\{(\\w+) u0 dev\\.phonelinux\\.proto/(?:dev\\.phonelinux\\.proto\\.|\\.)MainActivity\\b")
+        return re.findAll(raw).map { it.groupValues[1] }.toSet()
+    }
+
+    private fun lorieViewPresent(): Boolean =
+        device.findObject(By.res("dev.phonelinux.proto:id/lorieView")) != null
+
+    /** pressBack ONLY when the IME is genuinely shown (dumpsys-verified) and
+     *  only on a verified picker surface: there it hides the IME. A blind
+     *  back elsewhere hits app BackHandlers or is swallowed (UiFlowTest
+     *  precedent + the X view's empty onBackPressed). */
+    private fun dismissImeIfShownOnPicker(site: String) {
+        // executeShellCommand has NO shell: a pipe/grep inside the command
+        // string silently matches nothing (earlier lesson). Full dump, then
+        // an in-process parse of the EXACT visibility line. UNKNOWN (dump
+        // failed or no line) => NO back + evidence - never assume hidden.
+        val dump = try { device.executeShellCommand("dumpsys input_method") } catch (t: Throwable) { "" }
+        // Exact boolean field with token boundary: a line like
+        // "mInputShown=true <other fields>" or any malformed value is
+        // UNKNOWN, never silently "not shown".
+        val visRe = Regex("^mInputShown=(true|false)$")
+        val visibility = dump.lineSequence().map { it.trim() }
+            .firstOrNull { it.startsWith("mInputShown=") }
+            ?.let { visRe.find(it)?.groupValues?.get(1) }
+        when {
+            visibility == null -> Log.i(TAG, "m1-nav: IME visibility UNKNOWN at '" + site +
+                "' (no exact mInputShown=true|false line) - no back, evidence only")
+            visibility == "true" -> {
+                Log.i(TAG, "m1-nav: IME shown at '" + site + "' - hiding via back (picker verified)")
+                device.pressBack()
+                device.waitForIdle(1_000)
+            }
+            else -> Log.i(TAG, "m1-nav: IME not shown at '" + site + "' (" + visibility + ") - no back")
+        }
+    }
+
+    /** Bounded, source-grounded return to the picker from the live X view.
+     *  Source facts (vendored termux-x11 + run 41476451666 evidence):
+     *  - com.termux.x11.MainActivity.onBackPressed is an EMPTY override:
+     *    back is SWALLOWED in the X view (with the IME up, back hides the
+     *    IME and never reaches it). The vendored Exit button sits on the
+     *    not-connected stub - absent during a live session. There is NO
+     *    in-X-view exit; pressBack here is proven useless, never retried.
+     *  - The dev MainActivity instance stays in the SAME task below the X
+     *    activity (XServer starts the X view with a plain startActivity).
+     *    REORDER_TO_FRONT brings THAT instance forward: no new instance, no
+     *    session touch (teardown is SessionService ACTION_STOP only), so
+     *    the tracked sessionProcess/owner identity survives and a later
+     *    open genuinely exercises the REUSE path - never a masquerade.
+     *  - Swipes on the X surface inject into the focused guest (run
+     *    41476451666: arrow-key escapes echoed into xterm) - this helper
+     *    never scrolls; surface verdicts come from classifyPickerSurface. */
+    private fun returnToPicker(site: String) {
+        // Instance identity BEFORE any action: exactly one tracked dev
+        // MainActivity instance (the scenario's). NEW_TASK|REORDER_TO_FRONT
+        // alone does not prove instance preservation - the ActivityRecord
+        // token set must be UNCHANGED after, or the navigation created a
+        // new instance (breaking the scenario's tracked activity and any
+        // reuse claim built on it).
+        val beforeRecords = mainActivityRecords()
+        val beforeProc = XServer.sessionProcess
+        if (beforeRecords.size != 1) {
+            captureFailureEvidence(site)
+            org.junit.Assert.fail("return-to-picker at '" + site + "': expected exactly 1" +
+                " tracked MainActivity instance, found " + beforeRecords.size + " " +
+                beforeRecords + " - evidence captured, no navigation")
+        }
+        var comp: String? = null
+        var lorie = false
+        var attempt = 0
+        while (true) {
+            // Verify FIRST and after EVERY action, including the last.
+            comp = focusedComponent()
+            lorie = lorieViewPresent()
+            when (classifyPickerSurface(comp, lorie)) {
+                PickerSurface.PICKER_COMPONENT -> {
+                    val afterRecords = mainActivityRecords()
+                    if (afterRecords != beforeRecords) {
+                        captureFailureEvidence(site)
+                        org.junit.Assert.fail("MainActivity instance set changed across" +
+                            " return-to-picker at '" + site + "' (before=" + beforeRecords +
+                            ", after=" + afterRecords + ") - a new instance cannot carry" +
+                            " the scenario's tracked activity; evidence captured")
+                    }
+                    if (XServer.sessionProcess !== beforeProc) {
+                        captureFailureEvidence(site)
+                        org.junit.Assert.fail("tracked session handle changed during" +
+                            " return-to-picker at '" + site + "' - evidence captured")
+                    }
+                    // Known picker UI, not just the component string.
+                    if (!device.wait(Until.hasObject(By.desc("show-picker")), 5_000)) {
+                        captureFailureEvidence(site)
+                        org.junit.Assert.fail("picker component verified at '" + site +
+                            "' but the show-picker marker is absent - no scroll inside" +
+                            " navigation; evidence captured")
+                    }
+                    dismissImeIfShownOnPicker(site)
+                    // A guarded back is still an action: re-verify the picker
+                    // component AFTER it before declaring navigation done.
+                    val postComp = focusedComponent()
+                    val postLorie = lorieViewPresent()
+                    if (classifyPickerSurface(postComp, postLorie) !=
+                        PickerSurface.PICKER_COMPONENT) {
+                        captureFailureEvidence(site)
+                        org.junit.Assert.fail("surface changed by the IME-hide back at '" +
+                            site + "' (component=" + postComp + " lorieView=" + postLorie +
+                            ") - evidence captured")
+                    }
+                    Log.i(TAG, "m1-nav: picker verified at '" + site + "' (attempts=" +
+                        attempt + ", component=" + postComp + ", instance=" + afterRecords +
+                        ", session handle unchanged)")
+                    return
+                }
+                PickerSurface.IN_X_VIEW -> {
+                    if (attempt >= 2) {
+                        captureFailureEvidence(site)
+                        org.junit.Assert.fail("return-to-picker at '" + site + "': still in" +
+                            " the X view after 2 REORDER_TO_FRONT attempts (component=" +
+                            comp + " lorieView=" + lorie + ") - evidence captured")
+                    }
+                    attempt++
+                    Log.i(TAG, "m1-nav: X view at '" + site + "' (component=" + comp +
+                        " lorieView=" + lorie + ") - bringing the tracked MainActivity" +
+                        " forward via REORDER_TO_FRONT (attempt " + attempt + "; back is" +
+                        " a source-verified no-op in the X view; session untouched)")
+                    ctx.startActivity(Intent(ctx, MainActivity::class.java)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
+                    device.waitForIdle(2_000)
+                    Thread.sleep(1_000)
+                }
+                else -> {
+                    // AMBIGUOUS or WRONG_SURFACE: no navigation authority.
+                    captureFailureEvidence(site)
+                    org.junit.Assert.fail("return-to-picker at '" + site + "': surface=" +
+                        classifyPickerSurface(comp, lorie) + " (component=" + comp +
+                        " lorieView=" + lorie + ") - evidence captured, no blind navigation")
+                }
+            }
+        }
+    }
+
     private fun xlorieFocusState(): Pair<String, Boolean> {
         val raw = try { device.executeShellCommand("dumpsys window") } catch (t: Throwable) {
             return "focus-dumpsys-failed: ${t.javaClass.simpleName}" to false
@@ -555,8 +745,19 @@ class MobileDesktopEntryTest {
             Shot.save("m1-evidence-post-start-screen")
 
             // 2. Repeat open REUSES the tracked session (same handle).
-            device.pressBack()
-            device.waitForIdle(1_000)
+            //    pressBack is a source-verified no-op in the X view (empty
+            //    onBackPressed override) - return via REORDER_TO_FRONT of
+            //    the tracked MainActivity, session untouched. Launch-anchor
+            //    identity is compared BEFORE and AFTER (existing anchor, NOT
+            //    a fresh recapture as authority).
+            assertEquals("launch root identity unchanged before return-to-picker",
+                launchRootStart, procStartTime(rootPid))
+            assertTrue("tracked session alive before return-to-picker", proc!!.isAlive)
+            returnToPicker("stage-2-reentry")
+            assertEquals("launch root identity unchanged after return-to-picker" +
+                " (anchor comparison, not recapture authority)",
+                launchRootStart, procStartTime(rootPid))
+            assertTrue("tracked session alive after return-to-picker", proc!!.isAlive)
             tapByDesc("show-picker")
             tapByDesc("open-mobile-desktop")
             Thread.sleep(8_000)

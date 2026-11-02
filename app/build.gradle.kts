@@ -8,6 +8,13 @@ android {
     namespace = "dev.phonelinux.proto"
     compileSdk = 35
 
+    // Shared instrumentation-support sources (e.g. PickerSurface): visible
+    // to BOTH local unit tests and androidTest, kept OUT of production main.
+    sourceSets {
+        getByName("test") { java.srcDir("src/testShared/java") }
+        getByName("androidTest") { java.srcDir("src/testShared/java") }
+    }
+
     defaultConfig {
         applicationId = "dev.phonelinux.proto"
         minSdk = 26
