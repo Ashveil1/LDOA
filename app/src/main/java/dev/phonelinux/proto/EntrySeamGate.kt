@@ -32,6 +32,13 @@ internal object EntrySeamGate {
     fun refuseForOtherActive(otherMarkerActive: Boolean, liveKind: LiveKind, liveOwnerTag: String?, myOwnerTag: String): Boolean =
         otherMarkerActive || (liveKind != LiveKind.ABSENT && liveOwnerTag != myOwnerTag)
 
+    /** Boot consistency for any boot-stamped pref: a pref written under
+     *  a PRIOR boot refers to processes that certainly died (nothing
+     *  survives a reboot), so it is stale on sight. Missing stamps fail
+     *  closed (NOT stale: the pref stays authoritative). */
+    fun stalePrefFromPriorBoot(prefSet: Boolean, prefBoot: String?, currentBootId: String?): Boolean =
+        prefSet && prefBoot != null && currentBootId != null && prefBoot != currentBootId
+
     /** Durable recovery block: true while an unverified-cleanup block
      *  applies to THIS boot. A device reboot (boot id change) means every
      *  guest process is certainly dead, so the block never survives it.

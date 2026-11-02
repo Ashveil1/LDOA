@@ -1255,6 +1255,25 @@ object XServer {
                                 // guest process is certainly dead - the
                                 // block lifts there and nowhere else.
                                 val bootNow = currentBootId()
+                                // Prior-boot mobile state is VOID: no
+                                // guest process survives a reboot, so a
+                                // boot-stamped marker or recovery block
+                                // from an earlier boot is cleared once,
+                                // here - the one verified reset path.
+                                // Same-boot or unstamped state stays
+                                // authoritative (fail closed below).
+                                val markerFromPriorBoot = EntrySeamGate.stalePrefFromPriorBoot(
+                                    desktopPrefs.getBoolean("mobile_desktop_active", false),
+                                    desktopPrefs.getString("mobile_active_boot", null), bootNow)
+                                val blockFromPriorBoot = EntrySeamGate.stalePrefFromPriorBoot(
+                                    desktopPrefs.getBoolean("mobile_recovery_blocked", false),
+                                    desktopPrefs.getString("mobile_recovery_boot", null), bootNow)
+                                if (markerFromPriorBoot || blockFromPriorBoot) {
+                                    desktopPrefs.edit()
+                                        .putBoolean("mobile_desktop_active", false).remove("mobile_active_boot")
+                                        .remove("mobile_recovery_blocked").remove("mobile_recovery_boot").apply()
+                                    gateLog("mobile: prior-boot state voided by verified boot change (marker=" + markerFromPriorBoot + " block=" + blockFromPriorBoot + ") - no guest process survives a reboot")
+                                }
                                 if (EntrySeamGate.mobileRecoveryBlocked(
                                         desktopPrefs.getBoolean("mobile_recovery_blocked", false),
                                         desktopPrefs.getString("mobile_recovery_boot", null), bootNow)) {
@@ -1320,7 +1339,8 @@ object XServer {
                                     launched = p.isAlive
                                     if (launched) {
                                         ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
-                                            .edit().putBoolean("mobile_desktop_active", true).apply()
+                                            .edit().putBoolean("mobile_desktop_active", true)
+                                            .putString("mobile_active_boot", currentBootId()).apply()
                                     } else {
                                         // Keep the bound ownership and flag
                                         // it FAILED: Stop session (and the
@@ -1578,6 +1598,11 @@ object XServer {
 
     /** Test observability: the activity a successful completion routed to. */
     @Volatile internal var lastOpenedXForTest: Activity? = null
+
+    /** Test observability: the tracked session root pid, or -1 when no
+     *  launch-captured identity exists. */
+    internal val sessionRootPidForTest: Int
+        get() = synchronized(ownershipLock) { sessionRootIdent?.pid ?: -1 }
 
     /**
      * End the desktop session (user stop): verified teardown of the guest

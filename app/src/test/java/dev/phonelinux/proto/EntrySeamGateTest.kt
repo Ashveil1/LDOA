@@ -103,6 +103,14 @@ class EntrySeamGateTest {
         assertTrue(EntrySeamGate.mobileRecoveryBlocked(true, "boot-A", null))
         // 4. A device reboot lifts the block: every process is dead.
         assertFalse(EntrySeamGate.mobileRecoveryBlocked(true, "boot-A", "boot-B"))
+        // 4b. The SAME reboot also voids the boot-stamped active marker:
+        //     after the void, the open really proceeds (no second reboot
+        //     demanded by a REFUSE_UNKNOWN on the stale marker).
+        assertTrue(EntrySeamGate.stalePrefFromPriorBoot(true, "boot-A", "boot-B"))
+        assertFalse(EntrySeamGate.stalePrefFromPriorBoot(true, "boot-A", "boot-A"))
+        // 4c. Missing stamps fail closed: the pref stays authoritative.
+        assertFalse(EntrySeamGate.stalePrefFromPriorBoot(true, null, "boot-B"))
+        assertFalse(EntrySeamGate.stalePrefFromPriorBoot(true, "boot-A", null))
         // 5. A VERIFIED owned cleanup clears the block: open proceeds.
         assertFalse(EntrySeamGate.mobileRecoveryBlocked(false, "boot-A", "boot-A"))
         assertEquals(EntrySeamGate.MobileSameMode.PROCEED,
