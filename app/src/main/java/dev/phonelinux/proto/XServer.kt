@@ -1268,11 +1268,18 @@ object XServer {
                                 val blockFromPriorBoot = EntrySeamGate.stalePrefFromPriorBoot(
                                     desktopPrefs.getBoolean("mobile_recovery_blocked", false),
                                     desktopPrefs.getString("mobile_recovery_boot", null), bootNow)
-                                if (markerFromPriorBoot || blockFromPriorBoot) {
+                                // Each pref voids ONLY on its OWN verified
+                                // stale stamp; a current-boot or unstamped
+                                // pref stays authoritative.
+                                if (markerFromPriorBoot) {
                                     desktopPrefs.edit()
-                                        .putBoolean("mobile_desktop_active", false).remove("mobile_active_boot")
+                                        .putBoolean("mobile_desktop_active", false).remove("mobile_active_boot").apply()
+                                    gateLog("mobile: prior-boot ACTIVE MARKER voided by verified boot change - no guest process survives a reboot")
+                                }
+                                if (blockFromPriorBoot) {
+                                    desktopPrefs.edit()
                                         .remove("mobile_recovery_blocked").remove("mobile_recovery_boot").apply()
-                                    gateLog("mobile: prior-boot state voided by verified boot change (marker=" + markerFromPriorBoot + " block=" + blockFromPriorBoot + ") - no guest process survives a reboot")
+                                    gateLog("mobile: prior-boot RECOVERY BLOCK voided by verified boot change")
                                 }
                                 if (EntrySeamGate.mobileRecoveryBlocked(
                                         desktopPrefs.getBoolean("mobile_recovery_blocked", false),

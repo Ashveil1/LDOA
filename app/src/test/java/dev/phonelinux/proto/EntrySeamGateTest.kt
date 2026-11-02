@@ -111,6 +111,12 @@ class EntrySeamGateTest {
         // 4c. Missing stamps fail closed: the pref stays authoritative.
         assertFalse(EntrySeamGate.stalePrefFromPriorBoot(true, null, "boot-B"))
         assertFalse(EntrySeamGate.stalePrefFromPriorBoot(true, "boot-A", null))
+        // 4d. Mixed stamps: the marker's stamp and the block's stamp are
+        //     independent - one stale does NOT void the other.
+        assertTrue(EntrySeamGate.stalePrefFromPriorBoot(true, "boot-A", "boot-B"))   // marker stale
+        assertFalse(EntrySeamGate.stalePrefFromPriorBoot(true, "boot-B", "boot-B"))  // block current-boot: stays
+        assertFalse(EntrySeamGate.stalePrefFromPriorBoot(true, null, "boot-B"))      // block unstamped: stays
+        t("mixed stamps: each pref voids only on its OWN verified-old stamp")
         // 5. A VERIFIED owned cleanup clears the block: open proceeds.
         assertFalse(EntrySeamGate.mobileRecoveryBlocked(false, "boot-A", "boot-A"))
         assertEquals(EntrySeamGate.MobileSameMode.PROCEED,

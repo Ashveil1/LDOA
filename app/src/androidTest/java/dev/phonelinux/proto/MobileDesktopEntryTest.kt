@@ -20,6 +20,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import android.os.ParcelFileDescriptor
 
 /**
  * M1 entry-seam emulator test (custom-mobile lane entry lifecycle).
@@ -84,6 +85,21 @@ class MobileDesktopEntryTest {
         device.waitForIdle(1_000)
     }
 
+    /** Same bounded-scroll tap, matched on VISIBLE TEXT (no contentDescription
+     *  on the consent confirm button in MainActivity). */
+    private fun tapByText(text: String) {
+        var obj = device.wait(Until.findObject(By.text(text)), 2_000)
+        if (obj == null) {
+            val sc = UiScrollable(UiSelector().scrollable(true)).setMaxSearchSwipes(6)
+            if (sc.scrollIntoView(UiSelector().text(text))) {
+                obj = device.wait(Until.findObject(By.text(text)), UI_WAIT_MS)
+            }
+        }
+        assertNotNull("affordance reachable (bounded scroll, by text): $text", obj)
+        obj.click()
+        device.waitForIdle(1_000)
+    }
+
     /** pid -> starttime snapshot of the session root and every current
      *  descendant (ppid walk over /proc), for post-Stop identity checks. */
     private fun pidTreeSnapshot(rootPid: Int): Map<Int, String> {
@@ -109,6 +125,30 @@ class MobileDesktopEntryTest {
         return out
     }
 
+    private fun parseStartTime(statText: String): String? {
+        val close = statText.lastIndexOf(')')
+        if (close < 0) return null
+        val rest = statText.substring(close + 1).trim().split(Regex("\\s+"))
+        return if (rest.size > 19) rest[19] else null
+    }
+
+    /** starttime for one pid; null when ENOENT (gone) - callers needing the
+     *  ENOENT/unreadable split read the file themselves. */
+    private fun procStartTime(pid: Int): String? {
+        val f = File("/proc/$pid/stat")
+        if (!f.exists()) return null
+        return try { parseStartTime(f.readText()) } catch (t: Throwable) { null }
+    }
+
+    /** Raw mCurrentFocus / mFocusedApp lines from the window manager. */
+    private fun currentFocusLine(): String = try {
+        val pfd = InstrumentationRegistry.getInstrumentation().uiAutomation
+            .executeShellCommand("dumpsys window windows")
+        val lines = ParcelFileDescriptor.AutoCloseInputStream(pfd).use { it.bufferedReader().readLines() }
+        lines.filter { it.contains("mCurrentFocus") || it.contains("mFocusedApp") }
+            .joinToString(" | ").trim()
+    } catch (t: Throwable) { "focus-dumpsys-failed: ${t.javaClass.simpleName}" }
+
     /** Distinct-color count over a coarse grid: a uniform (black/frozen)
      *  screen is NOT desktop evidence. */
     private fun distinctSampledColors(b: Bitmap): Int {
@@ -126,7 +166,9 @@ class MobileDesktopEntryTest {
     fun mobileEntryLifecycle() {
         val prefs = ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-            scenario.onActivity { Shot.dismissSystemDialogs(device) }
+            // UiDevice-only helper: instrumentation thread is the correct
+            // place; onActivity would block the app UI thread.
+            Shot.dismissSystemDialogs(device)
 
             // 1. Picker entry (bounded scroll), then the mobile start.
             tapByDesc("show-picker")
@@ -134,7 +176,7 @@ class MobileDesktopEntryTest {
             val consent = device.wait(Until.findObject(By.textContains("mobile desktop (prototype)")), 3_000)
             if (consent != null) {
                 Shot.save("m1-intent-mobile-consent")
-                tapByDesc("Download and start")
+                tapByText("Download and start")
             }
 
             var proc: Process? = null
@@ -147,19 +189,31 @@ class MobileDesktopEntryTest {
             assertTrue("mobile session live + marker set within budget",
                 proc != null && proc!!.isAlive && prefs.getBoolean("mobile_desktop_active", false))
             val rootPid = XServer.sessionRootPidForTest
-            val preStopTree = pidTreeSnapshot(rootPid)
-            assertTrue("tracked root pid captured", rootPid > 0 && preStopTree.containsKey(rootPid))
+            assertTrue("tracked root pid captured", rootPid > 0)
+            val launchRootStart = procStartTime(rootPid)
+            assertNotNull("launch root /proc stat readable at start", launchRootStart)
 
-            // Desktop evidence: ACTUAL pixels (diversity) + guest log w/o
-            // fail-closed markers. The Shot name is intent, not a result.
+            // Desktop evidence, all labeled precisely:
+            //  a) pixel NON-UNIFORMITY is a NEGATIVE gate only - a uniform
+            //     (black/frozen) screen fails; non-uniformity alone proves
+            //     nothing about desktop content (dialogs/status bars pass too).
+            //  b) WM evidence at capture instant: current focus line from
+            //     dumpsys, surfaced raw; must exist and not be the launcher.
+            //  c) guest log exists with no FAIL CLOSED marker.
+            //  The Shot capture is a different instant than the pixel sample;
+            //  claims stay separate. No "real desktop" claim from these.
             Shot.save("m1-intent-post-start-capture")
             val bmp = InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
             assertNotNull("post-start screenshot", bmp)
-            val distinct = distinctSampledColors(bmp!!)
+            val distinct: Int = try { distinctSampledColors(bmp!!) } finally { bmp!!.recycle() }
+            val focusLine = currentFocusLine()
+            assertTrue("WM focus line captured: $focusLine", focusLine.isNotBlank())
+            assertFalse("focus not the launcher (raw: $focusLine)",
+                focusLine.lowercase().contains("launcher"))
             val log = File(ctx.filesDir, "mobile-desktop.log").let { if (it.isFile) it.readText() else "" }
             assertTrue("guest session log exists", log.isNotEmpty())
             assertFalse("guest session log has no FAIL CLOSED marker", log.contains("FAIL CLOSED"))
-            assertTrue("desktop draw evidence: non-uniform pixels (distinct=$distinct)", distinct > 32)
+            assertTrue("non-uniform candidate screen (negative gate only; distinct=$distinct, focus=$focusLine)", distinct > 32)
             Shot.save("m1-evidence-desktop-draw")
 
             // 2. Repeat open REUSES the tracked session (same handle).
@@ -185,18 +239,30 @@ class MobileDesktopEntryTest {
             assertTrue("mobile session untouched by refused GNOME open",
                 XServer.sessionProcess === proc && proc!!.isAlive)
 
-            // 4. Stop: verified against the PID/starttime descendant set.
+            // 4. Stop. Refresh the tree IMMEDIATELY before Stop (the world
+            //    may have changed during the waits above) and assert the
+            //    tracked root identity is still the launch identity.
+            assertEquals("launch root identity unchanged at Stop (pid+starttime)",
+                launchRootStart, procStartTime(rootPid))
+            val preStopTree = pidTreeSnapshot(rootPid)
+            assertTrue("pre-Stop tree captured root", preStopTree.containsKey(rootPid))
             XServer.stopDesktopMode(ctx)
             assertFalse("mobile marker cleared by Stop", prefs.getBoolean("mobile_desktop_active", false))
             assertFalse("no recovery block (verified owned cleanup)", prefs.getBoolean("mobile_recovery_blocked", false))
             assertNull("ownership released after Stop", XServer.sessionProcess)
-            val survivors = preStopTree.filter { (pid, start) ->
-                try {
-                    val t = File("/proc/$pid/stat").readText()
-                    val close = t.lastIndexOf(')')
-                    t.substring(close + 1).trim().split(Regex("\\s+"))[19] == start
-                } catch (t: Throwable) { false }
+            val survivors = LinkedHashMap<Int, String>()
+            val unknown = LinkedHashMap<Int, String>()
+            for ((pid, start) in preStopTree) {
+                val f = File("/proc/$pid/stat")
+                if (!f.exists()) continue // ENOENT: gone - the only clean "dead"
+                val t = try { f.readText() } catch (e: Throwable) {
+                    unknown[pid] = "unreadable: ${e.javaClass.simpleName}"; continue
+                }
+                val st = parseStartTime(t)
+                if (st == null) unknown[pid] = "unparseable stat"
+                else if (st == start) survivors[pid] = st
             }
+            assertTrue("post-Stop /proc state UNKNOWN (not assumed dead): $unknown", unknown.isEmpty())
             assertEquals("no pre-Stop tree pid survives with the same starttime: $survivors",
                 emptyMap<Int, String>(), survivors)
             Shot.save("m1-evidence-post-stop")
