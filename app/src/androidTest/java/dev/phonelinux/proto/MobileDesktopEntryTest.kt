@@ -667,6 +667,10 @@ class MobileDesktopEntryTest {
                             site + "' (component=" + postComp + " lorieView=" + postLorie +
                             ") - evidence captured")
                     }
+                    // Final gate: identity/UI checks and the post-IME stable
+                    // poll all consumed return budget - the overall deadline
+                    // must still hold BEFORE declaring success.
+                    returnDeadlineExceeded()
                     Log.i(TAG, "m1-nav: picker verified at '" + site + "' (attempts=" +
                         attempt + ", component=" + postComp + ", instance=" + afterRecords +
                         ", session handle unchanged)")

@@ -146,6 +146,14 @@ class PickerSurfaceTest {
         assertEquals(devComponent, interactionFocusToken(sameTwice))
     }
 
+    @Test fun `legacy headerless - null or malformed focus line poisons a coexisting valid token, both orders`() {
+        val anrDialog = "  mCurrentFocus=Window{916ca84 u0 Application Not Responding: com.google.android.apps.nexuslauncher}\n"
+        assertEquals(null, interactionFocusToken(focusLine(devComponent) + "\n  mCurrentFocus=null\n"))
+        assertEquals(null, interactionFocusToken("  mCurrentFocus=null\n" + focusLine(devComponent) + "\n"))
+        assertEquals(null, interactionFocusToken(focusLine(devComponent) + "\n" + anrDialog))
+        assertEquals(null, interactionFocusToken(anrDialog + focusLine(devComponent) + "\n"))
+    }
+
     @Test fun `malformed focus lines and empty dumps are unknown`() {
         assertEquals(null, interactionFocusToken(""))
         assertEquals(null, interactionFocusToken("Display: mDisplayId=0\n  mCurrentFocus=null\n"))

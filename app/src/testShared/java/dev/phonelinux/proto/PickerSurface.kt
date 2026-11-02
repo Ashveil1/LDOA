@@ -103,7 +103,16 @@ internal fun interactionFocusToken(
     if (hasDisplayHeaders(dump)) {
         return parseFocusedTokensByDisplay(dump)[displayId]
     }
-    return FOCUS_WINDOW.findAll(dump).map { it.groupValues[1] }.distinct().singleOrNull()
+    // Legacy header-less dumps: SAME poison rule as sections - EVERY focus
+    // line must be a valid token (a null/malformed/dialog-title line is
+    // UNKNOWN even when a valid token coexists) and exactly one distinct
+    // token must result; anything else is unknown, never first-line.
+    val observations = dump.lineSequence()
+        .filter { FOCUS_LINE.containsMatchIn(it) }
+        .map { FOCUS_WINDOW.find(it)?.groupValues?.get(1) }
+        .toList()
+    if (observations.any { it == null }) return null
+    return observations.distinct().singleOrNull()
 }
 
 /** Temporal stability decision for the interaction-display focus poll.
