@@ -1782,6 +1782,18 @@ object GuestUbuntu {
         if (XServer.ldoaDebugFlagOn(ctx, ".ldoa-virgl-debug")) {
             pb.environment()["LIBGL_DEBUG"] = "verbose"
             pb.environment()["EGL_LOG_LEVEL"] = "debug"
+            if (virglSocket != null) {
+                // COGL_DEBUG=winsys (mutter 46.2 source-grounded): ROUTE-ENTRY
+                // evidence only - a line proves its winsys init site was
+                // ENTERED (glx :721 additionally = GLX context created on that
+                // path); line ABSENCE is never negative proof; the Cogl
+                // domain + G_STRLOC tag is NOT PID attribution and does not
+                // authenticate the compositor. Runtime-gated COGL_NOTE
+                // (cogl-debug.h:88-104), startup-setup sites only, none in
+                // frame/draw control flow. Virgl+debug only: not emitted on
+                // non-virgl or non-debug launches.
+                pb.environment()["COGL_DEBUG"] = "winsys"
+            }
         }
         pb.redirectErrorStream(true)
         pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))
