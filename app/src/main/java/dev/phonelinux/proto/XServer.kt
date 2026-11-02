@@ -1090,9 +1090,15 @@ object XServer {
      *  onError with detail instead of opening a silent black screen
      *  (real-device report 2026-10-29: tap -> screen unchanged, cause
      *  invisible). onStage receives one-line progress for the preparing UI. */
+    /** Desktop session flavor. Default GNOME: every pre-existing caller
+     *  keeps exact behavior. MOBILE = the custom touch session
+     *  (GuestMobileShell) on the same Ubuntu rootfs. */
+    enum class DesktopMode { GNOME, MOBILE }
+
     fun openDesktop(activity: Activity, distro: Distro,
                     onStage: (String) -> Unit = {},
-                    onError: (String) -> Unit = {}) {
+                    onError: (String) -> Unit = {},
+                    mode: DesktopMode = DesktopMode.GNOME) {
         if (preparing) {
             // Re-attach, never refuse: follow the in-flight attempt so its
             // stage lines and outcome reach the screen the user is actually
@@ -1120,8 +1126,24 @@ object XServer {
             var launched = false
             var failure: String? = null
             try {
-                gateLog("openDesktop begin distro=" + distro.id)
+                gateLog("openDesktop begin distro=" + distro.id + " mode=" + mode)
                 if (teardownRetainedFailedSession(ctx)) gateLog("tore down retained FAILED session before relaunch")
+                // Mutual exclusion (custom-mobile coexistence contract):
+                // exactly one WM session may own :0. A mode switch is an
+                // explicit Stop of the live session first, never a silent
+                // replacement. Fail closed on the durable marker: a stale
+                // marker costs one Stop tap, a missed one could boot two
+                // WMs onto one display.
+                val desktopPrefs = ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
+                val otherModeActive = when (mode) {
+                    DesktopMode.MOBILE -> desktopPrefs.getBoolean("ubuntu_desktop_active", false)
+                    DesktopMode.GNOME -> desktopPrefs.getBoolean("mobile_desktop_active", false)
+                }
+                if (otherModeActive) {
+                    gateLog("openDesktop refused: other desktop mode marker active (mode=" + mode + ")")
+                    finishAttempt(ctx, false, "A desktop is already running - Stop session first, then start the other mode.", mySeq)
+                    return@thread
+                }
                 stage("Starting X server")
                 start(ctx)
                 val installer = DistroInstaller(ctx)
@@ -1163,159 +1185,200 @@ object XServer {
                             }
                         }
                         PkgMgr.APT -> {
-                            // Ubuntu: GNOME (B). Feasibility on our lorie
-                            // stack is unproven; guest-gnome.log is the
-                            // evidence trail.
-                            if (!GuestUbuntu.hasGnome(rootfs)) {
-                                Log.i(TAG, "GNOME not provisioned; apt install gnome-shell et al")
-                                val add = GuestUbuntu.provisionGnome(ctx, rootfs) { line -> stage(line) }
-                                Log.i(TAG, "gnome provision exit=" + add.exitCode)
-                                if (add.exitCode != 0) failure =
-                                    "GNOME package install failed (exit " + add.exitCode + ")\n" + (add.stdout + add.stderr).takeLast(1200)
-                            }
-                            if (failure == null && GuestUbuntu.hasGnome(rootfs)) {
-                                stage("Launching GNOME session")
-                                // Gate on SESSION EVIDENCE, not the spawn
-                                // event: the session script logs its alive
-                                // marker ~20s in; only log lines written
-                                // after THIS launch count (the log is
-                                // append-only across retries).
-                                val gnomeLog = File(ctx.filesDir, "guest-gnome.log")
-                                // CHAR base from ONE snapshot (never File.length()
-                                // BYTES): every consumer slices readText() snapshots
-                                // in char units (logWindow). A byte base mis-slices
-                                // or crashes once the log holds multi-byte UTF-8
-                                // (mutter warnings carry curly quotes; crash class
-                                // run 41283803508).
-                                val logBase = if (gnomeLog.isFile) gnomeLog.readText().length.toLong() else 0L
-                                val wasAlive = gnomeSessionActive(distro)
-                                val p = launchOrReuseGnomeSession(ctx, distro, rootfs)
-                                val reused = isReusedSession(distro, p, wasAlive)
-                                // Process-alive alone is NOT reuse health:
-                                // verify the tracked root is the SAME
-                                // process (pid + start time), its session
-                                // bus is alive, and the X server is not
-                                // younger than the session (a restarted X
-                                // orphaned every guest client).
-                                val reuseReason = if (reused) healthyReuseOrReason(ctx, distro, p) else null
-                                if (!reused) synchronized(ownershipLock) { sessionGateLogBase = logBase }
-                                // Gate bypass also requires the gate PASSED before:
-                                // identity+bus+X health without a registered shell
-                                // would forward to an empty X display.
-                                val bypassGate = reused && reuseReason == null && sessionGatePassed
-                                gateLog(if (bypassGate) "reusing HEALTHY session (identity+bus+X verified, gate previously passed)"
-                                    else if (reused && reuseReason == null) "reusing STILL-STARTING session (identity+bus+X healthy, gate not yet passed) - re-gating the same launch window"
-                                    else if (reused) "reuse UNHEALTHY: " + reuseReason + " - fail closed, session NOT touched"
-                                    else "fresh session launch, logBase=" + logBase)
-                                // Readiness gate (P0/P2): only a shell that
-                                // REGISTERED on THIS launch's session bus
-                                // passes - "gnome-session alive" and the bare
-                                // shell fallback line are not success (run
-                                // 40864638283: fallback marker passed, shell
-                                // stalled, black screen). Bus address must
-                                // match this launch's own bus line so an owner
-                                // from a stale session can never satisfy it.
-                                // A HEALTHY reused session writes no new log
-                                // lines, so the freshness-gated poll below
-                                // could only burn the full budget and then
-                                // false-fail - and retainFailedSessionOwnership
-                                // would then mark a WORKING desktop failed,
-                                // letting the next "Try again" kill it
-                                // (POCO 2026-10-31 18:20: desktop open and
-                                // usable, then "did not start / guest-gnome.log
-                                // has no new output" on returning to the app).
-                                // A HEALTHY reused session passed its own gate
-                                // at launch: bring it forward without re-gating.
-                                // An unhealthy one never bypasses.
-                                // An unhealthy reuse is diagnosed, never
-                                // force-restarted: the poll could never
-                                // pass (no new log lines), so fail closed
-                                // NOW with the reason, retain ownership for
-                                // Stop session, and touch nothing.
-                                // A STILL-STARTING reused session is
-                                // RE-GATED over its original launch window
-                                // (never torn down, never force-restarted):
-                                // the own-bus marker written since the
-                                // first attempt passes instantly.
-                                val marker = when {
-                                    bypassGate -> "reused healthy session (identity+bus+X verified)"
-                                    reused && reuseReason != null -> null
-                                    reused -> awaitShellRegistered(p, gnomeLog, sessionGateLogBase, 210_000)
-                                    else -> awaitShellRegistered(p, gnomeLog, logBase, 210_000)
+                            if (mode == DesktopMode.MOBILE) {
+                                // MOBILE seam (custom touch session) on the
+                                // same Ubuntu rootfs. v1: no reuse machinery
+                                // - provision (independent package set),
+                                // launch, bounded alive grace. Restricted
+                                // state writes: sessionProcess /
+                                // sessionRootIdent / mobile_desktop_active
+                                // ONLY - never the GNOME gate/bus/pref world.
+                                if (!GuestMobileShell.hasMobileShell(rootfs)) {
+                                    stage("Installing mobile desktop packages")
+                                    val add = GuestMobileShell.provisionMobileShell(ctx, rootfs)
+                                    Log.i(TAG, "mobile shell provision exit=" + add.exitCode)
+                                    if (add.exitCode != 0) failure =
+                                        "Mobile desktop package install failed (exit " + add.exitCode + ")\n" + (add.stdout + add.stderr).takeLast(1200)
                                 }
-                                // A registration line with an already-DEAD
-                                // session root is never READY: log evidence
-                                // alone does not make a live desktop.
-                                val gatePassed = marker != null && (bypassGate || p.isAlive)
-                                gateLog(if (gatePassed) "gate PASS: " + (marker ?: "").take(120) else "gate TIMEOUT/fail after budget, process " + (if (p.isAlive) "alive" else "exited"))
-                                if (gatePassed && marker != null) {
-                                    Log.i(TAG, "GNOME session evidence: " + marker)
-                                    ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
-                                        .edit().putBoolean("ubuntu_desktop_active", true).apply()
-                                    launched = true
-                                    // A fallback-shell marker is DEGRADED success, never full
-                                    // GNOME: recorded distinctly, never silently reported as a
-                                    // healthy session (product readiness keeps the two apart).
-                                    val degraded = marker.contains("fallback shell registered")
-                                    ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
-                                        .edit().putBoolean("ubuntu_desktop_degraded", degraded).apply()
-                                    if (degraded) Log.w(TAG, "DEGRADED desktop: bare-shell fallback registered - full GNOME session unavailable this launch")
-                                    synchronized(ownershipLock) {
-                                        retainedSessionFailed = false
-                                        retainedSessionStarting = false
-                                        sessionGatePassed = true
-                                        lateWatchFor = null
-                                        sessionProcess = p
-                                        ownershipGeneration++
-                                        sessionRootIdent = pidOf(p)?.let { identityOf(it) }
-                                        // Bind THIS world's bus from the ORIGINATING launch window:
-                                        // a reused session launched nothing in this call, so its
-                                        // window is sessionGateLogBase (the base the gate, retain
-                                        // and watch paths already use); a fresh launch uses its
-                                        // own logBase. A null capture on reuse is UNCERTAIN,
-                                        // never contradictory - the merge keeps a still-valid
-                                        // retained identity instead of clobbering it.
-                                        mergeLaunchConfirmBusIdent(ctx, if (reused) sessionGateLogBase else logBase, reused)
+                                if (failure == null && GuestMobileShell.hasMobileShell(rootfs)) {
+                                    stage("Launching mobile session")
+                                    val p = GuestMobileShell.launchMobileSession(ctx, rootfs)
+                                    // Bounded alive grace (same shape as the
+                                    // APK branch): a dead exec/proot/script
+                                    // fail-closed exit surfaces inside it.
+                                    var grace = 0
+                                    while (grace < 15 && p.isAlive) { Thread.sleep(1_000); grace++ }
+                                    launched = p.isAlive
+                                    if (launched) {
+                                        ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
+                                            .edit().putBoolean("mobile_desktop_active", true).apply()
+                                        synchronized(ownershipLock) {
+                                            sessionProcess = p
+                                            sessionRootIdent = pidOf(p)?.let { identityOf(it) }
+                                            ownershipGeneration++
+                                        }
                                     }
-                                } else {
-                                    val gateBase = if (reused) sessionGateLogBase else logBase
-                                    if (reused && reuseReason != null) {
-                                        failure = "The desktop session on this device is not healthy (" + reuseReason +
-                                            "). Nothing was killed - Stop session tears it down cleanly."
-                                        // Retain ownership so Stop session tears it
-                                        // down by identity.
-                                        retainFailedSessionOwnership(ctx, p, gateBase)
+                                    if (!launched) failure =
+                                        "Mobile session died within " + grace + "s of launch (evidence: mobile-desktop.log)"
+                                } else if (failure == null) {
+                                    failure = "Mobile desktop unavailable after package install; session would be empty"
+                                }
+                            } else {
+                                // Ubuntu: GNOME (B). Feasibility on our lorie
+                                // stack is unproven; guest-gnome.log is the
+                                // evidence trail.
+                                if (!GuestUbuntu.hasGnome(rootfs)) {
+                                    Log.i(TAG, "GNOME not provisioned; apt install gnome-shell et al")
+                                    val add = GuestUbuntu.provisionGnome(ctx, rootfs) { line -> stage(line) }
+                                    Log.i(TAG, "gnome provision exit=" + add.exitCode)
+                                    if (add.exitCode != 0) failure =
+                                        "GNOME package install failed (exit " + add.exitCode + ")\n" + (add.stdout + add.stderr).takeLast(1200)
+                                }
+                                if (failure == null && GuestUbuntu.hasGnome(rootfs)) {
+                                    stage("Launching GNOME session")
+                                    // Gate on SESSION EVIDENCE, not the spawn
+                                    // event: the session script logs its alive
+                                    // marker ~20s in; only log lines written
+                                    // after THIS launch count (the log is
+                                    // append-only across retries).
+                                    val gnomeLog = File(ctx.filesDir, "guest-gnome.log")
+                                    // CHAR base from ONE snapshot (never File.length()
+                                    // BYTES): every consumer slices readText() snapshots
+                                    // in char units (logWindow). A byte base mis-slices
+                                    // or crashes once the log holds multi-byte UTF-8
+                                    // (mutter warnings carry curly quotes; crash class
+                                    // run 41283803508).
+                                    val logBase = if (gnomeLog.isFile) gnomeLog.readText().length.toLong() else 0L
+                                    val wasAlive = gnomeSessionActive(distro)
+                                    val p = launchOrReuseGnomeSession(ctx, distro, rootfs)
+                                    val reused = isReusedSession(distro, p, wasAlive)
+                                    // Process-alive alone is NOT reuse health:
+                                    // verify the tracked root is the SAME
+                                    // process (pid + start time), its session
+                                    // bus is alive, and the X server is not
+                                    // younger than the session (a restarted X
+                                    // orphaned every guest client).
+                                    val reuseReason = if (reused) healthyReuseOrReason(ctx, distro, p) else null
+                                    if (!reused) synchronized(ownershipLock) { sessionGateLogBase = logBase }
+                                    // Gate bypass also requires the gate PASSED before:
+                                    // identity+bus+X health without a registered shell
+                                    // would forward to an empty X display.
+                                    val bypassGate = reused && reuseReason == null && sessionGatePassed
+                                    gateLog(if (bypassGate) "reusing HEALTHY session (identity+bus+X verified, gate previously passed)"
+                                        else if (reused && reuseReason == null) "reusing STILL-STARTING session (identity+bus+X healthy, gate not yet passed) - re-gating the same launch window"
+                                        else if (reused) "reuse UNHEALTHY: " + reuseReason + " - fail closed, session NOT touched"
+                                        else "fresh session launch, logBase=" + logBase)
+                                    // Readiness gate (P0/P2): only a shell that
+                                    // REGISTERED on THIS launch's session bus
+                                    // passes - "gnome-session alive" and the bare
+                                    // shell fallback line are not success (run
+                                    // 40864638283: fallback marker passed, shell
+                                    // stalled, black screen). Bus address must
+                                    // match this launch's own bus line so an owner
+                                    // from a stale session can never satisfy it.
+                                    // A HEALTHY reused session writes no new log
+                                    // lines, so the freshness-gated poll below
+                                    // could only burn the full budget and then
+                                    // false-fail - and retainFailedSessionOwnership
+                                    // would then mark a WORKING desktop failed,
+                                    // letting the next "Try again" kill it
+                                    // (POCO 2026-10-31 18:20: desktop open and
+                                    // usable, then "did not start / guest-gnome.log
+                                    // has no new output" on returning to the app).
+                                    // A HEALTHY reused session passed its own gate
+                                    // at launch: bring it forward without re-gating.
+                                    // An unhealthy one never bypasses.
+                                    // An unhealthy reuse is diagnosed, never
+                                    // force-restarted: the poll could never
+                                    // pass (no new log lines), so fail closed
+                                    // NOW with the reason, retain ownership for
+                                    // Stop session, and touch nothing.
+                                    // A STILL-STARTING reused session is
+                                    // RE-GATED over its original launch window
+                                    // (never torn down, never force-restarted):
+                                    // the own-bus marker written since the
+                                    // first attempt passes instantly.
+                                    val marker = when {
+                                        bypassGate -> "reused healthy session (identity+bus+X verified)"
+                                        reused && reuseReason != null -> null
+                                        reused -> awaitShellRegistered(p, gnomeLog, sessionGateLogBase, 210_000)
+                                        else -> awaitShellRegistered(p, gnomeLog, logBase, 210_000)
+                                    }
+                                    // A registration line with an already-DEAD
+                                    // session root is never READY: log evidence
+                                    // alone does not make a live desktop.
+                                    val gatePassed = marker != null && (bypassGate || p.isAlive)
+                                    gateLog(if (gatePassed) "gate PASS: " + (marker ?: "").take(120) else "gate TIMEOUT/fail after budget, process " + (if (p.isAlive) "alive" else "exited"))
+                                    if (gatePassed && marker != null) {
+                                        Log.i(TAG, "GNOME session evidence: " + marker)
+                                        ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
+                                            .edit().putBoolean("ubuntu_desktop_active", true).apply()
+                                        launched = true
+                                        // A fallback-shell marker is DEGRADED success, never full
+                                        // GNOME: recorded distinctly, never silently reported as a
+                                        // healthy session (product readiness keeps the two apart).
+                                        val degraded = marker.contains("fallback shell registered")
+                                        ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
+                                            .edit().putBoolean("ubuntu_desktop_degraded", degraded).apply()
+                                        if (degraded) Log.w(TAG, "DEGRADED desktop: bare-shell fallback registered - full GNOME session unavailable this launch")
+                                        synchronized(ownershipLock) {
+                                            retainedSessionFailed = false
+                                            retainedSessionStarting = false
+                                            sessionGatePassed = true
+                                            lateWatchFor = null
+                                            sessionProcess = p
+                                            ownershipGeneration++
+                                            sessionRootIdent = pidOf(p)?.let { identityOf(it) }
+                                            // Bind THIS world's bus from the ORIGINATING launch window:
+                                            // a reused session launched nothing in this call, so its
+                                            // window is sessionGateLogBase (the base the gate, retain
+                                            // and watch paths already use); a fresh launch uses its
+                                            // own logBase. A null capture on reuse is UNCERTAIN,
+                                            // never contradictory - the merge keeps a still-valid
+                                            // retained identity instead of clobbering it.
+                                            mergeLaunchConfirmBusIdent(ctx, if (reused) sessionGateLogBase else logBase, reused)
+                                        }
                                     } else {
-                                        val gateSnap = if (gnomeLog.isFile) gnomeLog.readText() else ""
-                                        val tail = if (gateSnap.length > gateBase)
-                                            gateSnap.substring(gateBase.toInt()).takeLast(1500)
-                                            else "(guest-gnome.log has no new output)"
-                                        when (classifyGateNull(p, gnomeLog, gateBase)) {
-                                            GateNullClass.STILL_STARTING -> {
-                                                // Readiness UNKNOWN, not failed:
-                                                // retain for re-gate + bounded late
-                                                // watch; nothing killed, retry never
-                                                // relaunches over this session.
-                                                retainStartingSessionOwnership(ctx, p, gateBase)
-                                                startLateReadinessWatch(ctx, p, gnomeLog, gateBase)
-                                                failure = "Ubuntu desktop is STILL STARTING: no shell on the session bus after 210s, " +
-                                                    "but the session process is alive and readiness is unknown (NOT a failure). Nothing was killed. " +
-                                                    "The app keeps watching for up to 4 more minutes and marks the session ready if the shell registers late. " +
-                                                    "'Try again' keeps waiting on THIS session (no restart); 'Stop session' ends it. Log tail:\n" + tail
-                                            }
-                                            else -> {
-                                                failure = "GNOME shell did not register on its session bus within 210s incl. fallback window (process " +
-                                                    (if (p.isAlive) "still running" else "exited") + "). Log tail:\n" + tail
-                                                // Retain ownership of the still-running session so
-                                                // Stop session can tear it down by identity.
-                                                retainFailedSessionOwnership(ctx, p, gateBase)
+                                        val gateBase = if (reused) sessionGateLogBase else logBase
+                                        if (reused && reuseReason != null) {
+                                            failure = "The desktop session on this device is not healthy (" + reuseReason +
+                                                "). Nothing was killed - Stop session tears it down cleanly."
+                                            // Retain ownership so Stop session tears it
+                                            // down by identity.
+                                            retainFailedSessionOwnership(ctx, p, gateBase)
+                                        } else {
+                                            val gateSnap = if (gnomeLog.isFile) gnomeLog.readText() else ""
+                                            val tail = if (gateSnap.length > gateBase)
+                                                gateSnap.substring(gateBase.toInt()).takeLast(1500)
+                                                else "(guest-gnome.log has no new output)"
+                                            when (classifyGateNull(p, gnomeLog, gateBase)) {
+                                                GateNullClass.STILL_STARTING -> {
+                                                    // Readiness UNKNOWN, not failed:
+                                                    // retain for re-gate + bounded late
+                                                    // watch; nothing killed, retry never
+                                                    // relaunches over this session.
+                                                    retainStartingSessionOwnership(ctx, p, gateBase)
+                                                    startLateReadinessWatch(ctx, p, gnomeLog, gateBase)
+                                                    failure = "Ubuntu desktop is STILL STARTING: no shell on the session bus after 210s, " +
+                                                        "but the session process is alive and readiness is unknown (NOT a failure). Nothing was killed. " +
+                                                        "The app keeps watching for up to 4 more minutes and marks the session ready if the shell registers late. " +
+                                                        "'Try again' keeps waiting on THIS session (no restart); 'Stop session' ends it. Log tail:\n" + tail
+                                                }
+                                                else -> {
+                                                    failure = "GNOME shell did not register on its session bus within 210s incl. fallback window (process " +
+                                                        (if (p.isAlive) "still running" else "exited") + "). Log tail:\n" + tail
+                                                    // Retain ownership of the still-running session so
+                                                    // Stop session can tear it down by identity.
+                                                    retainFailedSessionOwnership(ctx, p, gateBase)
+                                                }
                                             }
                                         }
                                     }
-                                }
-                            } else if (failure == null) {
-                                failure = "GNOME unavailable after package install; desktop would be empty"
+                                } else if (failure == null) {
+                                    failure = "GNOME unavailable after package install; desktop would be empty"
+    
                             }
+                        }
                         }
                     }
                 } else {
@@ -1503,7 +1566,8 @@ object XServer {
             if (xs != null) { try { xs.destroy() } catch (t: Throwable) { }; process = null }
             ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
                 .edit().putBoolean("ubuntu_desktop_active", false)
-                .putBoolean("ubuntu_desktop_degraded", false).apply()
+                .putBoolean("ubuntu_desktop_degraded", false)
+                .putBoolean("mobile_desktop_active", false).apply()
             // The stopped world's in-flight attempt is invalidated HERE,
             // only after the epoch check passed (a newer attempt surviving
             // the guard keeps its seq, routing and preparing): its late

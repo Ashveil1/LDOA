@@ -25,6 +25,7 @@ import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import kotlin.concurrent.thread
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -68,6 +69,10 @@ class SpikeViewModel : ViewModel() {
     var termRunning by mutableStateOf(false)
     /** Non-null while the first-start large-download warning is shown. */
     var pendingDesktop by mutableStateOf<Distro?>(null)
+    /** Desktop mode of the pending consent request (mobile seam). */
+    var pendingDesktopMode by mutableStateOf(XServer.DesktopMode.GNOME)
+    /** Desktop mode of the most recent request - retry/resume reuse it. */
+    var lastDesktopMode by mutableStateOf(XServer.DesktopMode.GNOME)
     /** True while XServer.openDesktop is provisioning/launching. */
     var desktopPrep by mutableStateOf(false)
     /** Set by the activity: opens the desktop for a distro (XServer). */
@@ -203,27 +208,34 @@ class MainActivity : ComponentActivity() {
                     ActivityResultContracts.RequestPermission()) { granted ->
                     vm.log += "[perm] POST_NOTIFICATIONS " + (if (granted) "granted" else "denied - session runs without notification") + "\n"
                 }
-                val requestDesktop: (Distro) -> Unit = { d ->
+                val requestDesktopMode: (Distro, XServer.DesktopMode) -> Unit = { d, mode ->
                     if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
                             applicationContext, Manifest.permission.POST_NOTIFICATIONS
                         ) != PackageManager.PERMISSION_GRANTED) {
                         notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS)
                     }
-                    vm.log += "[tap] open-desktop " + d.id + "\n"
-                    val needsProvision = d.pkgMgr == PkgMgr.APT &&
-                        !GuestUbuntu.hasGnome(DistroInstaller(applicationContext).rootfsDir(d))
+                    vm.log += "[tap] open-desktop " + d.id + " mode=" + mode + "\n"
+                    vm.lastDesktopMode = mode
+                    val rootfs = DistroInstaller(applicationContext).rootfsDir(d)
+                    val needsProvision = d.pkgMgr == PkgMgr.APT && when (mode) {
+                        XServer.DesktopMode.MOBILE -> !GuestMobileShell.hasMobileShell(rootfs)
+                        XServer.DesktopMode.GNOME -> !GuestUbuntu.hasGnome(rootfs)
+                    }
                     vm.log += "[..] desktop route: " + (if (needsProvision) "first-start consent" else "direct start") + "\n"
                     if (needsProvision) {
                         vm.pendingDesktop = d
+                        vm.pendingDesktopMode = mode
                     } else {
                         vm.desktopPrep = true
                         vm.desktopError = null
                         vm.desktopStage = ""
                         XServer.openDesktop(this@MainActivity, d,
                             onStage = stageSink,
-                            onError = { m -> runOnUiThread { vm.desktopPrep = false; vm.desktopError = m } })
+                            onError = { m -> runOnUiThread { vm.desktopPrep = false; vm.desktopError = m } },
+                            mode = mode)
                     }
                 }
+                val requestDesktop: (Distro) -> Unit = { d -> requestDesktopMode(d, XServer.DesktopMode.GNOME) }
                 // Post-install auto-enter goes through the same first-start
                 // download consent as the manual desktop button.
                 vm.autoDesktop = { d -> requestDesktop(d) }
@@ -236,19 +248,26 @@ class MainActivity : ComponentActivity() {
                     // Cold-start re-entry: the user left with a live Ubuntu
                     // desktop - reopen it without making them tap again.
                     val prefs = getSharedPreferences("plinux_desktop", MODE_PRIVATE)
+                    // Exactly ONE active marker resumes its mode; both or
+                    // neither = ambiguous, fail closed to the picker (never
+                    // guess a mode).
+                    val ubuntuActive = prefs.getBoolean("ubuntu_desktop_active", false)
+                    val mobileActive = prefs.getBoolean("mobile_desktop_active", false)
                     if (!vm.coldAutoEntered && DESKTOP_PREVIEW_ENABLED &&
-                        prefs.getBoolean("ubuntu_desktop_active", false) &&
+                        (ubuntuActive != mobileActive) &&
                         vm.stateFor(Distros.UBUNTU) == InstallState.Installed) {
                         vm.coldAutoEntered = true
-                        // GNOME is already provisioned on this path (the
-                        // marker is only set once it is), so no download
-                        // consent is needed here.
+                        val reMode = if (mobileActive) XServer.DesktopMode.MOBILE else XServer.DesktopMode.GNOME
+                        vm.lastDesktopMode = reMode
+                        // The marker is only set once its session is
+                        // provisioned, so no download consent is needed here.
                         vm.desktopPrep = true
                         vm.desktopError = null
                         vm.desktopStage = ""
                         XServer.openDesktop(this@MainActivity, Distros.UBUNTU,
                             onStage = stageSink,
-                            onError = { m -> runOnUiThread { vm.desktopPrep = false; vm.desktopError = m } })
+                            onError = { m -> runOnUiThread { vm.desktopPrep = false; vm.desktopError = m } },
+                            mode = reMode)
                     }
                 }
                 Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(BgTop, BgBottom)))) {
@@ -263,7 +282,8 @@ class MainActivity : ComponentActivity() {
                                 vm.desktopStage = ""
                                 XServer.openDesktop(this@MainActivity, pd,
                                     onStage = stageSink,
-                                    onError = { m -> runOnUiThread { vm.desktopPrep = false; vm.desktopError = m } })
+                                    onError = { m -> runOnUiThread { vm.desktopPrep = false; vm.desktopError = m } },
+                                    mode = vm.pendingDesktopMode)
                             }) { Text("Download and start") } },
                             dismissButton = { TextButton(onClick = { vm.pendingDesktop = null }) { Text("Not now") } },
                             title = { Text("Ubuntu desktop - first start") },
@@ -275,7 +295,7 @@ class MainActivity : ComponentActivity() {
                             confirmButton = { TextButton(onClick = {
                                 vm.log += "[tap] desktop error dialog: try again\n"
                                 vm.desktopError = null
-                                requestDesktop(Distros.UBUNTU)
+                                requestDesktopMode(Distros.UBUNTU, vm.lastDesktopMode)
                             }) { Text("Try again") } },
                             dismissButton = { Row {
                                 // Full evidence export as a shareable file:
@@ -351,7 +371,7 @@ class MainActivity : ComponentActivity() {
                     } else when (vm.screen) {
                         Screen.FIRST_RUN -> FirstRunScreen(vm,
                             onInstall = { vm.install(this@MainActivity, Distros.UBUNTU) },
-                            onResumeDesktop = { requestDesktop(Distros.UBUNTU) },
+                            onResumeDesktop = { requestDesktopMode(Distros.UBUNTU, vm.lastDesktopMode) },
                             onShowPicker = { vm.screen = Screen.PICKER })
                         Screen.PICKER -> PickerScreen(distros, vm,
                             onPrimary = { d ->
@@ -360,7 +380,7 @@ class MainActivity : ComponentActivity() {
                                     else -> vm.install(this@MainActivity, d)
                                 }
                             },
-                            onDesktop = { d -> requestDesktop(d) },
+                            onDesktop = { d, mode -> requestDesktopMode(d, mode) },
                             onExportDiagnostics = { shareDiagnostics() })
                         Screen.TERMINAL -> TerminalScreen(vm, onBack = { vm.closeTerminal() })
                     }
@@ -432,7 +452,7 @@ private fun FirstRunScreen(vm: SpikeViewModel, onInstall: () -> Unit, onResumeDe
 }
 
 @Composable
-private fun PickerScreen(distros: List<Distro>, vm: SpikeViewModel, onPrimary: (Distro) -> Unit, onDesktop: (Distro) -> Unit, onExportDiagnostics: () -> Unit) {
+private fun PickerScreen(distros: List<Distro>, vm: SpikeViewModel, onPrimary: (Distro) -> Unit, onDesktop: (Distro, XServer.DesktopMode) -> Unit, onExportDiagnostics: () -> Unit) {
     Column(Modifier.fillMaxSize().statusBarsPadding().padding(20.dp)) {
         Text("Phone Linux", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
         Text("prototype - terminal build", color = TextDim, fontSize = 13.sp)
@@ -447,13 +467,24 @@ private fun PickerScreen(distros: List<Distro>, vm: SpikeViewModel, onPrimary: (
                 (d.pkgMgr == PkgMgr.APK || DESKTOP_PREVIEW_ENABLED)) {
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(
-                    onClick = { onDesktop(d) },
+                    onClick = { onDesktop(d, XServer.DesktopMode.GNOME) },
                     modifier = Modifier.fillMaxWidth().semantics { contentDescription = "open-desktop-" + d.id }
                 ) { Text("Open " + d.displayName + " desktop (experimental)", color = Accent) }
+            }
+            // Mobile seam: prototype entry, Ubuntu only, behind the same
+            // preview flag.
+            if (d.pkgMgr == PkgMgr.APT && DESKTOP_PREVIEW_ENABLED &&
+                vm.stateFor(d) == InstallState.Installed) {
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = { onDesktop(d, XServer.DesktopMode.MOBILE) },
+                    modifier = Modifier.fillMaxWidth().semantics { contentDescription = "open-mobile-desktop" }
+                ) { Text("Open mobile desktop (prototype)", color = Accent) }
             }
             Spacer(Modifier.height(12.dp))
         }
         GestureToggles()
+        if (DESKTOP_PREVIEW_ENABLED) MobileModeSettingsCard(LocalContext.current)
         Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Output", color = TextDim, fontSize = 13.sp, modifier = Modifier.weight(1f))
