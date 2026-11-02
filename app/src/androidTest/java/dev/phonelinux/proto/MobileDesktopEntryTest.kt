@@ -328,7 +328,7 @@ class MobileDesktopEntryTest {
             // inject into the focused guest (run 41476451666: arrow-key
             // escapes echoed into xterm). Scroll ONLY on the verified picker
             // component; anything else is evidence + fail closed.
-            val comp = focusedComponent()
+            val comp = stableFocusedComponent(label)
             val lorie = lorieViewPresent()
             if (classifyPickerSurface(comp, lorie) != PickerSurface.PICKER_COMPONENT) {
                 captureFailureEvidence(label)
@@ -355,7 +355,7 @@ class MobileDesktopEntryTest {
         // FRESH find: a cached UiObject2's bounds can belong to a surface
         // that changed underneath it - clicking stale bounds on the X
         // surface injects into the live session.
-        val preComp = focusedComponent()
+        val preComp = stableFocusedComponent(label)
         val preLorie = lorieViewPresent()
         if (classifyPickerSurface(preComp, preLorie) != PickerSurface.PICKER_COMPONENT) {
             captureFailureEvidence(label)
@@ -450,15 +450,41 @@ class MobileDesktopEntryTest {
      *  unparseable display state is FALSE, never a pass. Mirrors the
      *  tri-state parser in VirglGnomeSessionTest (full dump filtered
      *  in-process: executeShellCommand has no shell). */
-    /** EXACT normalized "pkg/Class" token from mCurrentFocus; null when
-     *  dumpsys fails, no line, or the token is unparseable - callers treat
-     *  null as UNVERIFIED (fail closed), and classification is exact-token
-     *  allowlist only, never substring matching. */
+    /** EXACT normalized "pkg/Class" token of the INTERACTION display's
+     *  mCurrentFocus; null when dumpsys fails, the section is absent, or the
+     *  token is unparseable - callers treat null as UNVERIFIED (fail closed),
+     *  and classification is exact-token allowlist only, never substring
+     *  matching. Focus is PER DISPLAY (AOSP DisplayContent.mCurrentFocus): a
+     *  dump can carry several mCurrentFocus lines from different displays,
+     *  so the raw dump is parsed per-section (interactionFocusToken) instead
+     *  of trusting line order (run 41490601274 misclassified a transition
+     *  dump that carried launcher + dev MainActivity). */
     private fun focusedComponent(): String? {
         val raw = try { device.executeShellCommand("dumpsys window") } catch (t: Throwable) { return null }
-        val line = raw.lineSequence().firstOrNull { it.contains("mCurrentFocus") } ?: return null
-        val token = line.substringAfter("u0 ", "").substringBefore("}").trim()
-        return token.takeIf { it.matches(Regex("[A-Za-z0-9_.]+/[A-Za-z0-9_.$]+")) }
+        return interactionFocusToken(raw)
+    }
+
+    /** Bounded stability poll for the interaction display's focus token:
+     *  the SAME exact token on two consecutive reads (~400ms apart) within
+     *  the budget. A transition dump is transitional/UNKNOWN, never a
+     *  verdict - a null (unparseable/absent) read keeps polling and never
+     *  confirms. Returns null on budget exhaustion; callers fail closed
+     *  with the last token + full per-display map logged as evidence. */
+    private fun stableFocusedComponent(site: String, budgetMs: Long = 3_000): String? {
+        val deadline = System.currentTimeMillis() + budgetMs
+        var last: String? = null
+        while (true) {
+            val token = focusedComponent()
+            if (token != null && token == last) return token
+            last = token
+            if (System.currentTimeMillis() >= deadline) break
+            Thread.sleep(400)
+        }
+        val raw = try { device.executeShellCommand("dumpsys window") } catch (t: Throwable) { "" }
+        Log.i(TAG, "m1-nav: no stable interaction-display focus token at '" + site +
+            "' within " + budgetMs + "ms (last=" + last +
+            ", perDisplay=" + parseFocusedTokensByDisplay(raw) + ")")
+        return null
     }
 
     /** ActivityRecord tokens of the dev MainActivity instances on the device
@@ -547,7 +573,7 @@ class MobileDesktopEntryTest {
         var attempt = 0
         while (true) {
             // Verify FIRST and after EVERY action, including the last.
-            comp = focusedComponent()
+            comp = stableFocusedComponent(site)
             lorie = lorieViewPresent()
             when (classifyPickerSurface(comp, lorie)) {
                 PickerSurface.PICKER_COMPONENT -> {
@@ -635,8 +661,34 @@ class MobileDesktopEntryTest {
         }
         fun mentions(l: String) =
             l.contains("com.termux.x11.MainActivity") || l.contains("com.termux.x11/.MainActivity")
-        val cur = raw.lineSequence().filter { it.contains("mCurrentFocus") }.toList()
-        val app = raw.lineSequence().filter { it.contains("mFocusedApp") }.toList()
+        // Focus is PER DISPLAY (AOSP DisplayContent.mCurrentFocus, dumped
+        // once per "Display: mDisplayId=N" section): scope to the
+        // INTERACTION display's section - requiring EVERY display's focus
+        // line to name Xlorie would fail on any multi-display device, and
+        // line order is never authority. Legacy header-less dumps keep the
+        // previous all-lines rule.
+        val hasHeaders = raw.lineSequence().any { it.trim().startsWith("Display: mDisplayId=") }
+        val cur: List<String>
+        val app: List<String>
+        if (hasHeaders) {
+            var inDisplay0 = false
+            val c = ArrayList<String>()
+            val a = ArrayList<String>()
+            for (line in raw.lineSequence()) {
+                val t = line.trim()
+                if (t.startsWith("Display: mDisplayId=")) {
+                    inDisplay0 = t.removePrefix("Display: mDisplayId=")
+                        .substringBefore(" ").substringBefore(")") == "0"
+                    continue
+                }
+                if (inDisplay0 && t.startsWith("mCurrentFocus=")) c.add(t)
+                if (inDisplay0 && t.startsWith("mFocusedApp=")) a.add(t)
+            }
+            cur = c; app = a
+        } else {
+            cur = raw.lineSequence().filter { it.contains("mCurrentFocus") }.toList()
+            app = raw.lineSequence().filter { it.contains("mFocusedApp") }.toList()
+        }
         val ok = cur.isNotEmpty() && cur.all { mentions(it) } && app.all { mentions(it) }
         val joined = (cur + app).joinToString(" | ").replace('\n', ' ').take(300)
         return (if (joined.isNotEmpty()) joined else raw.replace('\n', ' ').take(300)) to ok

@@ -67,4 +67,56 @@ class PickerSurfaceTest {
     @Test fun `picker ui both markers is contradictory - ambiguous, fail closed`() {
         assertEquals(PickerUiState.AMBIGUOUS, classifyPickerUi(true, true))
     }
+
+    // ---- Per-display focus parse (source: AOSP android14 DisplayContent.dump;
+    // run 41490601274 carried two mCurrentFocus lines from two displays) ----
+
+    private val launcherToken = "com.google.android.apps.nexuslauncher/.NexusLauncherActivity"
+
+    private fun twoDisplayDump(display0: String?, display1: String?): String {
+        fun focusLine(token: String?) =
+            if (token == null) "  mCurrentFocus=null" else "  mCurrentFocus=Window{abc123 u0 " + token + "}"
+        return "Display: mDisplayId=0\n" + focusLine(display0) + "\n" +
+            "  mFocusedApp=AppWindowToken{x u0 whatever}\n" +
+            "Display: mDisplayId=1\n" + focusLine(display1) + "\n"
+    }
+
+    @Test fun `multi-display dump scopes to the interaction display - display 0 wins, display 1 ignored`() {
+        val dump = twoDisplayDump(devComponent, launcherToken)
+        assertEquals(mapOf(0 to devComponent, 1 to launcherToken), parseFocusedTokensByDisplay(dump))
+        assertEquals(devComponent, interactionFocusToken(dump))
+        assertEquals(PickerSurface.PICKER_COMPONENT,
+            classifyPickerSurface(interactionFocusToken(dump), false))
+    }
+
+    @Test fun `run-7 transition shape - launcher on interaction display, app on display 1 - is NOT picker`() {
+        val dump = twoDisplayDump(launcherToken, devShortComponent)
+        assertEquals(launcherToken, interactionFocusToken(dump))
+        assertEquals(PickerSurface.WRONG_SURFACE,
+            classifyPickerSurface(interactionFocusToken(dump), false))
+    }
+
+    @Test fun `interaction display section missing or unfocused is unknown - never a neighbor display`() {
+        assertEquals(null, interactionFocusToken(twoDisplayDump(null, devComponent)))
+        val onlyDisplay1 = "Display: mDisplayId=1\n  mCurrentFocus=Window{abc123 u0 " + devComponent + "}\n"
+        assertEquals(null, interactionFocusToken(onlyDisplay1))
+    }
+
+    @Test fun `legacy headerless dump - exactly one distinct token wins, conflicting tokens are unknown`() {
+        val one = "  mCurrentFocus=Window{abc123 u0 " + devComponent + "}\n"
+        assertEquals(devComponent, interactionFocusToken(one))
+        val two = "  mCurrentFocus=Window{abc123 u0 " + launcherToken + "}\n" +
+            "  mCurrentFocus=Window{def456 u0 " + devComponent + "}\n"
+        assertEquals(null, interactionFocusToken(two))
+        val sameTwice = "  mCurrentFocus=Window{abc123 u0 " + devComponent + "}\n" +
+            "  mCurrentFocus=Window{def456 u0 " + devComponent + "}\n"
+        assertEquals(devComponent, interactionFocusToken(sameTwice))
+    }
+
+    @Test fun `malformed focus lines and empty dumps are unknown`() {
+        assertEquals(null, interactionFocusToken(""))
+        assertEquals(null, interactionFocusToken("Display: mDisplayId=0\n  mCurrentFocus=null\n"))
+        assertEquals(null, interactionFocusToken(
+            "Display: mDisplayId=0\n  mCurrentFocus=Window{abc123 no-user-token}\n"))
+    }
 }
