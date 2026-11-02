@@ -342,7 +342,37 @@ class MobileDesktopEntryTest {
                 if (c.isClickable) found.add(c) else stack.add(c)
             }
         }
-        return if (found.size == 1) found[0] else null
+        if (found.size > 1) return null
+        if (found.size == 1) return found[0]
+        // This app's Compose semantics put clickable on the WRAPPER ABOVE the
+        // content-described node (run 41522806092 hierarchy, e.g. show-picker:
+        // View(clickable=true) > View(desc) + TextView + Button). Descendant-only
+        // resolution then rejects a genuinely tappable row. Accept the ancestor
+        // chain ONLY when unambiguous: exactly ONE clickable ancestor up to the
+        // root AND its visible bounds contain the matched node's center - a
+        // contained clickable ancestor IS the row's accessibility click target.
+        // Guards (reviewed): 2+ clickable ancestors, non-containing or empty
+        // bounds, disabled candidate, non-app package, or an incompletely
+        // walked chain (depth cap hit): all fail closed.
+        val center = node.visibleCenter
+        var p = node.parent
+        var candidate: UiObject2? = null
+        var depth = 0
+        while (p != null && depth < 12) {
+            if (p.isClickable) {
+                if (candidate != null) return null
+                val vb = p.visibleBounds
+                if (vb.width() <= 0 || vb.height() <= 0) return null
+                if (!vb.contains(center.x, center.y)) return null
+                if (!p.isEnabled) return null
+                if (p.applicationPackage != ctx.packageName) return null
+                candidate = p
+            }
+            p = p.parent
+            depth++
+        }
+        if (p != null) return null
+        return candidate
     }
 
     /** Shared bounded-scroll tap with readiness + evidence. UiScrollable
@@ -409,8 +439,8 @@ class MobileDesktopEntryTest {
         if (target == null) {
             captureFailureEvidence(label)
             org.junit.Assert.fail("'" + label + "' resolved to no unambiguous clickable node" +
-                " (matched node non-clickable, and not exactly one clickable descendant) -" +
-                " no wrapper-center tap; evidence captured")
+                " (matched node non-clickable, and no single clickable descendant or" +
+                " center-containing clickable ancestor) - no wrapper-center tap; evidence captured")
             return // unreachable (Assert.fail throws); keeps the compiler honest
         }
         try {
