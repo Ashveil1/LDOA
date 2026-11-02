@@ -286,8 +286,10 @@ class MainActivity : ComponentActivity() {
                                     mode = vm.pendingDesktopMode)
                             }) { Text("Download and start") } },
                             dismissButton = { TextButton(onClick = { vm.pendingDesktop = null }) { Text("Not now") } },
-                            title = { Text("Ubuntu desktop - first start") },
-                            text = { Text("The first start downloads the desktop packages - a large download; the exact size is not measured. Use Wi-Fi, not mobile data.\n\nThis can take several minutes. Keep the app open.") })
+                            title = { Text(if (vm.pendingDesktopMode == XServer.DesktopMode.MOBILE) "Ubuntu mobile desktop (prototype) - first start" else "Ubuntu desktop - first start") },
+                            text = { Text(if (vm.pendingDesktopMode == XServer.DesktopMode.MOBILE)
+                                "The first start downloads the mobile desktop packages (a smaller set than the full GNOME desktop; the exact size is not measured). Use Wi-Fi, not mobile data.\n\nKeep the app open until the desktop appears."
+                                else "The first start downloads the desktop packages - a large download; the exact size is not measured. Use Wi-Fi, not mobile data.\n\nThis can take several minutes. Keep the app open.") })
                     }
                     vm.desktopError?.let { err ->
                         AlertDialog(

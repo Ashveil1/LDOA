@@ -40,6 +40,12 @@ object XServer {
      *  after the session died (custom-worker review lesson, Phase A
      *  patch 3/8). */
     @Volatile private var sessionRootIdent: PIdent? = null
+    /** Ownership tag of the tracked session: "apk:<distroId>",
+     *  "apt:GNOME" or "apt:MOBILE". Identity world, never a health flag:
+     *  the cross-desktop refusal needs it while a session is tracked-live
+     *  but its durable marker is not yet written (mid-start). Set at every
+     *  ownership install; cleared by stopDesktopMode. */
+    @Volatile private var sessionOwnerTag: String? = null
     /** Owned-stop intent identity of the CURRENT launch (control nonce,
      *  never logged): written to the guest as a stop intent BEFORE any
      *  teardown signal so a surviving launcher script can tell a planned
@@ -1095,6 +1101,15 @@ object XServer {
      *  (GuestMobileShell) on the same Ubuntu rootfs. */
     enum class DesktopMode { GNOME, MOBILE }
 
+    /** The owner tag of the currently TRACKED session if it is verifiably
+     *  live (process alive AND (starttime, uid) identity still matches the
+     *  launch-time capture - a reused PID never counts), else null. */
+    private fun trackedLiveOwnerTag(): String? = synchronized(ownershipLock) {
+        val sp = sessionProcess; val ri = sessionRootIdent
+        if (sp != null && ri != null && sp.isAlive &&
+            identityOf(ri.pid)?.let { it.start == ri.start && it.uid == ri.uid } == true) sessionOwnerTag else null
+    }
+
     fun openDesktop(activity: Activity, distro: Distro,
                     onStage: (String) -> Unit = {},
                     onError: (String) -> Unit = {},
@@ -1131,16 +1146,19 @@ object XServer {
                 // Mutual exclusion (custom-mobile coexistence contract):
                 // exactly one WM session may own :0. A mode switch is an
                 // explicit Stop of the live session first, never a silent
-                // replacement. Fail closed on the durable marker: a stale
-                // marker costs one Stop tap, a missed one could boot two
-                // WMs onto one display.
+                // replacement. Fail closed on BOTH the durable marker AND
+                // a tracked-live session of a different owner (mid-start,
+                // marker not yet written): a stale marker costs one Stop
+                // tap, a missed one could boot two WMs onto one display.
                 val desktopPrefs = ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
-                val otherModeActive = when (mode) {
+                val otherMarkerActive = when (mode) {
                     DesktopMode.MOBILE -> desktopPrefs.getBoolean("ubuntu_desktop_active", false)
                     DesktopMode.GNOME -> desktopPrefs.getBoolean("mobile_desktop_active", false)
                 }
-                if (otherModeActive) {
-                    gateLog("openDesktop refused: other desktop mode marker active (mode=" + mode + ")")
+                val myOwnerTag = if (distro.pkgMgr == PkgMgr.APK) "apk:" + distro.id else "apt:" + mode.name
+                val liveOwnerTag = trackedLiveOwnerTag()
+                if (EntrySeamGate.refuseForOtherActive(otherMarkerActive, liveOwnerTag, myOwnerTag)) {
+                    gateLog("openDesktop refused: other desktop active (mode=" + mode + " marker=" + otherMarkerActive + " liveOwnerTag=" + liveOwnerTag + ")")
                     finishAttempt(ctx, false, "A desktop is already running - Stop session first, then start the other mode.", mySeq)
                     return@thread
                 }
@@ -1176,6 +1194,7 @@ object XServer {
                                     synchronized(ownershipLock) {
                                         sessionProcess = p
                                         sessionRootIdent = pidOf(p)?.let { identityOf(it) }
+                                        sessionOwnerTag = "apk:" + distro.id
                                         ownershipGeneration++
                                     }
                                 }
@@ -1187,12 +1206,43 @@ object XServer {
                         PkgMgr.APT -> {
                             if (mode == DesktopMode.MOBILE) {
                                 // MOBILE seam (custom touch session) on the
-                                // same Ubuntu rootfs. v1: no reuse machinery
-                                // - provision (independent package set),
-                                // launch, bounded alive grace. Restricted
-                                // state writes: sessionProcess /
-                                // sessionRootIdent / mobile_desktop_active
-                                // ONLY - never the GNOME gate/bus/pref world.
+                                // same Ubuntu rootfs. State writes:
+                                // sessionProcess/sessionRootIdent/
+                                // sessionOwnerTag/mobile_desktop_active
+                                // ONLY - never the GNOME gate/bus/pref
+                                // world.
+                                //
+                                // Same-mode contract (mirrors the GNOME
+                                // parenting model: the guest session is a
+                                // child of the app process and dies with
+                                // it; a reparented-orphan leftover is the
+                                // pre-existing L2 orphan scope, same as
+                                // GNOME): REUSE a tracked-live confirmed
+                                // session (launch nothing, bring the X view
+                                // forward); FAIL CLOSED on a tracked-live
+                                // UNCONFIRMED session (mid-start or an
+                                // attempt that threw - Stop session reaps
+                                // it by identity); CLEAR a stale marker
+                                // with nothing live and start fresh
+                                // (data-preserving: rootfs untouched; Stop
+                                // session remains the manual recovery).
+                                val mobileMarker = desktopPrefs.getBoolean("mobile_desktop_active", false)
+                                when (EntrySeamGate.mobileSameMode(mobileMarker, trackedLiveOwnerTag() == "apt:MOBILE")) {
+                                    EntrySeamGate.MobileSameMode.REUSE -> {
+                                        gateLog("mobile: reusing tracked-live confirmed session (identity verified) - nothing launched")
+                                        launched = true
+                                    }
+                                    EntrySeamGate.MobileSameMode.REFUSE_UNCONFIRMED -> {
+                                        gateLog("mobile: tracked-live UNCONFIRMED session (no active marker) - fail closed; Stop session reaps by identity")
+                                        failure = "A mobile session is already starting or failed mid-start - Stop session first."
+                                    }
+                                    EntrySeamGate.MobileSameMode.CLEAR_STALE_PROCEED -> {
+                                        gateLog("mobile: stale active marker, no tracked-live session (died with the app process) - clearing, starting fresh")
+                                        desktopPrefs.edit().putBoolean("mobile_desktop_active", false).apply()
+                                    }
+                                    EntrySeamGate.MobileSameMode.PROCEED -> { }
+                                }
+                                if (failure == null && !launched) {
                                 if (!GuestMobileShell.hasMobileShell(rootfs)) {
                                     stage("Installing mobile desktop packages")
                                     val add = GuestMobileShell.provisionMobileShell(ctx, rootfs)
@@ -1203,6 +1253,16 @@ object XServer {
                                 if (failure == null && GuestMobileShell.hasMobileShell(rootfs)) {
                                     stage("Launching mobile session")
                                     val p = GuestMobileShell.launchMobileSession(ctx, rootfs)
+                                    // Bind ownership IMMEDIATELY: an
+                                    // exception or death inside the grace
+                                    // below must never orphan the session -
+                                    // Stop session reaps by this identity.
+                                    synchronized(ownershipLock) {
+                                        sessionProcess = p
+                                        sessionRootIdent = pidOf(p)?.let { identityOf(it) }
+                                        sessionOwnerTag = "apt:MOBILE"
+                                        ownershipGeneration++
+                                    }
                                     // Bounded alive grace (same shape as the
                                     // APK branch): a dead exec/proot/script
                                     // fail-closed exit surfaces inside it.
@@ -1212,16 +1272,17 @@ object XServer {
                                     if (launched) {
                                         ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
                                             .edit().putBoolean("mobile_desktop_active", true).apply()
-                                        synchronized(ownershipLock) {
-                                            sessionProcess = p
-                                            sessionRootIdent = pidOf(p)?.let { identityOf(it) }
-                                            ownershipGeneration++
-                                        }
+                                    } else {
+                                        // Keep the bound ownership and flag
+                                        // it FAILED: Stop session (and the
+                                        // next attempt's retained-failed
+                                        // teardown) reaps it by identity.
+                                        synchronized(ownershipLock) { retainedSessionFailed = true }
+                                        failure = "Mobile session died within " + grace + "s of launch (evidence: mobile-desktop.log)"
                                     }
-                                    if (!launched) failure =
-                                        "Mobile session died within " + grace + "s of launch (evidence: mobile-desktop.log)"
                                 } else if (failure == null) {
                                     failure = "Mobile desktop unavailable after package install; session would be empty"
+                                }
                                 }
                             } else {
                                 // Ubuntu: GNOME (B). Feasibility on our lorie
@@ -1327,6 +1388,7 @@ object XServer {
                                             sessionGatePassed = true
                                             lateWatchFor = null
                                             sessionProcess = p
+                                            sessionOwnerTag = "apt:GNOME"
                                             ownershipGeneration++
                                             sessionRootIdent = pidOf(p)?.let { identityOf(it) }
                                             // Bind THIS world's bus from the ORIGINATING launch window:
@@ -1553,6 +1615,7 @@ object XServer {
             }
             sessionProcess = null
             sessionRootIdent = null
+            sessionOwnerTag = null
             sessionBusIdent = null
             currentLaunchId = null
             busIdentGeneration = 0L
@@ -1619,6 +1682,7 @@ object XServer {
             synchronized(ownershipLock) {
                 retainedSessionFailed = true
                 sessionProcess = p
+                sessionOwnerTag = "apt:GNOME"
                 ownershipGeneration++
                 sessionRootIdent = pidOf(p)?.let { identityOf(it) }
                 sessionBusIdent = captureOwnLaunchBusIdent(ctx, logBase).also { found ->
@@ -1650,6 +1714,7 @@ object XServer {
             synchronized(ownershipLock) {
                 retainedSessionStarting = true
                 sessionProcess = p
+                sessionOwnerTag = "apt:GNOME"
                 sessionGateLogBase = logBase
                 ownershipGeneration++
                 sessionRootIdent = pidOf(p)?.let { identityOf(it) }
