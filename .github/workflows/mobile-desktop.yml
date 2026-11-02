@@ -62,4 +62,5 @@ jobs:
             screenshots/
             mobile-desktop.log
             xserver.log
+            app/build/outputs/connected_android_test_additional_output/**
             /tmp/shotlog.txt

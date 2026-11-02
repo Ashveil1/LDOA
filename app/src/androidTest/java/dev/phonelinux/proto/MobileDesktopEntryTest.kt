@@ -1,6 +1,7 @@
 package dev.phonelinux.proto
 
 import android.content.Context
+import android.util.Log
 import android.graphics.Bitmap
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -82,6 +83,24 @@ class MobileDesktopEntryTest {
     @After
     fun tearDown() {
         try { XServer.stopDesktopMode(ctx) } catch (t: Throwable) { }
+        // Preserve guest logs into instrumentation output BEFORE the runner
+        // uninstalls the app (run 41449407107: the lane's post-run run-as
+        // pulls raced the connectedDebugAndroidTest auto-uninstall and got
+        // "unknown package"; additional_test_output is pulled by the runner
+        // even on failed assertions).
+        try {
+            val out = ctx.getExternalMediaDirs().firstOrNull()
+                ?.let { File(it, "additional_test_output") }
+            if (out != null && out.mkdirs() || out?.isDirectory == true) {
+                for (name in listOf("mobile-desktop.log", "xserver.log")) {
+                    val f = File(ctx.filesDir, name)
+                    if (f.isFile) f.copyTo(File(out, name), overwrite = true)
+                }
+                Log.i(TAG, "m1-evidence: guest logs exported to additional_test_output")
+            }
+        } catch (t: Throwable) {
+            Log.i(TAG, "m1-evidence: guest-log export failed (auxiliary): " + t.javaClass.simpleName)
+        }
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         SessionService.stop(ctx)
         XServer.resetOwnershipStateForTest()
@@ -221,6 +240,7 @@ class MobileDesktopEntryTest {
             // 1. Picker entry (bounded scroll), then the mobile start.
             tapByDesc("show-picker")
             tapByDesc("open-mobile-desktop")
+            val openTapAt = System.currentTimeMillis()
             val consent = device.wait(Until.findObject(By.textContains("mobile desktop (prototype)")), 3_000)
             if (consent != null) {
                 Shot.save("m1-intent-mobile-consent")
@@ -234,8 +254,11 @@ class MobileDesktopEntryTest {
                 if (proc != null && proc.isAlive && prefs.getBoolean("mobile_desktop_active", false)) break
                 Thread.sleep(5_000)
             }
+            val liveAt = System.currentTimeMillis()
             assertTrue("mobile session live + marker set within budget",
                 proc != null && proc!!.isAlive && prefs.getBoolean("mobile_desktop_active", false))
+            Log.i(TAG, "m1-stage: session-live marker observed at +" + (liveAt - openTapAt) +
+                "ms after open tap - marker is NOT shell-ready, capture stage follows")
             val rootPid = XServer.sessionRootPidForTest
             assertTrue("tracked root pid captured", rootPid > 0)
             val launchRootStart = procStartTime(rootPid)
@@ -254,6 +277,18 @@ class MobileDesktopEntryTest {
             val bmp = InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
             assertNotNull("post-start screenshot", bmp)
             val distinct: Int = try { distinctSampledColors(bmp!!) } finally { bmp!!.recycle() }
+            // Pixel content is OBSERVATION ONLY: a color count is not desktop
+            // identity (run 41449407107: the approved Phase-A shell rendered
+            // jwm tray + xterm + empty pcmanfm desktop = 13 raw grid colors).
+            // Content qualification is manual, from the saved shots. The only
+            // hard gate retained is the uniform-screen NEGATIVE observation:
+            // a one/two-color screen means nothing drew at all.
+            Log.i(TAG, "m1-observe: capture stage=post-start at +" +
+                (System.currentTimeMillis() - openTapAt) + "ms after open tap (+" +
+                (System.currentTimeMillis() - liveAt) + "ms after marker); 32px-grid distinct=" +
+                distinct + " - observation only, no desktop claim")
+            assertTrue("uniform-screen negative observation: something drew (distinct=$distinct)",
+                distinct > 2)
             val (focusRaw, xlorieFocused) = xlorieFocusState()
             assertTrue("focused window IS the Xlorie display activity" +
                 " (positive component match, no contradiction; raw: $focusRaw)",
@@ -262,7 +297,7 @@ class MobileDesktopEntryTest {
             assertTrue("guest session log exists", log.isNotEmpty())
             assertFalse("guest session log has no FAIL CLOSED marker", log.contains("FAIL CLOSED"))
             assertTrue("non-uniform candidate screen (negative gate only; distinct=$distinct, focus=$focusRaw)", distinct > 32)
-            Shot.save("m1-evidence-desktop-draw")
+            Shot.save("m1-evidence-post-start-screen")
 
             // 2. Repeat open REUSES the tracked session (same handle).
             device.pressBack()
