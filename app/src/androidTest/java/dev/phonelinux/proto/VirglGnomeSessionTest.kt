@@ -1474,7 +1474,7 @@ class VirglGnomeSessionTest {
                                 val preOvStateUnknown = listOf(preOvPpm, preOvHelper).any { pre ->
                                     try {
                                         java.nio.file.Files.readAttributes(pre,
-                                            java.nio.file.BasicFileAttributes::class.java,
+                                            java.nio.file.attribute.BasicFileAttributes::class.java,
                                             java.nio.file.LinkOption.NOFOLLOW_LINKS)
                                         true
                                     } catch (e: java.nio.file.NoSuchFileException) {
@@ -1500,7 +1500,7 @@ class VirglGnomeSessionTest {
                                     java.nio.file.LinkOption.NOFOLLOW_LINKS)
                                 File(rootfs, "tmp/" + ovHelper).setExecutable(true, false)
                                 val ovCopyAttrs = java.nio.file.Files.readAttributes(preOvHelper,
-                                    java.nio.file.BasicFileAttributes::class.java,
+                                    java.nio.file.attribute.BasicFileAttributes::class.java,
                                     java.nio.file.LinkOption.NOFOLLOW_LINKS)
                                 if (!ovCopyAttrs.isRegularFile ||
                                     sha256Hex(File(rootfs, "tmp/" + ovHelper)) != ovSha) {
