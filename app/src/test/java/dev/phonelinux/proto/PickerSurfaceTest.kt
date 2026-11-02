@@ -161,6 +161,52 @@ class PickerSurfaceTest {
             "Display: mDisplayId=0\n  mCurrentFocus=Window{abc123 no-user-token}\n"))
     }
 
+    // ---- Frozen LAST-ANR replay (AOSP saveANRStateLocked: a full
+    // `dumpsys window` after any ANR carries a FROZEN display-contents
+    // replay at the top until its lifetime expires - run 41495139793) ----
+
+    private fun fullDumpWithFrozenAnr(frozenToken: String, liveToken: String?): String =
+        "WINDOW MANAGER LAST ANR (dumpsys window lastanr)\n" +
+        "  ANR time: Nov 2, 2026 5:54:59 PM\n" +
+        "  Application at fault: ActivityRecord{7a97997 u0 com.google.android.apps.nexuslauncher/.NexusLauncherActivity}\n" +
+        "  Reason: Input dispatching timed out\n\n" +
+        "Last ANR continued\n" +
+        "WINDOW MANAGER DISPLAY CONTENTS (dumpsys window displays)\n" +
+        "Display: mDisplayId=0 (organized)\n" + focusLine(frozenToken) + "\n" +
+        "  mFocusedApp=ActivityRecord{7a97997 u0 com.google.android.apps.nexuslauncher/.NexusLauncherActivity t7}\n\n" +
+        "WINDOW MANAGER POLICY STATE (dumpsys window policy)\n" +
+        "    mSafeMode=false\n\n" +
+        "WINDOW MANAGER DISPLAY CONTENTS (dumpsys window displays)\n" +
+        "Display: mDisplayId=0 (organized)\n" + focusLine(liveToken) + "\n" +
+        "  mFocusedApp=ActivityRecord{2f3757a u0 dev.phonelinux.proto/.MainActivity t8}\n\n" +
+        "WINDOW MANAGER TOKENS (dumpsys window tokens)\n"
+
+    @Test fun `frozen last-ANR replay never poisons or outranks the live display section`() {
+        val dump = fullDumpWithFrozenAnr(launcherToken, devComponent)
+        assertEquals(devComponent, interactionFocusToken(dump))
+        assertEquals(PickerSurface.PICKER_COMPONENT,
+            classifyPickerSurface(interactionFocusToken(dump), false))
+    }
+
+    @Test fun `frozen replay with live launcher focus still classifies launcher`() {
+        val dump = fullDumpWithFrozenAnr(devComponent, launcherToken)
+        assertEquals(launcherToken, interactionFocusToken(dump))
+    }
+
+    @Test fun `frozen replay with unfocused live display is unknown`() {
+        assertEquals(null, interactionFocusToken(fullDumpWithFrozenAnr(launcherToken, null)))
+    }
+
+    @Test fun `no-ANR last-anr section does not eat the live dump`() {
+        // Real shape: the no-ANR line is always followed by the live
+        // WINDOW MANAGER DISPLAY CONTENTS section header.
+        val dump = "WINDOW MANAGER LAST ANR (dumpsys window lastanr)\n" +
+            "  <no ANR has occurred since boot>\n\n" +
+            "WINDOW MANAGER DISPLAY CONTENTS (dumpsys window displays)\n" +
+            twoDisplayDump(devComponent, launcherToken)
+        assertEquals(devComponent, interactionFocusToken(dump))
+    }
+
     // ---- Stability poll reducer (pure temporal logic) ----
 
     private val budget = 3_000L

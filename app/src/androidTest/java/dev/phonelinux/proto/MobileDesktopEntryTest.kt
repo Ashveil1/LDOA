@@ -464,7 +464,13 @@ class MobileDesktopEntryTest {
      *  of trusting line order (run 41490601274 misclassified a transition
      *  dump that carried launcher + dev MainActivity). */
     private fun focusedComponent(): String? {
-        val raw = try { device.executeShellCommand("dumpsys window") } catch (t: Throwable) { return null }
+        // `dumpsys window displays` (per-arg dispatch, AOSP WMS.java ~6990)
+        // returns ONLY the live display contents - a full `dumpsys window`
+        // also replays the FROZEN last-ANR display state at the top (run
+        // 41495139793: frozen launcher focus conflicted with the live
+        // picker section forever). interactionFocusToken additionally
+        // strips any frozen replay defensively.
+        val raw = try { device.executeShellCommand("dumpsys window displays") } catch (t: Throwable) { return null }
         return interactionFocusToken(raw)
     }
 
@@ -490,7 +496,7 @@ class MobileDesktopEntryTest {
                     archiveFullFocusDump(site, raw)
                     Log.i(TAG, "m1-nav: no stable interaction-display focus token at '" + site +
                         "' within " + budgetMs + "ms (last=" + last +
-                        ", perDisplay=" + parseFocusedTokensByDisplay(raw) + ")")
+                        ", perDisplay(live)=" + parseFocusedTokensByDisplay(stripFrozenAnrReplay(raw)) + ")")
                     return null
                 }
                 is StabilityOutcome.Pending -> { last = outcome.lastToken; Thread.sleep(400) }
@@ -706,7 +712,10 @@ class MobileDesktopEntryTest {
     }
 
     private fun xlorieFocusState(): Pair<String, Boolean> {
-        val raw = try { device.executeShellCommand("dumpsys window") } catch (t: Throwable) {
+        // Live-only read: a full dump's frozen last-ANR replay would
+        // conflict with the live section forever after any ANR (run
+        // 41495139793).
+        val raw = try { device.executeShellCommand("dumpsys window displays") } catch (t: Throwable) {
             return "focus-dumpsys-failed: ${t.javaClass.simpleName}" to false
         }
         fun mentions(l: String) =

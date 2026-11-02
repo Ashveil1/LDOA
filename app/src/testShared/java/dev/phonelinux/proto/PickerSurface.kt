@@ -88,6 +88,60 @@ internal fun parseFocusedTokensByDisplay(dump: String): Map<Int, String?> {
     return tokens
 }
 
+/** AOSP android14-release WindowManagerService.saveANRStateLocked
+ *  (lines ~6872-6903): when an ANR occurs, WMS freezes a replay - header
+ *  info, the windows list, a "Last ANR continued" marker, and a frozen
+ *  dumpDisplayContents - printed by dumpLastANRLocked under the
+ *  "WINDOW MANAGER LAST ANR (dumpsys window lastanr)" header at the TOP
+ *  of every subsequent full `dumpsys window` until its lifetime expires.
+ *  That frozen block carries its own "Display: mDisplayId=N" sections and
+ *  mCurrentFocus lines FROM THE ANR INSTANT (run 41495139793: frozen
+ *  launcher focus poisoned display 0 forever after one launcher ANR,
+ *  while the LIVE section - the SECOND "WINDOW MANAGER DISPLAY CONTENTS"
+ *  block - already carried the picker). This strips the frozen replay:
+ *  everything from the LAST ANR header through the FIRST following
+ *  DISPLAY CONTENTS block. With no ANR since boot ("<no ANR has occurred
+ *  since boot>") nothing is stripped. Interaction reads also use the
+ *  live-only `dumpsys window displays` (per-arg dispatch, WMS.java ~6990)
+ *  so the frozen replay never reaches this parser in instrumentation;
+ *  stripping keeps FULL-dump input (archival, log maps) correct too. */
+private val WM_SECTION_HEADER = Regex("^WINDOW MANAGER [A-Z ]+\\(dumpsys window [a-z]+\\)")
+private const val LAST_ANR_HEADER = "WINDOW MANAGER LAST ANR"
+private const val DISPLAY_CONTENTS_HEADER = "WINDOW MANAGER DISPLAY CONTENTS"
+
+internal fun stripFrozenAnrReplay(dump: String): String {
+    if (!dump.contains(LAST_ANR_HEADER)) return dump
+    val out = ArrayList<String>()
+    // 0 = live; 1 = LAST ANR preamble (before the "Last ANR continued"
+    // marker); 2 = marker seen, frozen DISPLAY CONTENTS block expected;
+    // 3 = inside the frozen DISPLAY CONTENTS block. The frozen block
+    // exists ONLY after the marker (saveANRStateLocked order) - without
+    // the marker the first DISPLAY CONTENTS after the header is LIVE
+    // (the "<no ANR has occurred since boot>" case).
+    var state = 0
+    for (line in dump.lineSequence()) {
+        val section = WM_SECTION_HEADER.containsMatchIn(line)
+        when (state) {
+            0 -> {
+                if (line.startsWith(LAST_ANR_HEADER)) { state = 1; continue }
+                out.add(line)
+            }
+            1 -> {
+                if (line.trim() == "Last ANR continued") { state = 2; continue }
+                if (section) { state = 0; out.add(line) }
+            }
+            2 -> {
+                if (line.startsWith(DISPLAY_CONTENTS_HEADER)) { state = 3; continue }
+                if (section) { state = 0; out.add(line) }
+            }
+            else -> {
+                if (section) { state = 0; out.add(line) }
+            }
+        }
+    }
+    return out.joinToString("\n")
+}
+
 private fun hasDisplayHeaders(dump: String): Boolean =
     dump.lineSequence().any { DISPLAY_HEADER.find(it) != null }
 
@@ -100,14 +154,15 @@ internal fun interactionFocusToken(
     dump: String,
     displayId: Int = INTERACTION_DISPLAY_ID,
 ): String? {
-    if (hasDisplayHeaders(dump)) {
-        return parseFocusedTokensByDisplay(dump)[displayId]
+    val live = stripFrozenAnrReplay(dump)
+    if (hasDisplayHeaders(live)) {
+        return parseFocusedTokensByDisplay(live)[displayId]
     }
     // Legacy header-less dumps: SAME poison rule as sections - EVERY focus
     // line must be a valid token (a null/malformed/dialog-title line is
     // UNKNOWN even when a valid token coexists) and exactly one distinct
     // token must result; anything else is unknown, never first-line.
-    val observations = dump.lineSequence()
+    val observations = live.lineSequence()
         .filter { FOCUS_LINE.containsMatchIn(it) }
         .map { FOCUS_WINDOW.find(it)?.groupValues?.get(1) }
         .toList()
