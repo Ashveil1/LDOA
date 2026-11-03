@@ -875,24 +875,49 @@ class MobileDesktopEntryTest {
      *  partial capture could hide the just-launched helper, so callers
      *  fail closed. ENOENT between list and read = the process exited -
      *  not unknown. */
-    private fun selfChildren(): Map<Int, String>? {
+    /** Atomic result of a /proc direct-children scan: [kids] (pid ->
+     *  starttime) on a complete read; on failure kids == null and
+     *  [failure] carries the offending pid + errno / malformed stage.
+     *  The reason travels WITH the scan value, so no later call (cleanup
+     *  ladder, another thread) can overwrite it (run 41571335711: the
+     *  guard held but discarded the cause). No shared mutable state;
+     *  behavior on every path is exactly the old fail-closed null. */
+    private data class ChildScan(val kids: Map<Int, String>?, val failure: String?)
+
+    private fun errnoName(errno: Int?): String = when (errno) {
+        android.system.OsConstants.EINTR -> "EINTR"
+        android.system.OsConstants.ESRCH -> "ESRCH"
+        android.system.OsConstants.EACCES -> "EACCES"
+        android.system.OsConstants.EIO -> "EIO"
+        android.system.OsConstants.ENOENT -> "ENOENT"
+        else -> "errno=" + errno
+    }
+
+    private fun selfChildrenScan(): ChildScan {
         val me = android.os.Process.myPid()
         val out = mutableMapOf<Int, String>()
         val dirs = File("/proc").listFiles { f -> f.name.matches(Regex("[0-9]+")) }
-            ?: return null
+        if (dirs == null) {
+            return ChildScan(null, "/proc numeric listFiles returned null")
+        }
         for (f in dirs) {
             val pid = f.name.toInt()
             val (content, errno) = readProcStat(pid)
             if (content == null) {
                 if (errno == android.system.OsConstants.ENOENT) continue
-                return null
+                return ChildScan(null, "pid " + pid + " stat unreadable: " + errnoName(errno))
             }
             val close = content.lastIndexOf(')')
-            val rest = if (close >= 0) content.substring(close + 1).trim().split(Regex("\\s+")) else return null
-            if (rest.size <= 20) return null
+            if (close < 0) {
+                return ChildScan(null, "pid " + pid + " stat malformed: no comm close paren")
+            }
+            val rest = content.substring(close + 1).trim().split(Regex("\\s+"))
+            if (rest.size <= 20) {
+                return ChildScan(null, "pid " + pid + " stat short: fields=" + rest.size)
+            }
             if (rest[1].toIntOrNull() == me) out[pid] = rest[19]
         }
-        return out
+        return ChildScan(out, null)
     }
 
     /** Run one command inside the Ubuntu rootfs against the SAME X display
@@ -917,14 +942,17 @@ class MobileDesktopEntryTest {
         pb.redirectErrorStream(true)
         // Baseline capture BEFORE start; a failed baseline means the later
         // diff can never be trusted - abort before any process exists.
-        val preKids = selfChildren()
+        val preScan = selfChildrenScan()
+        val preKids = preScan.kids
             ?: throw AssertionError("render-evidence: pre-spawn child capture UNREADABLE -" +
-                " refusing to launch an untrackable helper")
+                " refusing to launch an untrackable helper [" + preScan.failure + "]")
         val p = pb.start()
         // Post-spawn capture: on ANY uncertainty the just-launched process
         // gets a bounded stop/reap ladder BEFORE the failure propagates -
         // never thrown and abandoned.
-        val postKids = selfChildren()
+        val postScan = selfChildrenScan()
+        val postKids = postScan.kids
+        val postScanWhy = postScan.failure  // captured BEFORE cleanup
         if (postKids == null) {
             p.destroy()
             if (!p.waitFor(2_000, java.util.concurrent.TimeUnit.MILLISECONDS)) {
@@ -932,7 +960,8 @@ class MobileDesktopEntryTest {
             }
             guestAborted = true
             throw AssertionError("render-evidence: post-spawn child capture UNREADABLE -" +
-                " helper stopped/reaped best-effort (destroy ladder), probe aborted")
+                " helper stopped/reaped best-effort (destroy ladder), probe aborted" +
+                " [" + postScanWhy + "]")
         }
         var helperKids = postKids - preKids.keys
         var completedEarlyCode: Int? = null
@@ -1951,8 +1980,10 @@ class MobileDesktopEntryTest {
             " left untouched): " + sockCheck.collisions.joinToString(","))
         // Same fail-closed spawn discipline as guestExec.
         abortStage.set("pre-spawn-child-capture")
-        val preKids = selfChildren()
-            ?: throw AssertionError("xdiag: pre-spawn child capture UNREADABLE - refusing to launch an untrackable proxy")
+        val preScan = selfChildrenScan()
+        val preKids = preScan.kids
+            ?: throw AssertionError("xdiag: pre-spawn child capture UNREADABLE - refusing to launch an untrackable proxy" +
+                " [" + preScan.failure + "]")
         preKidsCount = preKids.size
         abortStage.set("spawn")
         val p = pb.start()
@@ -1992,10 +2023,12 @@ class MobileDesktopEntryTest {
             } catch (t: Throwable) { drainError.set(t) }
         }
         abortStage.set("post-spawn-identity")
-        val postKids = selfChildren()
+        val postScan = selfChildrenScan()
+        val postKids = postScan.kids
         if (postKids == null) {
             guestAborted = true
-            throw AssertionError("xdiag: post-spawn child capture UNREADABLE - capture aborted (cleanup+evidence in the abort handler)")
+            throw AssertionError("xdiag: post-spawn child capture UNREADABLE - capture aborted (cleanup+evidence in the abort handler)" +
+                " [" + postScan.failure + "]")
         }
         postKidsCount = postKids.size
         val spawnedKids = postKids - preKids.keys

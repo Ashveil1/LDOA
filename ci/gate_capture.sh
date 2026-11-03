@@ -9,7 +9,7 @@
 # All outputs land in paths the always() artifact upload already covers
 # (screenshots/, /tmp/shotlog.txt).
 mode="${1:-gate}"
-timeout 10 adb -s emulator-5554 exec-out screencap -p > "screenshots/gate-fail-${mode}.png" 2>/dev/null || true
-timeout 15 adb -s emulator-5554 shell dumpsys window displays > "screenshots/gate-fail-${mode}-displays.txt" 2>/dev/null || true
-timeout 20 adb -s emulator-5554 logcat -d > /tmp/shotlog.txt 2>/dev/null || true
+timeout -k 5 10 adb -s emulator-5554 exec-out screencap -p > "screenshots/gate-fail-${mode}.png" 2>/dev/null || true
+timeout -k 5 15 adb -s emulator-5554 shell dumpsys window displays > "screenshots/gate-fail-${mode}-displays.txt" 2>/dev/null || true
+timeout -k 5 20 adb -s emulator-5554 logcat -d > /tmp/shotlog.txt 2>/dev/null || true
 exit 0
