@@ -3,7 +3,7 @@ import pathlib,json,hashlib,shlex,re,argparse
 CAP=128*1024*1024
 ORIG='14cb7b247493c4cce65fbb5902611e3ad00a7a870fbc1e50adc50428c5140cf7'
 DEB='ac2538fe14f44bd56ea77f1bba8c4f16349898ae259e2b602465f4d2faec0723'
-PATCH='ae69d35d1215efc6e521c7fbe81ceacb261fd0c4917c2828ffb385bded7d6829'
+PATCH='056bd20e1914f35cfe8924ab0a6044dd2c5e9f5366eef9104276ed1ccfe8ae63'
 def safe(n):return (bool(re.fullmatch('[A-Za-z0-9_./+-]+',n)) and not n.startswith('/') and all(x not in ('','..','.') for x in n.split('/'))) or n in {'payload/share/locale/sr@latin','payload/share/locale/sr@latin/LC_MESSAGES','payload/share/locale/sr@latin/LC_MESSAGES/pcmanfm.mo'}
 def plan(root,pin,out):
  assert root.is_dir() and not root.is_symlink();root=root.resolve()

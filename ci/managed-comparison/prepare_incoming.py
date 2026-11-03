@@ -36,7 +36,7 @@ def prepare(local,case,out):
   if not p.is_file() or p.is_symlink():raise ValueError('source missing '+name)
  if digest(local/'orig.tar.xz')!='14cb7b247493c4cce65fbb5902611e3ad00a7a870fbc1e50adc50428c5140cf7':raise ValueError('orig source pin')
  if digest(local/'debian.tar.xz')!='ac2538fe14f44bd56ea77f1bba8c4f16349898ae259e2b602465f4d2faec0723':raise ValueError('Debian source pin')
- if digest(local/'default-size.patch')!='ae69d35d1215efc6e521c7fbe81ceacb261fd0c4917c2828ffb385bded7d6829':raise ValueError('patch pin')
+ if digest(local/'default-size.patch')!='056bd20e1914f35cfe8924ab0a6044dd2c5e9f5366eef9104276ed1ccfe8ae63':raise ValueError('patch pin')
  # Originals + exact one applied patch + exact controlling recipe are preferred
  # corresponding-source inputs; no unnecessary configured object/binary tree.
  out.mkdir(mode=0o700)

@@ -1,10 +1,166 @@
 --- a/src/desktop.c
 +++ b/src/desktop.c
-@@ -2635,6 +2635,7 @@
+@@ -25,6 +25,7 @@
+ #endif
+ 
+ #include "desktop.h"
++#include "origin_policy.h"
+ #include "pcmanfm.h"
+ 
+ #include <glib/gi18n.h>
+@@ -2619,6 +2620,91 @@
+     return GDK_FILTER_CONTINUE;
+ }
+ 
++
++/* Monitor resize origin correction: one owned target, one move, finite expiry.
++ * Icon working_area layout is unchanged; this is full monitor geometry. */
++typedef struct { OriginPolicy policy; guint timeout; } FmOrigin;
++static FmOrigin* origin_state(FmDesktop *desktop)
++{
++    FmOrigin *s = g_object_get_data(G_OBJECT(desktop), "fm-origin-target");
++    if (!s) {
++        s = g_new0(FmOrigin, 1);
++        g_object_set_data_full(G_OBJECT(desktop), "fm-origin-target", s, g_free);
++    }
++    return s;
++}
++static gboolean origin_expire(gpointer data)
++{
++    FmDesktop *desktop = FM_DESKTOP(data);
++    FmOrigin *s = origin_state(desktop);
++    s->timeout = 0;
++    if (s->policy.phase) {
++        g_debug("origin generation=%lu result=%d", s->policy.generation, ORIGIN_GIVEUP);
++        s->policy.phase = 0;
++    }
++    return FALSE;
++}
++static void origin_cancel(FmDesktop *desktop)
++{
++    FmOrigin *s = origin_state(desktop);
++    if (s->timeout) { g_source_remove(s->timeout); s->timeout = 0; }
++    s->policy.phase = 0;
++}
++static void origin_target(FmDesktop *desktop, const GdkRectangle *geom)
++{
++    FmOrigin *s = origin_state(desktop);
++    origin_cancel(desktop);
++    origin_begin(&s->policy, geom->x, geom->y, geom->width, geom->height, g_get_monotonic_time());
++    s->timeout = g_timeout_add_full(G_PRIORITY_DEFAULT, ORIGIN_DEADLINE_US / 1000, origin_expire,
++                                   g_object_ref(desktop), g_object_unref);
++}
++static void origin_arm_initial(FmDesktop *desktop)
++{
++    GtkWidget *widget = GTK_WIDGET(desktop);
++    GdkScreen *screen = gtk_widget_get_screen(widget);
++    GdkWindow *window = gtk_widget_get_window(widget);
++    GdkRectangle geom;
++    if (gtk_widget_in_destruction(widget) || !gtk_widget_get_realized(widget) ||
++        !window || gdk_window_is_destroyed(window) || desktop->monitor < 0 ||
++        desktop->monitor >= gdk_screen_get_n_monitors(screen)) return;
++    gdk_screen_get_monitor_geometry(screen, desktop->monitor, &geom);
++    if (geom.width <= 0 || geom.height <= 0) return;
++    origin_target(desktop, &geom);
++}
++static gboolean origin_configure(GtkWidget *widget, GdkEventConfigure *event, gpointer data)
++{
++    FmDesktop *desktop = FM_DESKTOP(widget);
++    FmOrigin *s = origin_state(desktop);
++    GdkScreen *screen;
++    GdkRectangle geom = {0};
++    GdkWindow *window;
++    gint x = 0, y = 0, w = 0, h = 0, decision;
++    gboolean valid;
++    unsigned long generation = s->policy.generation;
++    (void)event; (void)data;
++    if (!s->policy.phase) return FALSE;
++    screen = gtk_widget_get_screen(widget);
++    window = gtk_widget_get_window(widget);
++    valid = !gtk_widget_in_destruction(widget) && gtk_widget_get_realized(widget) &&
++            window && !gdk_window_is_destroyed(window) && desktop->monitor >= 0 &&
++            desktop->monitor < gdk_screen_get_n_monitors(screen);
++    if (valid) {
++        gdk_screen_get_monitor_geometry(screen, desktop->monitor, &geom);
++        valid = gdk_window_get_origin(window, &x, &y);
++        gdk_window_get_geometry(window, NULL, NULL, &w, &h);
++    }
++    decision = origin_event(&s->policy, generation, valid,
++                           geom.x, geom.y, geom.width, geom.height, x, y, w, h,
++                           g_get_monotonic_time());
++    g_debug("origin generation=%lu result=%d x=%d y=%d w=%d h=%d",
++            generation, decision, x, y, w, h);
++    if (decision == ORIGIN_MOVE)
++        gtk_window_move(GTK_WINDOW(desktop), geom.x, geom.y);
++    else if (!s->policy.phase)
++        origin_cancel(desktop);
++    return FALSE;
++}
++
+ static void on_screen_size_changed(GdkScreen* screen, FmDesktop* desktop)
+ {
+     GdkRectangle geom;
+@@ -2635,6 +2721,8 @@
          return;
      }
      gdk_screen_get_monitor_geometry(screen, desktop->monitor, &geom);
++    origin_target(desktop, &geom);
 +    gtk_window_set_default_size((GtkWindow*)desktop, geom.width, geom.height);
      gtk_window_resize((GtkWindow*)desktop, geom.width, geom.height);
      /* bug #3614780: if monitor was moved desktop should be moved too */
      gtk_window_move((GtkWindow*)desktop, geom.x, geom.y);
+@@ -4275,6 +4363,8 @@
+     queue_layout_items(self);
+ }
+ 
++static void origin_arm_initial(FmDesktop *desktop);
++
+ static void on_realize(GtkWidget* w)
+ {
+     FmDesktop* self = (FmDesktop*)w;
+@@ -4285,6 +4375,7 @@
+ #endif
+ 
+     GTK_WIDGET_CLASS(fm_desktop_parent_class)->realize(w);
++    origin_arm_initial(self);
+     gtk_window_set_skip_pager_hint(GTK_WINDOW(w), TRUE);
+     gtk_window_set_skip_taskbar_hint(GTK_WINDOW(w), TRUE);
+     gtk_window_set_resizable((GtkWindow*)w, FALSE);
+@@ -4828,6 +4919,7 @@
+     GdkScreen* screen;
+ 
+     self = FM_DESKTOP(object);
++    origin_cancel(self);
+     if(self->icon_render) /* see bug #3533958 by korzhpavel@SF */
+     {
+         screen = gtk_widget_get_screen((GtkWidget*)self);
+@@ -4942,6 +5034,7 @@
+     gtk_window_move(GTK_WINDOW(self), geom.x, geom.y);
+     gtk_widget_set_app_paintable((GtkWidget*)self, TRUE);
+     gtk_window_set_type_hint(GTK_WINDOW(self), GDK_WINDOW_TYPE_HINT_DESKTOP);
++    g_signal_connect(self, "configure-event", G_CALLBACK(origin_configure), NULL);
+     gtk_widget_add_events((GtkWidget*)self,
+                         GDK_POINTER_MOTION_MASK |
+                         GDK_BUTTON_PRESS_MASK |
+--- a/src/origin_policy.h
++++ b/src/origin_policy.h
+@@ -0,0 +1,19 @@
++#ifndef LDOA_ORIGIN_POLICY_H
++#define LDOA_ORIGIN_POLICY_H
++/* Pure, finite monitor-generation policy. No timers, GTK or WM mutation here. */
++typedef struct { unsigned long generation; int x,y,w,h,phase,events; long long deadline; } OriginPolicy;
++enum { ORIGIN_DEADLINE_US=2000000, ORIGIN_EVENT_CAP=32 };
++enum { ORIGIN_WAIT=0, ORIGIN_MOVE=1, ORIGIN_NOOP=2, ORIGIN_DONE=3, ORIGIN_GIVEUP=4, ORIGIN_STALE=5 };
++static void origin_begin(OriginPolicy *p,int x,int y,int w,int h,long long now) {
++ ++p->generation;p->x=x;p->y=y;p->w=w;p->h=h;p->phase=1;p->events=0;p->deadline=now+ORIGIN_DEADLINE_US;
++}
++static int origin_event(OriginPolicy *p,unsigned long generation,int valid,int x,int y,int w,int h,int actual_x,int actual_y,int actual_w,int actual_h,long long now) {
++ (void)generation; /* same-thread adapter uses current state; replacement+fresh geometry protect it */
++ if(!p->phase)return ORIGIN_DONE;
++ if(!valid||x!=p->x||y!=p->y||w!=p->w||h!=p->h||now>=p->deadline||++p->events>ORIGIN_EVENT_CAP){p->phase=0;return ORIGIN_GIVEUP;}
++ if(actual_w!=w||actual_h!=h)return ORIGIN_WAIT;
++ if(actual_x==x&&actual_y==y){p->phase=0;return ORIGIN_NOOP;}
++ if(p->phase==2){p->phase=0;return ORIGIN_GIVEUP;}
++ p->phase=2;return ORIGIN_MOVE; /* armed BEFORE caller moves; never twice */
++}
++#endif

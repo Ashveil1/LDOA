@@ -51,7 +51,7 @@ PY
 fetch https://archive.ubuntu.com/ubuntu/pool/universe/p/pcmanfm/pcmanfm_1.3.2.orig.tar.xz orig.tar.xz
 fetch https://archive.ubuntu.com/ubuntu/pool/universe/p/pcmanfm/pcmanfm_1.3.2-4build2.debian.tar.xz debian.tar.xz
 printf '%s\n' '14cb7b247493c4cce65fbb5902611e3ad00a7a870fbc1e50adc50428c5140cf7  orig.tar.xz' 'ac2538fe14f44bd56ea77f1bba8c4f16349898ae259e2b602465f4d2faec0723  debian.tar.xz' | sha256sum -c -
-printf '%s  %s\n' ae69d35d1215efc6e521c7fbe81ceacb261fd0c4917c2828ffb385bded7d6829 "$E/default-size.patch" | sha256sum -c -
+printf '%s  %s\n' 056bd20e1914f35cfe8924ab0a6044dd2c5e9f5366eef9104276ed1ccfe8ae63 "$E/default-size.patch" | sha256sum -c -
 cp InRelease source-record.txt orig.tar.xz debian.tar.xz "$E/"
 # SAME fixed configure prefix and flags. Separate case staging only;
 # no host-prefix installation, symlink swap, or binary execution.
