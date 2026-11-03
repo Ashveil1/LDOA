@@ -120,7 +120,7 @@ def collect(evidence,private,out):
             if name=='transfer-guards.txt':
                 assert p.stat().st_size<=1024,'guard receipt cap'
                 receipt=p.read_bytes()
-                assert re.fullmatch(rb'schema=1\n(?:guard=(?:context-identity|parent-nonlink|parent-type|incoming-absent|incoming-nonlink|tmp-absent|tmp-nonlink|push|private-copy) rc=(?:0|[1-9][0-9]{0,2})\n){1,9}',receipt),'guard receipt syntax'
+                assert re.fullmatch(rb'schema=1\n(?:guard=(?:context-identity|parent-nonlink|parent-type|incoming-absent|incoming-nonlink|tmp-absent|tmp-nonlink|tmp-scaffold|push|tmp-inventory|private-copy) rc=(?:0|[1-9][0-9]{0,2})\n){1,11}',receipt),'guard receipt syntax'
             total+=p.stat().st_size;assert total<=MAX_RAW-16384,'raw cap'
             target=out/case/name;target.parent.mkdir(exist_ok=True)
             with p.open('rb') as f:b=f.read(4*1024*1024+1)

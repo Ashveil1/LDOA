@@ -36,15 +36,25 @@ guard incoming-nonlink timeout -k 2 15 adb -s "$SERIAL" shell "run-as dev.phonel
 guard tmp-absent timeout -k 2 15 adb -s "$SERIAL" shell "test ! -e /data/local/tmp/ldoa-managed-incoming"
 guard tmp-nonlink timeout -k 2 15 adb -s "$SERIAL" shell "test ! -L /data/local/tmp/ldoa-managed-incoming"
 # /data/local/tmp is ephemeral emulator storage, not Actions artifact service.
-guard push timeout -k 5 120 adb -s "$SERIAL" push "$CASE" /data/local/tmp/ldoa-managed-incoming
+# Plans built only after independent manifest+sourcepin+actualinventory validation.
+PLAN=$(mktemp -d)
+rmdir "$PLAN"
+python3 "$(dirname "$SCRIPT")/directory_plan.py" "$CASE" "$PIN" "$PLAN"
+trap 'rm -rf "$PLAN"' EXIT
+guard tmp-scaffold timeout -k 2 30 adb -s "$SERIAL" shell -T sh < "$PLAN/scaffold.sh"
+guard push timeout -k 5 120 adb -s "$SERIAL" push "$CASE/manifest.json" "$CASE/payload" "$CASE/source" /data/local/tmp/ldoa-managed-incoming/
+guard tmp-inventory timeout -k 2 30 adb -s "$SERIAL" shell -T sh -s /data/local/tmp/ldoa-managed-incoming < "$PLAN/verify.sh"
 # Same stdin shell runs exact identitybody and then the exclusive copy, so
 # no separate run-as invocation gap between identity and mutation.
 COPY_BODY=$(mktemp)
-trap 'rm -f "$COPY_BODY"' EXIT
+trap 'rm -f "$COPY_BODY"; rm -rf "$PLAN"' EXIT
 printf 'set -e\n' > "$COPY_BODY"
 cat "$BODY" >> "$COPY_BODY"
 cat >> "$COPY_BODY" <<'DEVICE_COPY'
 test ! -L files && { if test -e files; then test -d files; else mkdir -m 700 files; fi; } && test ! -e files/managed-incoming && test ! -L files/managed-incoming && mkdir -m 700 files/managed-incoming && cp -R /data/local/tmp/ldoa-managed-incoming/. files/managed-incoming/
 DEVICE_COPY
+# Append exact final inventory verification in same identity-checked shell.
+printf 'set -- files/managed-incoming\n' >> "$COPY_BODY"
+cat "$PLAN/verify.sh" >> "$COPY_BODY"
 guard private-copy timeout -k 2 30 adb -s "$SERIAL" shell -T run-as dev.phonelinux.proto sh < "$COPY_BODY"
 echo 'TRANSFER ONLY; package hash/pin reverified in-app before exclusive rootfs stage; NO launch here.'

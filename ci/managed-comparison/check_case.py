@@ -4,7 +4,7 @@ def check(root,case,pin):
  if case not in ('original','patched') or not re.fullmatch('[0-9a-f]{64}',pin):raise ValueError('expected case/pin required')
  root=pathlib.Path(root)
  guards=list(root.rglob('transfer-guards.txt'))
- labels=['context-identity','parent-nonlink','parent-type','incoming-absent','incoming-nonlink','tmp-absent','tmp-nonlink','push','private-copy']
+ labels=['context-identity','parent-nonlink','parent-type','incoming-absent','incoming-nonlink','tmp-absent','tmp-nonlink','tmp-scaffold','push','tmp-inventory','private-copy']
  if len(guards)!=1 or guards[0].read_text()!='schema=1\n'+''.join('guard='+l+' rc=0\n' for l in labels):raise ValueError('transfer identity/refusal/copy coverage')
  xs=list(root.rglob('managed-junit.xml'))
  if len(xs)!=1:raise ValueError('missing/duplicate actual JUnit listener XML')
