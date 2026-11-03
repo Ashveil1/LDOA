@@ -21,6 +21,24 @@ internal object XdiagPolicy {
     const val EXPORT_CAP_BYTES = 5L * 1024 * 1024
     const val TRACE_READ_CAP = 256 * 1024
 
+    /** Bounded streaming trace scanner limits (XdiagTraceScanner +
+     *  xdiagSmoke). SCAN_TOTAL_BUDGET_BYTES is the reader's OWN cumulative
+     *  budget across ALL polls, chunks and the boundary byte - the guest
+     *  ulimit is defense-in-depth only and is never relied on. */
+    const val SCAN_CHUNK_BYTES = 64 * 1024
+    const val SCAN_CARRY_CAP = 256 * 1024
+    const val SCAN_MAX_CONNECTIONS = 64
+    const val SCAN_TOTAL_BUDGET_BYTES = TRACE_FILE_CAP_BYTES + SCAN_CHUNK_BYTES
+
+    /** Reserved slice of EXPORT_CAP_BYTES for the bounded export-layout
+     *  metadata file, allocated BEFORE payload: layout (including the
+     *  durable original size D) can never be squeezed out by payload, and
+     *  the marker fallback fits by construction (unit-tested). The hard
+     *  cap stays literal: payloadCapBytes() + reserve == EXPORT_CAP_BYTES. */
+    const val EXPORT_LAYOUT_RESERVE_BYTES = 16 * 1024
+    const val EXPORT_LAYOUT_MARKER = "export layout omitted - over reserve\n"
+    fun payloadCapBytes(): Long = EXPORT_CAP_BYTES - EXPORT_LAYOUT_RESERVE_BYTES
+
     fun totalBudgetMs(startBudgetMs: Long): Long =
         startBudgetMs + OBSERVE_MS + TOTAL_MARGIN_MS
 
@@ -84,6 +102,32 @@ internal object XdiagPolicy {
             else if (markerLen <= remaining) ExportPlan.Truncated(0, markerLen, 0)
             else ExportPlan.Omit
         }
+    }
+
+    /** Smoke PASS decision at a poll point, pure and unit-tested so the
+     *  deadline guard cannot drift from the MDET call site: an expired
+     *  deadline NEVER permits PASS, even when the final read completed
+     *  and the correlation is clean. */
+    fun smokePassAllowed(correlated: Set<String>, tailAdvanced: Boolean,
+                         terminalPartialAmbiguous: Boolean,
+                         nowNs: Long, deadlineNs: Long): Boolean =
+        correlated.isNotEmpty() && tailAdvanced && !terminalPartialAmbiguous && nowNs < deadlineNs
+
+    /** Aggregate the primary failure with ALL cleanup failures. Every
+     *  cleanup failure survives as suppressed - never a first-wins swallow
+     *  (run 41590351769: the export's INCOMPLETE verdict vanished behind the
+     *  proxy-stop failure). Thrown throwable is the primary when present,
+     *  else an AssertionError naming the cleanup-failure count; suppressed
+     *  order = ladder order. Null when there is nothing to throw. */
+    fun aggregateCleanup(primary: Throwable?, failures: List<Throwable>): Throwable? {
+        if (primary == null && failures.isEmpty()) return null
+        val out = primary
+            ?: AssertionError("xdiag: cleanup failed (" + failures.size + " failure(s))")
+        // Self-suppression guard: a failure identical to the thrown
+        // throwable must never turn addSuppressed's IAE into a mask for
+        // the original failure - the helper returns the original instead.
+        for (f in failures) if (f !== out) out.addSuppressed(f)
+        return out
     }
 
     /** /proc scan entry classification, pure: foreign-UID entries are

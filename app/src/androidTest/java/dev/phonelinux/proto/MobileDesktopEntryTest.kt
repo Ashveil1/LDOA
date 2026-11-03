@@ -2452,56 +2452,185 @@ class MobileDesktopEntryTest {
     private fun xdiagProxyAlive(px: XdiagProxy): Boolean =
         procStartTime(px.anchorPid) == px.anchorStart
 
-    /** Bounded trace read: text of the trace past byte offset [base],
-     *  capped at TRACE_READ_CAP bytes per call (RandomAccessFile seek,
-     *  never a whole-file read). A window larger than the cap is a hard
-     *  failure - the caller's assertion domain must stay bounded. */
-    private fun xdiagTraceWindow(trace: File, base: Long): String {
-        if (!trace.isFile) return ""
-        java.io.RandomAccessFile(trace, "r").use { raf ->
-            val len = raf.length()
-            if (len <= base) return ""
-            val n = len - base
-            if (n > XdiagPolicy.TRACE_READ_CAP) throw AssertionError(
-                "xdiag: trace window " + n + " bytes exceeds read cap - UNKNOWN (refusing unbounded read)")
-            val buf = ByteArray(n.toInt())
-            raf.seek(base); raf.readFully(buf)
-            return String(buf, Charsets.UTF_8)
-        }
-    }
-
     /** Identified, non-mutating, CONNECTION-CORRELATED proxy smoke: our
      *  own `xrandr -display :0 --listmonitors` opens a NEW client
-     *  connection through the proxy. The offset-anchored trace window
-     *  must show ONE connection id carrying the setup handshake, the
-     *  Success reply AND our GetMonitors request decode (same id), and
-     *  the proxy's stderr tail must gain a "Got connection from" line.
+     *  connection through the proxy. A bounded STREAMING scan of the
+     *  offset-anchored trace region must find ONE connection id carrying
+     *  the setup handshake, the Success reply AND our GetMonitors request
+     *  decode (same id), and the proxy's stderr tail must gain a "Got
+     *  connection from" line.
      *  Connection discrimination (verified scope): the ready-gate's
      *  `xset q` polls are NEW short-lived connections per poll
      *  (reviewer-confirmed from xset source), so "gate polls are
-     *  long-lived earlier connections" is NOT assumed anywhere. xset q
-     *  issues no RANDR GetMonitors, so the same-id
-     *  setup+Success+GetMonitors correlation excludes those polls.
-     *  Remaining assumption, stated not hidden: no OTHER client issues
-     *  GetMonitors inside the smoke window; if one did, the correlation
-     *  still proves the fresh-client capture path but not WHICH client.
-     *  Line shapes grounded in the actual local xtrace logs (the
-     *  --timestamps flag was REMOVED after source review showed it
-     *  prepends epoch.ms before the connection id), not invented. */
+     *  long-lived earlier connections" is NOT assumed anywhere.
+     *  Bare-GetMonitors uniqueness is unconditionally DISPROVEN (run
+     *  41590351769: an established connection issued bare GetMonitors),
+     *  so the correlation relies on the in-window setup requirement; the
+     *  exclusion of established connections by that requirement remains
+     *  conditional on the window start (flush timing unknown). The proof
+     *  strength is the fresh-client capture path, never WHICH client.
+     *  Line shapes grounded in the actual local xtrace logs, not invented.
+     *  Bounds (every overflow -> UNKNOWN, fail closed): per-poll identity
+     *  via fileKey (dev+ino) taken from the OPEN fd (Os.fstat) plus a
+     *  post-read path re-stat; len < cursor and mtime regression ->
+     *  UNKNOWN (mtime regression detects BACKWARD changes only - an
+     *  ordinary forward in-place rewrite stays inside the named residual);
+     *  per-read chunk <= SCAN_CHUNK_BYTES with the deadline and
+     *  scanner state checked BETWEEN chunks (feedRegion); the reader's
+     *  OWN cumulative SCAN_TOTAL_BUDGET_BYTES (boundary byte included)
+     *  independent of the guest ulimit; scanner carry/connection/reuse/
+     *  terminal bounds per XdiagTraceScanner. The base-1 boundary byte
+     *  distinguishes a line boundary from a mid-line fragment (recorded
+     *  in anchor-metadata.txt); it does not prove freshness under delayed
+     *  flush. PASS is a verdict over the FULLY CONSUMED sampled window
+     *  [base, cursor): UNKNOWN anywhere in the consumed region or an
+     *  ambiguous trailing partial blocks PASS; nothing about future
+     *  bytes is assumed (a later same-id setup would be UNKNOWN, not a
+     *  hidden contradiction). */
     private fun xdiagSmoke(rootfs: File, deadlineNs: Long, px: XdiagProxy) {
         val trace = File(px.diagDir, "xtrace.log")
-        val base = if (trace.isFile) trace.length() else 0L
         val tailBefore = px.gotCount.get() // monotonic drain counter, not a tail recount
+        // Anchor time captured ONCE; both metadata writes use these values
+        // (the overwrite does not relabel its own write time as anchor time).
+        val anchorWallMs = System.currentTimeMillis()
+        val anchorNanos = System.nanoTime()
+        // Anchor record FIRST (bounded: one partial write + one overwrite,
+        // fixed fields; a loss is logged once, never read as success), so
+        // even the anchor abort paths leave the partial record with
+        // unavailable fields labelled.
+        var base = -1L; var anchorKey = ""; var firstLineComplete = true; var anchorMtime = 0L
+        var anchorMetaLogged = false
+        fun writeAnchorMeta(filekey: String, firstLine: String) {
+            if (anchorMetaLogged) return
+            try {
+                File(px.diagDir, "anchor-metadata.txt").writeText(
+                    "base: " + (if (base < 0) "UNAVAILABLE" else base.toString()) + "\n" +
+                    "anchor_wall_ms: " + anchorWallMs + "\n" +
+                    "anchor_nanos: " + anchorNanos + "\n" +
+                    "filekey: " + filekey + "\n" +
+                    "first_line_complete: " + firstLine + "\n")
+            } catch (t: Throwable) {
+                anchorMetaLogged = true
+                Log.e(TAG, "xdiag: anchor-metadata.txt UNAVAILABLE: " + t.message)
+            }
+        }
+        writeAnchorMeta("UNAVAILABLE", "UNAVAILABLE")
+        // ONE open fd pins base + identity + boundary byte (no cross-view
+        // race between a path length(), a path stat and a separate fd).
+        try {
+            java.io.RandomAccessFile(trace, "r").use { raf ->
+                val fst = try { android.system.Os.fstat(raf.fd) } catch (t: Throwable) {
+                    throw AssertionError("xdiag: trace fstat failed at anchor - UNKNOWN", t) }
+                base = fst.st_size
+                anchorMtime = fst.st_mtime
+                anchorKey = fst.st_dev.toString() + ":" + fst.st_ino.toString()
+                firstLineComplete = if (base == 0L) true else {
+                    raf.seek(base - 1)
+                    val b = raf.read()
+                    if (b < 0) throw AssertionError("xdiag: boundary byte unreadable at base-1 - UNKNOWN")
+                    b == 0x0A
+                }
+            }
+        } catch (a: AssertionError) { throw a } catch (t: Throwable) {
+            throw AssertionError("xdiag: trace unreadable at anchor - UNKNOWN", t) }
+        writeAnchorMeta(anchorKey, firstLineComplete.toString())
+        // Path identity re-verified immediately BEFORE the probe exec.
+        val preProbe = try { android.system.Os.stat(trace.absolutePath) } catch (t: Throwable) {
+            throw AssertionError("xdiag: trace pre-probe stat failed - UNKNOWN", t) }
+        if (preProbe.st_dev.toString() + ":" + preProbe.st_ino.toString() != anchorKey)
+            throw AssertionError("xdiag: trace file REPLACED before probe - UNKNOWN")
         val monitors = xdiagGuest(rootfs, deadlineNs, "smoke probe",
             "xrandr", "-display", ":0", "--listmonitors")
         if (!monitors.contains("Monitors:")) {
             throw AssertionError("xdiag: smoke probe output unparsable - UNKNOWN\n" + monitors.take(400))
         }
-        while (System.nanoTime() < deadlineNs) {
-            val window = xdiagTraceWindow(trace, base)
-            val correlated = XdiagPolicy.correlatedGetMonitorsConnections(window)
+        val scanner = XdiagTraceScanner(firstLineComplete)
+        var cursor = base
+        var scannedTotal = if (base == 0L) 0L else 1L // the boundary byte counts
+        var lastMtime = anchorMtime
+        var lastLen = base
+        var polls = 0L
+        var scanMetaLogged = false
+        pollLoop@ while (System.nanoTime() < deadlineNs) {
+            // Read path bound to ONE open fd: identity and size come from
+            // Os.fstat on that fd (no stat/open race); the exact sampled
+            // range must be consumed or the poll fails UNKNOWN.
+            var deadlineHit = false
+            java.io.RandomAccessFile(trace, "r").use { raf ->
+                val fst = try { android.system.Os.fstat(raf.fd) } catch (t: Throwable) {
+                    throw AssertionError("xdiag: trace fstat failed during smoke - UNKNOWN", t) }
+                if (fst.st_dev.toString() + ":" + fst.st_ino.toString() != anchorKey)
+                    throw AssertionError(
+                        "xdiag: trace file REPLACED during smoke (fileKey changed) - UNKNOWN")
+                val len = fst.st_size
+                if (len < cursor) throw AssertionError(
+                    "xdiag: trace file SHRANK during smoke (" + cursor + " -> " + len + ") - UNKNOWN")
+                if (fst.st_mtime < lastMtime) throw AssertionError(
+                    "xdiag: trace mtime regression during smoke - UNKNOWN")
+                lastMtime = fst.st_mtime
+                lastLen = len
+                if (len > cursor) {
+                    val newBytes = len - cursor
+                    if (scannedTotal + newBytes > XdiagPolicy.SCAN_TOTAL_BUDGET_BYTES)
+                        throw AssertionError(
+                            "xdiag: scanner byte budget exceeded (" + (scannedTotal + newBytes) +
+                                " > " + XdiagPolicy.SCAN_TOTAL_BUDGET_BYTES + ") - UNKNOWN")
+                    raf.seek(cursor)
+                    val fr = feedRegion(scanner, newBytes, deadlineNs) { buf, max ->
+                        raf.read(buf, 0, max) }
+                    cursor += fr.bytesFed
+                    scannedTotal += fr.bytesFed
+                    when (fr.result) {
+                        RegionFeedResult.DONE -> {}
+                        RegionFeedResult.DEADLINE -> deadlineHit = true
+                        RegionFeedResult.SCANNER_UNKNOWN -> throw AssertionError(
+                            "xdiag: trace scanner UNKNOWN - " + scanner.unknownReason())
+                        RegionFeedResult.SHORT_READ, RegionFeedResult.NO_PROGRESS ->
+                            throw AssertionError("xdiag: trace read of the sampled range INCOMPLETE" +
+                                " (" + fr.result + " after " + fr.bytesFed + "/" + newBytes +
+                                " bytes) - UNKNOWN; never silently skipped")
+                    }
+                }
+            }
+            // Post-read path re-stat: replacement or shrink after the read.
+            val post = try { android.system.Os.stat(trace.absolutePath) } catch (t: Throwable) {
+                throw AssertionError("xdiag: trace post-read stat failed - UNKNOWN", t) }
+            if (post.st_dev.toString() + ":" + post.st_ino.toString() != anchorKey)
+                throw AssertionError("xdiag: trace file REPLACED after read - UNKNOWN")
+            if (post.st_size < cursor) throw AssertionError(
+                "xdiag: trace file SHRANK after read (" + cursor + " -> " + post.st_size + ") - UNKNOWN")
+            polls++
+            // Per-poll telemetry: SNAPSHOT-OVERWRITE of one fixed record -
+            // aggregate size constant regardless of poll count. Best-effort,
+            // first loss logged once.
+            if (!scanMetaLogged) try {
+                File(px.diagDir, "smoke-scan-state.txt").writeText(
+                    "poll: " + polls + "\n" +
+                    "cursor: " + cursor + "\n" +
+                    "len: " + lastLen + "\n" +
+                    "window_bytes: " + (lastLen - base) + "\n" +
+                    "scanned_total: " + scannedTotal + "\n" +
+                    "discarded_fragment_bytes: " + scanner.discardedFragmentBytes + "\n" +
+                    "setup_seen: " + scanner.setupSeen + "\n" +
+                    "ok_seen: " + scanner.okSeen + "\n" +
+                    "gm_seen: " + scanner.gmSeen + "\n")
+            } catch (t: Throwable) {
+                scanMetaLogged = true
+                Log.e(TAG, "xdiag: smoke-scan-state.txt UNAVAILABLE: " + t.message)
+            }
+            if (deadlineHit) break@pollLoop
+            scanner.unknownReason()?.let {
+                throw AssertionError("xdiag: trace scanner UNKNOWN - " + it) }
+            val correlated = scanner.correlated()
             val tailAfter = px.gotCount.get()
-            if (correlated.isNotEmpty() && tailAfter > tailBefore) {
+            // PASS only over the fully consumed sampled window with a clean
+            // line boundary; an ambiguous trailing partial defers to the
+            // next poll (finish() at deadline then fails closed UNKNOWN).
+            // Single pure decision (unit-tested): an expired deadline never
+            // permits PASS, even when the final read crossed it mid-flight;
+            // an ambiguous trailing partial defers to the next poll.
+            if (XdiagPolicy.smokePassAllowed(correlated, tailAfter > tailBefore,
+                    scanner.terminalPartialAmbiguous(), System.nanoTime(), deadlineNs)) {
                 // Honest attribution: a FRESH GetMonitors-carrying
                 // connection appeared in our probe window with the probe
                 // round-trip verified. If the ready-gate opens fresh
@@ -2516,9 +2645,27 @@ class MobileDesktopEntryTest {
             if (!xdiagProxyAlive(px)) throw AssertionError("xdiag: proxy died during smoke - UNKNOWN")
             Thread.sleep(500)
         }
+        scanner.finish()
+        // Terminal evidence travels WITH the verdict (never masks it):
+        // carried/fragment/counter state is appended to whichever failure.
+        val termEv = (" [scanned_total=" + scannedTotal + ", discarded_fragment=" +
+            scanner.discardedFragmentBytes + ", setups=" + scanner.setupSeen +
+            ", oks=" + scanner.okSeen + ", gms=" + scanner.gmSeen + "]")
+        scanner.unknownReason()?.let {
+            throw AssertionError("xdiag: trace scanner UNKNOWN at deadline - " + it + termEv) }
+        if (scanner.correlated().isNotEmpty()) {
+            // Correlation WAS present; PASS was blocked (deadline lateness,
+            // tail counter, or an ambiguous trailing partial). Never report
+            // this as "no single connection".
+            throw AssertionError("xdiag: smoke INCONCLUSIVE - correlation " + scanner.correlated() +
+                " present but PASS conditions were not met before the deadline" +
+                " (deadline exhaustion / pre-PASS lateness, tail-counter not advanced," +
+                " or ambiguous trailing partial); capture-path evidence retained" + termEv)
+        }
         throw AssertionError("xdiag: smoke FAILED - probe not correlated in the trace within budget" +
             " (no single connection with setup+reply+GetMonitors); capture path unproven -" +
-            " existing artifacts are still exported best-effort and the diagnostic marked unusable")
+            " existing artifacts are still exported best-effort and the diagnostic marked unusable" +
+            termEv)
     }
 
     /** Streaming trace census (bounded line scan, whole file is capped at
@@ -2568,13 +2715,55 @@ class MobileDesktopEntryTest {
             .sortedBy { if (it.name == "xtrace.log") 1 else 0 }
         var used = 0L
         val problems = mutableListOf<String>()
+        // Export layout record: DIAGNOSTICS ONLY (bounded at 64 entries +
+        // one marker line) - it never certifies the export inventory;
+        // completeness is judged by the required-set check below alone.
+        val layout = StringBuilder()
+        var layoutEntries = 0
+        // Prioritized coordinates: xtrace.log's original size + export
+        // status are captured INDEPENDENTLY of the bounded per-file record
+        // list, so the entry cap / byte fallback can never drop the D the
+        // trace coordinates depend on (xtrace sorts last in this loop).
+        val xtracePresample = File(diagDir, "xtrace.log").let { if (it.isFile) it.length() else -1L }
+        var xtracePlanSize = -1L   // f.length() AT PLAN TIME - the coordinate D
+        var xtracePlanDesc = "not-planned"
+        var xtraceStatus = "not-present"
+        fun xtraceHeader() =
+            "xtrace.log plan_time_size=" + xtracePlanSize + "\n" +
+            "xtrace.log presample_size=" + xtracePresample + "\n" +
+            "xtrace.log plan=" + xtracePlanDesc + "\n" +
+            "xtrace.log export_status=" + xtraceStatus + "\n" +
+            "xtrace.log mutation=" + (if (xtracePresample >= 0 && xtracePlanSize >= 0 &&
+                xtracePresample != xtracePlanSize)
+                "UNKNOWN (presample != plan-time size)" else "none-sampled") + "\n"
+        fun layoutRec(name: String, size: Long, plan: String, written: Long) {
+            if (layoutEntries >= 64) {
+                if (layoutEntries == 64) {
+                    layout.append("... further layout records omitted (cap 64)\n"); layoutEntries++
+                }
+                return
+            }
+            layout.append(name).append(" size=").append(size).append(" plan=").append(plan)
+                .append(" written=").append(written).append('\n')
+            layoutEntries++
+        }
         for (f in files) {
-            val remaining = XdiagPolicy.EXPORT_CAP_BYTES - used
+            val remaining = XdiagPolicy.payloadCapBytes() - used
             val marker = ("\n[... TRUNCATED by xdiag export cap ...]\n").toByteArray(Charsets.UTF_8)
             try {
                 val target = File(dest, f.name)
                 val size = f.length()
-                when (val plan = XdiagPolicy.exportPlan(size, remaining, marker.size)) {
+                val plan = XdiagPolicy.exportPlan(size, remaining, marker.size)
+                if (f.name == "xtrace.log") {
+                    xtracePlanSize = size
+                    xtracePlanDesc = when (plan) {
+                        is XdiagPolicy.ExportPlan.Full -> "full"
+                        is XdiagPolicy.ExportPlan.Truncated ->
+                            "truncated head=" + plan.head + " marker=" + plan.markerLen + " tail=" + plan.tail
+                        XdiagPolicy.ExportPlan.Omit -> "omit"
+                    }
+                }
+                when (plan) {
                     is XdiagPolicy.ExportPlan.Full -> {
                         // Bounded exact-size copy: never reads past the
                         // size captured at plan time, so a still-growing
@@ -2595,11 +2784,15 @@ class MobileDesktopEntryTest {
                             throw AssertionError("source " + f.name + " GREW during copy (" +
                                 size + " -> " + f.length() + ") - capture still live")
                         used += size
+                        layoutRec(f.name, size, "full", size)
+                        if (f.name == "xtrace.log") xtraceStatus = "full written=" + size
                     }
                     is XdiagPolicy.ExportPlan.Truncated -> {
                         if (plan.head == 0 && plan.tail == 0) {
                             target.writeBytes(marker)
                             used += marker.size
+                            layoutRec(f.name, size, "marker-only", marker.size.toLong())
+                            if (f.name == "xtrace.log") xtraceStatus = "marker-only"
                         } else {
                             java.io.RandomAccessFile(f, "r").use { raf ->
                                 target.outputStream().use { o ->
@@ -2610,11 +2803,18 @@ class MobileDesktopEntryTest {
                                 }
                             }
                             used += plan.head + plan.markerLen + plan.tail
+                            layoutRec(f.name, size,
+                                "truncated head=" + plan.head + " marker=" + plan.markerLen +
+                                    " tail=" + plan.tail,
+                                (plan.head + plan.markerLen + plan.tail).toLong())
+                            if (f.name == "xtrace.log") xtraceStatus = "truncated written"
                         }
                         Log.w(TAG, "xdiag: " + f.name + " truncated to export cap")
                     }
-                    XdiagPolicy.ExportPlan.Omit ->
+                    XdiagPolicy.ExportPlan.Omit -> {
+                        if (f.name == "xtrace.log") xtraceStatus = "OMIT (no budget)"
                         throw AssertionError("no budget even for a marker (" + remaining + " bytes left)")
+                    }
                 }
             } catch (t: Throwable) {
                 // A partial failed file still OCCUPIED cap budget: count
@@ -2622,9 +2822,31 @@ class MobileDesktopEntryTest {
                 // cannot overrun the disk total.
                 val target = File(dest, f.name)
                 if (target.isFile) { used += target.length(); target.delete() }
+                if (f.name == "xtrace.log") xtraceStatus =
+                    "FAILED: " + (t.message ?: t.javaClass.simpleName).take(200)
                 problems.add(f.name + ": " + (t.message ?: t.javaClass.simpleName))
             }
         }
+        // Layout written BEFORE the completeness throw so it survives the
+        // INCOMPLETE path. The reserve was allocated BEFORE payload
+        // (payloadCapBytes): payload <= CAP - reserve and layout <= reserve,
+        // so total <= EXPORT_CAP_BYTES - the hard cap preserved literally.
+        // Over-reserve fallback keeps the prioritized header (see below).
+        // Best-effort: a loss is logged, never thrown into the problems
+        // list, and the layout is then not durable.
+        try {
+            val header = xtraceHeader()
+            val full = (header + layout.toString()).toByteArray(Charsets.UTF_8)
+            // Over-reserve fallback (possible: 64 max-length filenames can
+            // exceed the reserve) keeps the PRIORITIZED HEADER - plan-time D,
+            // plan, status survive; only the per-file record list is dropped.
+            // Like all metadata here the write is BEST-EFFORT: an I/O failure
+            // is logged, never thrown, and the layout is then not durable.
+            val bytes = if (full.size <= XdiagPolicy.EXPORT_LAYOUT_RESERVE_BYTES) full
+                else (header + XdiagPolicy.EXPORT_LAYOUT_MARKER).toByteArray(Charsets.UTF_8)
+            File(dest, "export-layout.txt").writeBytes(bytes)
+            used += bytes.size
+        } catch (t: Throwable) { Log.e(TAG, "xdiag: export-layout.txt UNAVAILABLE: " + t.message) }
         val required = setOf("xtrace.log", "snapshot-ready.txt", "snapshot-settled.txt",
             "guest-dpkg-versions.txt", "trace-analysis.txt", "observation-metadata.txt")
         val missing = required - present
@@ -2777,18 +2999,17 @@ class MobileDesktopEntryTest {
         // Cleanup, ALWAYS in order: stop proxy (proves tree gone, removes
         // its stale socket under our token) -> export (never skipped by a
         // stop failure) -> release the reservation.
-        var cleanup: Throwable? = null
-        try { proxy?.let { xdiagProxyStop(it, token) } } catch (t: Throwable) { cleanup = t }
+        // Accumulate ALL cleanup failures (ladder order): a first-wins
+        // single-var ladder silently swallows later failures (run
+        // 41590351769: the export's INCOMPLETE verdict vanished behind
+        // the proxy-stop failure). Aggregation is XdiagPolicy-pure.
+        val cleanupFailures = mutableListOf<Throwable>()
+        try { proxy?.let { xdiagProxyStop(it, token) } } catch (t: Throwable) { cleanupFailures += t }
         // Export FAILURE = diagnostic unusable: xdiagExport throws and
         // the failure lands in cleanup even when stop already failed.
-        try { diagDir?.let { xdiagExport(it) } } catch (t: Throwable) { if (cleanup == null) cleanup = t }
-        try { XServer.releaseServerDisplayForTest(token) } catch (t: Throwable) { if (cleanup == null) cleanup = t }
-        val p = primary; val c = cleanup
-        when {
-            p != null && c != null -> { p.addSuppressed(c); throw p }
-            p != null -> throw p
-            c != null -> throw AssertionError("xdiag: cleanup failed", c)
-        }
+        try { diagDir?.let { xdiagExport(it) } } catch (t: Throwable) { cleanupFailures += t }
+        try { XServer.releaseServerDisplayForTest(token) } catch (t: Throwable) { cleanupFailures += t }
+        XdiagPolicy.aggregateCleanup(primary, cleanupFailures)?.let { throw it }
         Log.i(TAG, "xdiag: capture complete with VERIFIED export - DIAGNOSTIC ONLY:" +
             " no settle assertions, no render-PASS claim")
     }

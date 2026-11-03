@@ -116,4 +116,103 @@ class XdiagPolicyTest {
         // own + unreadable while still existing = UNKNOWN (fail closed)
         assertEquals(XdiagPolicy.ScanDecision.UNKNOWN, XdiagPolicy.scanDecision(true, false, true))
     }
+
+    @Test fun aggregateCleanup_nullWhenNothingToThrow() {
+        assertNull(XdiagPolicy.aggregateCleanup(null, emptyList()))
+    }
+
+    @Test fun aggregateCleanup_primaryOnlyIsReturnedUnwrapped() {
+        val p = AssertionError("primary")
+        val out = XdiagPolicy.aggregateCleanup(p, emptyList())
+        assertTrue(out === p)
+        assertEquals(0, out!!.suppressed.size)
+    }
+
+    @Test fun aggregateCleanup_allFailuresSuppressedOnPrimaryInLadderOrder() {
+        val p = AssertionError("primary")
+        val f1 = AssertionError("stop failed")
+        val f2 = AssertionError("export INCOMPLETE")
+        val f3 = AssertionError("release failed")
+        val out = XdiagPolicy.aggregateCleanup(p, listOf(f1, f2, f3))!!
+        assertTrue(out === p)
+        assertEquals(3, out.suppressed.size)
+        assertTrue(out.suppressed[0] === f1)
+        assertTrue(out.suppressed[1] === f2)
+        assertTrue(out.suppressed[2] === f3)
+    }
+
+    @Test fun aggregateCleanup_noPrimaryWrapsAllWithCount() {
+        val f1 = AssertionError("stop failed")
+        val f2 = AssertionError("export INCOMPLETE")
+        val out = XdiagPolicy.aggregateCleanup(null, listOf(f1, f2))!!
+        assertTrue(out is AssertionError)
+        assertTrue(out.message!!.contains("2 failure(s)"))
+        assertEquals(2, out.suppressed.size)
+        assertTrue(out.suppressed[0] === f1)
+        assertTrue(out.suppressed[1] === f2)
+    }
+
+    @Test fun aggregateCleanup_run41590351769_exportVerdictNoLongerSwallowed() {
+        // Regression for the observed swallow: primary (trace-cap guard)
+        // plus TWO cleanup failures; the first-wins ladder kept only the
+        // proxy-stop failure and silently lost the export's INCOMPLETE
+        // verdict. Both must survive as suppressed on the primary.
+        val primary = AssertionError("xdiag: trace window 588203 bytes exceeds read cap - UNKNOWN")
+        val stop = AssertionError("proxy stop failed")
+        val export = AssertionError("xdiag: export INCOMPLETE (required artifact(s) missing) - diagnostic UNUSABLE")
+        val out = XdiagPolicy.aggregateCleanup(primary, listOf(stop, export))!!
+        assertTrue(out === primary)
+        assertEquals(2, out.suppressed.size)
+        assertTrue(out.suppressed[0] === stop)
+        assertTrue(out.suppressed[1] === export)
+    }
+
+    @Test fun aggregateCleanup_selfSuppressionNeverMasksOriginal() {
+        // If the primary itself lands in the failures list, addSuppressed
+        // would throw IAE and MASK the original. The guard must skip it.
+        val p = AssertionError("primary")
+        val f = AssertionError("stop failed")
+        val out = XdiagPolicy.aggregateCleanup(p, listOf(p, f, p))!!
+        assertTrue(out === p)
+        assertEquals(1, out.suppressed.size)
+        assertTrue(out.suppressed[0] === f)
+    }
+
+    @Test fun aggregateCleanup_duplicateNonPrimaryFailuresBothRecorded() {
+        // Two occurrences of the SAME cleanup failure instance are distinct
+        // ladder events; addSuppressed rejects only self-suppression, so both
+        // must be recorded.
+        val p = AssertionError("primary")
+        val f = AssertionError("stop failed")
+        val out = XdiagPolicy.aggregateCleanup(p, listOf(f, f))!!
+        assertEquals(2, out.suppressed.size)
+        assertTrue(out.suppressed[0] === f && out.suppressed[1] === f)
+    }
+
+    @Test fun scannerBounds_chunkNeverExceedsReadCap_budgetIndependentOfUlimit() {
+        assertTrue(XdiagPolicy.SCAN_CHUNK_BYTES <= XdiagPolicy.TRACE_READ_CAP)
+        assertEquals(XdiagPolicy.TRACE_FILE_CAP_BYTES + XdiagPolicy.SCAN_CHUNK_BYTES,
+            XdiagPolicy.SCAN_TOTAL_BUDGET_BYTES)
+        assertTrue(XdiagPolicy.SCAN_CARRY_CAP <= XdiagPolicy.TRACE_READ_CAP)
+    }
+
+    @Test fun exportLayoutReserve_markerFitsAndCapStaysLiteral() {
+        assertTrue(XdiagPolicy.EXPORT_LAYOUT_MARKER.toByteArray(Charsets.UTF_8).size
+            <= XdiagPolicy.EXPORT_LAYOUT_RESERVE_BYTES)
+        assertEquals(XdiagPolicy.EXPORT_CAP_BYTES,
+            XdiagPolicy.payloadCapBytes() + XdiagPolicy.EXPORT_LAYOUT_RESERVE_BYTES)
+    }
+
+    @Test fun smokePassAllowed_deadlineNeverPermitsPass() {
+        val now = 1_000_000L; val dl = 2_000_000L
+        // clean pass
+        assertTrue(XdiagPolicy.smokePassAllowed(setOf("010"), true, false, now, dl))
+        // expired deadline denies, even with clean correlation
+        assertTrue(!XdiagPolicy.smokePassAllowed(setOf("010"), true, false, dl, dl))
+        assertTrue(!XdiagPolicy.smokePassAllowed(setOf("010"), true, false, dl + 1, dl))
+        // other denials
+        assertTrue(!XdiagPolicy.smokePassAllowed(emptySet(), true, false, now, dl))
+        assertTrue(!XdiagPolicy.smokePassAllowed(setOf("010"), false, false, now, dl))
+        assertTrue(!XdiagPolicy.smokePassAllowed(setOf("010"), true, true, now, dl))
+    }
 }
