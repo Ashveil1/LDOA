@@ -1,43 +1,36 @@
-# Bounded probe of the free Linux ARM runner route (user-requested).
-# Dispatch-only: never runs on push. Answers, with evidence:
-#   1. actual host arch + KVM presence
-#   2. whether Google's Android emulator package exists for linux-arm64
-#   3. HOST-LEVEL partial evidence only: our exact pinned Ubuntu Base 24.04.5
-#      arm64 rootfs executing on real aarch64 (chroot = kernel-native;
-#      distro proot attempt kept as diagnostic after round-1 segfault).
-#      NOT our packaged Android proot, NOT an Android runtime.
-name: arm-probe
+# Branch-only alias of registered workflow ID399047836; NOT an ARM run.
+# main arm-probe definition remains unchanged; this ref runs only pcmanfm amd64.
+# PUBLIC ordinary job logs, no upload-artifact/cache/hosted evidence storage.
+# Geometry child files capped in-flight; per-case occupancy gate96MiB.
+# Selected log evidence transport <=24MiB raw,34MiB encoded,8500 data chunks.
+# Local source/build logs may be larger but are not transported unbounded.
+name: pcmanfm-floor-experiment
 on:
   workflow_dispatch:
-
+permissions:
+  contents: read
 jobs:
-  probe:
-    runs-on: ubuntu-24.04-arm
+  geometry:
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - name: Host facts
+      - uses: actions/checkout@v4
+        timeout-minutes: 2
+      - name: Disposable runner dependencies (never patched package install)
+        timeout-minutes: 5
         run: |
-          uname -m
-          lscpu | head -8
-          ls -la /dev/kvm 2>/dev/null || echo "PROBE-KVM: absent"
-      - name: Android emulator availability on linux-arm64
+          mkdir -p "$RUNNER_TEMP/pcmanfm-evidence"
+          set -o pipefail
+          timeout -k 10 110 sudo env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=0 update 2>&1 | tee "$RUNNER_TEMP/pcmanfm-evidence/apt-update.log"
+          timeout -k 10 110 sudo env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=0 install -y --no-install-recommends build-essential intltool pkg-config libfm-gtk3-dev libgtk-3-dev jwm dbus-x11 xvfb xserver-xephyr x11-utils x11-xserver-utils x11-apps xdotool imagemagick file binutils 2>&1 | tee "$RUNNER_TEMP/pcmanfm-evidence/apt-install.log"
+      - name: Verify source, build original and patch, same-prefix experiment
+        timeout-minutes: 11
+        env:
+          FLOOR_EVIDENCE: ${{ runner.temp }}/pcmanfm-evidence
+        run: timeout -k 10 600 bash ci/pcmanfm-floor/build-and-test.sh
+      - name: Bounded ordinary-log evidence, no artifact or cache upload
+        if: always()
+        timeout-minutes: 2
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq unzip openjdk-17-jre-headless >/dev/null
-          curl -sSL -o /tmp/cmdtools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-          mkdir -p /tmp/sdk/cmdline-tools && unzip -q /tmp/cmdtools.zip -d /tmp/sdk/cmdline-tools && mv /tmp/sdk/cmdline-tools/cmdline-tools /tmp/sdk/cmdline-tools/latest
-          yes | /tmp/sdk/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null 2>&1 || true
-          /tmp/sdk/cmdline-tools/latest/bin/sdkmanager --list 2>/dev/null | grep -i 'emulator' || echo "PROBE-EMULATOR: no emulator package listed for this host"
-      - name: Pinned Ubuntu Base arm64 rootfs - host-level execution evidence
-        run: |
-          sudo apt-get install -y -qq proot >/dev/null 2>&1 || true
-          proot --version || true
-          cd /tmp
-          curl -sSL -o ubuntu-base.tar.gz http://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz
-          echo "a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2  ubuntu-base.tar.gz" | sha256sum -c - || { echo "PROBE-ROOTFS: sha256 mismatch"; exit 1; }
-          rm -rf rootfs && mkdir rootfs && tar -xzf ubuntu-base.tar.gz -C rootfs
-          sudo cp -L /etc/resolv.conf rootfs/etc/resolv.conf || true
-          sudo mount --bind /dev rootfs/dev
-          sudo mount --bind /proc rootfs/proc
-          sudo mount --bind /sys rootfs/sys
-          sudo chroot /tmp/rootfs /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/bash -c 'uname -m && head -2 /etc/os-release && apt-get update -qq 2>&1 | tail -3 && echo PROBE-CHROOT-APT: OK' || echo "PROBE-CHROOT-APT: FAILED rc=$?"
-          proot -0 -r /tmp/rootfs -b /dev -b /proc -b /sys /bin/bash -c 'uname -m && echo PROBE-PROOT: OK' || echo "PROBE-PROOT: failed rc=$?"
+          # Previous step failure remains failed even when this succeeds/fails.
+          timeout -k 2 90 python3 ci/pcmanfm-floor/transport.py emit --root "$RUNNER_TEMP/pcmanfm-evidence"
