@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """UNEXECUTED package preparer, finite exact paths. Does not build or publish."""
-import argparse,hashlib,json,pathlib,shutil
+import argparse,hashlib,json,pathlib,shutil,re
 PREFIX='opt/ldoa/pcmanfm/1.3.2-4build2-floor1'
 CAP=128*1024*1024
 SOURCE_NAMES=['orig.tar.xz','debian.tar.xz','default-size.patch','build-recipe.sh','SOURCE-LABEL.txt']
+def safe(name):
+ return (bool(re.fullmatch(r'[A-Za-z0-9_./+-]+',name)) and not name.startswith('/') and all(x not in ('','..','.') for x in name.split('/'))) or name in {'payload/share/locale/sr@latin','payload/share/locale/sr@latin/LC_MESSAGES','payload/share/locale/sr@latin/LC_MESSAGES/pcmanfm.mo'}
 def digest(p):
  h=hashlib.sha256()
  with p.open('rb') as f:
@@ -49,6 +51,7 @@ def prepare(local,case,out):
   shutil.copyfile(p,src/name)
  f,d,total=inventory(out)
  if len(f)>256 or len(d)>256:raise ValueError('Android manifest cardinality cap')
+ if not all(safe(n) for n in list(f)+d):raise ValueError('Android manifest name policy')
  m={'schema':1,'case':case,'prefix':'/'+PREFIX,'files':f,'directories':d,'bytes':total,'label':'upstream1.3.2; Debian metadata1.3.2-4build2 extracted, quilt not applied'}
  b=json.dumps(m,sort_keys=True,separators=(',',':')).encode()
  if len(b)>65536:raise ValueError('manifest cap')

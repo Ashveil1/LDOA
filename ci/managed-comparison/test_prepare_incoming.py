@@ -14,6 +14,19 @@ class Prep(unittest.TestCase):
  def test_roundtrip(self):
   with patch.object(p,'digest',side_effect=self.pins):self.assertEqual(len(p.prepare(self.local,'original',self.out)),64)
   self.assertTrue((self.out/'source/COPYING').is_file())
+ def test_actual_prepare_allows_upstream_modifier(self):
+  f=self.stage/'share/locale/sr@latin/LC_MESSAGES/pcmanfm.mo';f.parent.mkdir(parents=True);f.write_text('SYNTHETIC LOCALE')
+  with patch.object(p,'digest',side_effect=self.pins):pin=p.prepare(self.local,'original',self.out)
+  import json
+  manifest=json.loads((self.out/'manifest.json').read_text())
+  self.assertIn('payload/share/locale/sr@latin/LC_MESSAGES/pcmanfm.mo',manifest['files'])
+  self.assertIn('payload/share/locale/sr@latin',manifest['directories'])
+  self.assertEqual(len(pin),64)
+ def test_actual_prepare_refuses_unsupported_before_manifest(self):
+  f=self.stage/'share/locale/evil@latin/LC_MESSAGES/pcmanfm.mo';f.parent.mkdir(parents=True);f.write_text('SYNTHETIC BAD NAME')
+  with patch.object(p,'digest',side_effect=self.pins):
+   with self.assertRaisesRegex(ValueError,'Android manifest name policy'):p.prepare(self.local,'original',self.out)
+  self.assertFalse((self.out/'manifest.json').exists())
  def test_source_pin(self):
   with self.assertRaises(ValueError):p.prepare(self.local,'original',self.out)
   self.assertFalse(self.out.exists())

@@ -19,8 +19,15 @@ internal object ManagedIncomingForTest {
         val m=JSONObject(String(bytes,Charsets.UTF_8));check(m.getInt("schema")==1&&m.getString("case")==case&&m.getString("prefix")=="/$PREFIX")
         val files=m.getJSONObject("files");val dirs=m.getJSONArray("directories")
         val names=files.keys().asSequence().toSet();val directoryNames=(0 until dirs.length()).map { dirs.getString(it) }.toSet()
-        fun safe(name:String)=name.matches(Regex("[A-Za-z0-9_./+-]+"))&&!name.startsWith('/')&&name.split('/').none { it==".."||it=="."||it.isEmpty() }
-        check(names.size in 1..256 && names.all(::safe)&&directoryNames.size<=256&&directoryNames.all(::safe))
+        fun safe(name:String):Boolean {
+            val canonical=name.matches(Regex("[A-Za-z0-9_./+-]+"))&&!name.startsWith('/')&&name.split('/').none { it==".."||it=="."||it.isEmpty() }
+            // Exact upstream locale modifier, not unrestricted @ filenames.
+            return canonical || name in setOf("payload/share/locale/sr@latin","payload/share/locale/sr@latin/LC_MESSAGES","payload/share/locale/sr@latin/LC_MESSAGES/pcmanfm.mo")
+        }
+        check(names.size in 1..256) { "manifest file-count" }
+        check(names.all(::safe)) { "manifest file-name" }
+        check(directoryNames.size<=256) { "manifest directory-count" }
+        check(directoryNames.all(::safe)) { "manifest directory-name" }
         check(setOf("payload/bin/pcmanfm","payload/COPYING","payload/DEBIAN-COPYRIGHT","payload/SOURCE.txt","source/orig.tar.xz","source/debian.tar.xz","source/default-size.patch","source/build-recipe.sh").all { it in names })
         check("payload/lib/pcmanfm" in directoryNames)
         Files.walk(source).use { stream ->
