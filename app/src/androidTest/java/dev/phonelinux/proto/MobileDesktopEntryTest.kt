@@ -1865,6 +1865,7 @@ class MobileDesktopEntryTest {
         var argvE: List<String>? = null
         var spawnEnvE: Map<String, String>? = null
         var inheritedE: List<String>? = null
+        var sockPreWriteOutcome: List<String>? = null
         var ndE: String? = null
         var preKidsCount = -1
         var postKidsCount = -1
@@ -1916,6 +1917,38 @@ class MobileDesktopEntryTest {
         pb.environment().putAll(spawnEnv)
         inheritedE = (pb.environment().keys - spawnEnv.keys).sorted()
         pb.redirectErrorStream(true)
+        // The proot bind source must EXIST before spawn: proot cannot create
+        // missing bind sources and drops them with a warning only (run
+        // 41567502697: bind dropped, guest /tmp/.X11-unix absent, xtrace bind
+        // of ':0' failed ENOENT, spawn exited 1). The product start() only
+        // mkdirs()s this dir (XServer.start ~line 1141) and never deletes
+        // entries in it (verified: sole delete in start is xserver.log
+        // rotation), so pre-creating it here removes or shadows nothing the
+        // later server start owns. Diagnostic-only precondition: no deletion,
+        // no chmod, existing entries untouched; failure aborts fail-closed.
+        abortStage.set("socket-dir")
+        val sockDir = XServer.socketDir(ctx)
+        XdiagSpawnPrep.ensureDirectoryChecked(sockDir)?.let { err ->
+            throw AssertionError("stage=socket-dir: " + err)
+        }
+        // The collision VERDICT uses the COMPLETE listing (never a capped
+        // view); an unreadable listing is an error, not "no entries".
+        // Evidence display is bounded separately and says when truncated.
+        val sockCheck = XdiagSpawnPrep.inspectEntries(sockDir)
+            ?: throw AssertionError("stage=socket-dir: entry listing UNREADABLE -" +
+                " refusing to launch an unverifiable proxy")
+        // Raw-first evidence BEFORE the verdict throw; the write outcome is
+        // kept and persisted with any later abort evidence (never implied).
+        sockPreWriteOutcome = XdiagAbortEvidence.write(diagDir, listOf("proxy-socketdir-pre.txt" to {
+            "socketDir=" + sockDir.absolutePath +
+            "\nread=ok total=" + sockCheck.entries.size +
+            " truncated=" + sockCheck.truncated +
+            "\ncollisions=" + (if (sockCheck.collisions.isEmpty()) "none"
+                else sockCheck.collisions.joinToString(",")) +
+            "\n" + sockCheck.shown.joinToString("\n") + "\n" }))
+        if (sockCheck.collisions.isNotEmpty()) throw AssertionError(
+            "stage=socket-dir: preexisting :0 socket/lock entries (owner unprovable," +
+            " left untouched): " + sockCheck.collisions.joinToString(","))
         // Same fail-closed spawn discipline as guestExec.
         abortStage.set("pre-spawn-child-capture")
         val preKids = selfChildren()
@@ -2041,6 +2074,8 @@ class MobileDesktopEntryTest {
                 val drainRef = drain
                 val artifacts = listOf<Pair<String, () -> String>>(
                     "proxy-abort-stage.txt" to { abortStage.get() + "\n" },
+                    "proxy-socketdir-pre-write.txt" to { (sockPreWriteOutcome?.joinToString("\n")
+                        ?: "NOT ATTEMPTED (pre-evidence write not reached; see abort stage/error)") + "\n" },
                     "proxy-spawn-argv.txt" to { (argvE?.joinToString("\n") ?: "UNAVAILABLE") + "\n" },
                     "proxy-spawn-env.txt" to { XdiagAbortEvidence.envFacts(spawnEnvE, inheritedE) },
                     "proxy-spawn-paths.txt" to {
