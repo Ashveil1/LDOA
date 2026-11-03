@@ -179,7 +179,8 @@ class MobileDesktopEntryTest {
             File(out,"managed-abi-capture.txt").writeText(capture.metadata())
             requireGuest(result,"actual guest ABI")
             val abi=capture.decode()
-            check(!Regex("not found|undefined symbol|wrong ELF|cannot open|error",RegexOption.IGNORE_CASE).containsMatchIn(abi)) { "guest ABI refused" }
+            // Refuse diagnostics, not resolved libgpg-error/GPG_ERROR identifiers.
+            check(!Regex("not found|undefined symbol|wrong ELF|cannot open|no version information available|symbol lookup error|error while loading|readelf:.*(?:warning|error):|ldd:|(?<![A-Za-z0-9_-])error(?![A-Za-z0-9_-])",RegexOption.IGNORE_CASE).containsMatchIn(abi)) { "guest ABI refused" }
             check(abi.contains("ELF64")&&abi.contains("Advanced Micro Devices X86-64")&&abi.contains("2's complement, little endian"))
             check(abi.contains("Requesting program interpreter: /lib64/ld-linux-x86-64.so.2"))
             val required=setOf("libX11.so.6","libglib-2.0.so.0","libfm-gtk3.so.4","libgtk-3.so.0","libgdk-3.so.0","libpangocairo-1.0.so.0","libpango-1.0.so.0","libatk-1.0.so.0","libcairo.so.2","libgdk_pixbuf-2.0.so.0","libfm.so.4","libgio-2.0.so.0","libgobject-2.0.so.0","libc.so.6")
