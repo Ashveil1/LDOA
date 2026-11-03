@@ -16,7 +16,8 @@ def join(first_build,second_build,first_dir,second_dir):
   if sdk!={'schema':1,'case':case,'binding':receipt['binding'],'properties':{'Pkg.Revision':'37.2.13','Pkg.BuildId':'16740729'}}:raise ValueError('SDK evidence binding/exactness')
   pin=receipt['manifest_pins'][case]
   check_case.check(d/case,case,pin)
- result['result']='PASS paired build and executed original/patched case gates; actual PNG/input manual review REQUIRED'
+ result['result']='AUTOMATED_GEOMETRY_GATES_COMPLETE_MANUAL_REVIEW_REQUIRED'
+ result.update(manual_status='PENDING',roi_certification='NOT_CLAIMED',presentation_binding='UNVERIFIED',legacy_renderQualification='UNQUALIFIED')
  return result
 
 if __name__=='__main__':

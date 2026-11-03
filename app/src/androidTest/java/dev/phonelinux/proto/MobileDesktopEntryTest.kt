@@ -3373,7 +3373,7 @@ class MobileDesktopEntryTest {
 
     /** Matched-case observation. Original floor mismatch is recorded, not
      * assumption-skipped; patched must fit each ACTUAL root transition.
-     * RenderQualification checks uncovered pixels; not an FPS test. */
+     * Full-screen pixels/input require manual review; not an FPS test. */
     private fun managedComparison(rootPid:Int,at:Long,start:String) {
         val root=DistroInstaller(ctx).rootfsDir(Distros.UBUNTU)
         val out=ctx.externalMediaDirs.first().let { File(it,"additional_test_output") }
@@ -3388,12 +3388,16 @@ class MobileDesktopEntryTest {
         val desktop=tree.filter { (p,st)->anchoredRead(p,st,"cmdline")?.replace(0.toChar(),' ')?.trim()==selected }
         check(desktop.size==1);val pid=desktop.keys.single();val ps=desktop.values.single()
         val end=System.nanoTime()+600_000_000_000L
+        var guestCalls=0;var guestComplete=0;var guestZero=0
         fun guest(vararg args:String):String {
             check(System.nanoTime()<end&&procStartTime(rootPid)==start&&procStartTime(pid)==ps)
             val remaining=minOf(10000L,(end-System.nanoTime())/1000000);check(remaining>0)
             val cap=XdiagByteCapture(System.nanoTime()+remaining*1000000)
             val result=guestExec(root,remaining,*args,byteCapture=cap)
-            requireGuest(result,args.joinToString(" "));return cap.decode()
+            guestCalls++
+            if(cap.snapshot().complete)guestComplete++
+            if(result.code==0&&result.leftover.isEmpty())guestZero++
+            requireGuest(result,"managed bounded query");return cap.decode()
         }
         // Managed-only direct desktop capture. Identity: tracked xterm's
         // direct child WINDOWID, never a class-only selection.
@@ -3490,36 +3494,44 @@ class MobileDesktopEntryTest {
                 }
                 check(clearROI().isEmpty()) { "desktop ROI occluded" }
                 val before=key
-                val lv=device.findObject(By.res("dev.phonelinux.proto:id/lorieView")) ?: error("missing lorie surface")
-                val vb=lv.visibleBounds
+                val snapBefore=ManagedManualCapture.snapshot(ctx)
+                // Full screenshot retained BEFORE numeric/mapping assertions.
+                // No guessed pixel ROI or uniform-full-view acceptance exists.
+                val captureStart=System.nanoTime()
                 val bmp=InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot() ?: error("pixels unavailable")
-                var mapped= intArrayOf()
-                try {
-                    val sx=vb.width().toFloat()/r.w;val sy=vb.height().toFloat()/r.h
-                    check(vb.width()>=bmp.width/2&&kotlin.math.abs(sx/sy-1f)<=0.03f)
-                    mapped=RenderProbeParse.mapRect(rx,ry,rw,rh,sx,sy,vb.left,vb.top,bmp.width,bmp.height) ?: error("ambiguous screenshot ROI")
-                    File(out,"managed-$i.png").outputStream().use { check(bmp.compress(Bitmap.CompressFormat.PNG,100,it)) }
-                }
-                finally { bmp.recycle() }
+                val bitmapSize=listOf(bmp.width,bmp.height)
+                try {File(out,"managed-$i.png").outputStream().use {check(bmp.compress(Bitmap.CompressFormat.PNG,100,it))}}
+                finally {bmp.recycle()}
+                val captureEnd=System.nanoTime()
+                val snapAfter=ManagedManualCapture.snapshot(ctx)
                 val ar=RenderProbeParse.winStats(guest("xwininfo","-root")) ?: error("postcapture root")
                 val ad=RenderProbeParse.winStats(guest("xwininfo","-id",candidates.single().toString())) ?: error("postcapture desktop")
                 val after=listOf(ar.w,ar.h,ad.w,ad.h,ad.absX,ad.absY)
-                check(after==before&&clearROI().isEmpty());xtCurrent();check(mapState()=="IsUnMapped")
-                val bracket=org.json.JSONObject().put("schema",1).put("case",case).put("manifest",pin).put("transition",i)
+                val occluders=clearROI();xtCurrent();val unmapped=mapState()=="IsUnMapped"
+                fun snapshotJson(v:ManagedManualSnapshot)=org.json.JSONObject()
+                    .put("complete",v.complete).put("valid",v.valid())
+                    .put("start_ns",v.startNs).put("end_ns",v.endNs)
+                    .put("numbers",org.json.JSONArray(v.numbers))
+                val bracket=org.json.JSONObject().put("schema",2).put("case",case).put("manifest",pin).put("transition",i)
+                    .put("scope","x-geometry-and-manual-fullscreen").put("presentation_binding","UNVERIFIED")
+                    .put("manual_review","PENDING").put("source_pin","29d4460b26e69b39af023d255a255e2778251952")
+                    .put("capture_start_ns",captureStart).put("capture_end_ns",captureEnd).put("legacy_renderQualification","NOT_EXECUTED_MANUAL_SCOPE")
                     .put("desktop_pid",pid).put("desktop_start",ps).put("desktop_xid",candidates.single())
                     .put("before",org.json.JSONArray(before)).put("after",org.json.JSONArray(after))
-                    .put("xterm_unmapped",true).put("occluders",org.json.JSONArray()).put("manual_pixels",true)
-                    .put("roi_root",org.json.JSONArray(listOf(rx,ry,rw,rh)))
-                    .put("roi_bitmap",org.json.JSONArray(mapped.toList()))
+                    .put("xterm_unmapped",unmapped).put("occluders",org.json.JSONArray(occluders))
+                    .put("roi_root",org.json.JSONArray(listOf(rx,ry,rw,rh))).put("x_occlusion_scope","central-root-only")
+                    .put("bitmap",org.json.JSONArray(bitmapSize)).put("pre",snapshotJson(snapBefore)).put("post",snapshotJson(snapAfter))
+                    .put("java_state",if(snapBefore.numbers==snapAfter.numbers)"UNCHANGED" else "CHANGED")
+                    .put("query_calls",guestCalls).put("query_complete",guestComplete).put("query_zero_cleanup",guestZero)
                 File(out,"managed-$i-capture-bracket.json").writeText(bracket.toString()+"\n")
+                check(after==before&&occluders.isEmpty()&&unmapped)
+                check(snapBefore.valid()&&snapAfter.valid()&&snapBefore.endNs<=snapAfter.startNs)
+                check(guestCalls==guestComplete&&guestCalls==guestZero)
                 if(case=="patched")check(fit) { "patched desktop does not match actual root" }
             }
             check(observed.any { it.first>it.second }&&observed.any { it.second>it.first }) { "actual portrait/landscape not observed" }
             restoreXterm();minimized=false
-            // Full preexisting topology/occluder/uncovered-color gate onfinal
-            // portrait only. Its failure is a product finding, not obscured.
-            if(case=="patched") renderQualification(rootPid,at,start)
-            else raw.appendText("Original geometry mismatch retained; strictfullrenderqualification not expected to pass floor mismatch. OriginalPNG evidence remains manual.\n")
+            raw.appendText("legacy_renderQualification=NOT_EXECUTED_MANUAL_SCOPE; sections0-5 session/provisioning and legacy color/nonblack/topology exclusive checks UNQUALIFIED\n")
             // Actual Android key routing to currently focused xterm. Fixed
             // command writes owned diagnostic file; no Files/socket payload.
             val xt=RenderProbeParse.searchIds(guest("xdotool","search","--class","XTerm")) ?: error("xterm ids")

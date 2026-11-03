@@ -13,7 +13,7 @@ class Aggregate(Evidence):
    for f in (self.e/case).iterdir():shutil.copyfile(f,out/case/f.name)
    coverage={'complete':True,'expected_case':case,'binding':receipt['binding'],'issues':[],'private_excluded':True,'selected':['host-phase.txt','runtime-sdk.json']+[case+'/'+n for n in t.CASE_FILES]}
    (out/'coverage.json').write_text(json.dumps(coverage));(out/'runtime-sdk.json').write_text(json.dumps({'schema':1,'case':case,'binding':receipt['binding'],'properties':{'Pkg.Revision':'37.2.13','Pkg.BuildId':'16740729'}}));dirs.append(out)
-  self.assertIn('manual',s.join(a,b,*dirs)['result'])
+  self.assertIn('MANUAL_REVIEW_REQUIRED',s.join(a,b,*dirs)['result'])
   for key,value in [('run_id','2'),('run_attempt','2'),('sha','b'*40),('job','repro_first')]:
    altered=copy.deepcopy(b);altered['binding'][key]=value
    with self.subTest(key=key),self.assertRaises(ValueError):s.join(a,altered,*dirs)

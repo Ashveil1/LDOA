@@ -1,4 +1,4 @@
-import pathlib,sys,re,json,xml.etree.ElementTree as E
+import pathlib,sys,re,json,math,struct,xml.etree.ElementTree as E
 
 def check(root,case,pin,*,inflight=False):
  if case not in ('original','patched') or not re.fullmatch('[0-9a-f]{64}',pin):raise ValueError('expected case/pin required')
@@ -31,17 +31,35 @@ def check(root,case,pin,*,inflight=False):
   bs=list(root.rglob('managed-'+str(i)+'-capture-bracket.json'))
   if len(bs)!=1:raise ValueError('missing/duplicate desktop pixel bracket')
   b=json.loads(bs[0].read_text())
+  if bs[0].stat().st_size>8192:raise ValueError('bracket cap')
   ints=lambda v,n:isinstance(v,list) and len(v)==n and all(type(x) is int for x in v)
-  geom=b.get('before');roi=b.get('roi_root');mapped=b.get('roi_bitmap')
-  if not ints(geom,6) or any(x<=0 for x in geom[:4]) or not ints(roi,4) or min(roi[2:])<=0 or min(roi[:2])<0 or not ints(mapped,4) or min(mapped[:2])<0 or mapped[2]<=mapped[0] or mapped[3]<=mapped[1]:raise ValueError('nonvacuous desktop bracket geometry')
+  geom=b.get('before');roi=b.get('roi_root')
+  if not ints(geom,6) or any(x<=0 for x in geom[:4]) or not ints(roi,4) or min(roi[2:])<=0 or min(roi[:2])<0:raise ValueError('geometry')
   if roi[0]+roi[2]>geom[0] or roi[1]+roi[3]>geom[1] or roi[0]<geom[4] or roi[1]<geom[5] or roi[0]+roi[2]>geom[4]+geom[2] or roi[1]+roi[3]>geom[5]+geom[3]:raise ValueError('ROI outside root/desktop')
-  if type(b.get('desktop_pid')) is not int or b['desktop_pid']<=0 or not re.fullmatch(r'[1-9][0-9]*',str(b.get('desktop_start',''))) or type(b.get('desktop_xid')) is not int or b['desktop_xid']<=0:raise ValueError('missing desktop identity')
+  if type(b.get('desktop_pid')) is not int or b['desktop_pid']<=0 or not re.fullmatch(r'[1-9][0-9]*',str(b.get('desktop_start',''))) or type(b.get('desktop_xid')) is not int or b['desktop_xid']<=0:raise ValueError('desktop identity')
   if (str(b['desktop_pid']),str(b['desktop_start']))!=re.search(r'anchored=(\d+)/(\d+)',text).groups():raise ValueError('desktop identity drift')
-  if b.get('schema')!=1 or b.get('case')!=case or b.get('manifest')!=pin or b.get('transition')!=i or b.get('xterm_unmapped') is not True or b.get('occluders')!=[] or geom!=b.get('after') or b.get('manual_pixels') is not True:raise ValueError('desktop pixel bracket binding/state')
+  fixed={'source_pin':'29d4460b26e69b39af023d255a255e2778251952','schema':2,'scope':'x-geometry-and-manual-fullscreen','presentation_binding':'UNVERIFIED','manual_review':'PENDING','legacy_renderQualification':'NOT_EXECUTED_MANUAL_SCOPE','x_occlusion_scope':'central-root-only'}
+  if any(b.get(k)!=v for k,v in fixed.items()) or any(k in b for k in ['roi_bitmap','manual_pixels']):raise ValueError('manual scope/certification')
+  if b.get('case')!=case or b.get('manifest')!=pin or b.get('transition')!=i or b.get('xterm_unmapped') is not True or b.get('occluders')!=[] or geom!=b.get('after'):raise ValueError('bracket binding/state')
+  for phase in ['pre','post']:
+   snap=b.get(phase,{})
+   if snap.get('complete') is not True or snap.get('valid') is not True:raise ValueError('snapshot incomplete')
+   start=snap.get('start_ns');end=snap.get('end_ns');v=snap.get('numbers')
+   if type(start) is not int or type(end) is not int or not 0<start<=end<=start+2000000000:raise ValueError('snapshot time')
+   if not isinstance(v,list) or len(v)!=53 or any(type(x) not in (int,float) or not math.isfinite(x) or abs(x)>1000000 for x in v):raise ValueError('snapshot finite shape')
+   if min(v[:4])<=0 or v[36:41]!=[1,1,1,0,1] or v[52]!=1 or v[41]<0 or v[42] not in (0,1,2,3):raise ValueError('snapshot surface/view identity')
+  cs=b.get('capture_start_ns');ce=b.get('capture_end_ns')
+  if type(cs) is not int or type(ce) is not int or not b['pre']['end_ns']<=cs<=ce<=b['post']['start_ns']:raise ValueError('capture/snapshot ordering')
+  state='UNCHANGED' if b['pre']['numbers']==b['post']['numbers'] else 'CHANGED'
+  if b.get('java_state')!=state:raise ValueError('snapshot state label')
+  q=b.get('query_calls')
+  if type(q) is not int or not 0<q<=512 or b.get('query_complete')!=q or b.get('query_zero_cleanup')!=q:raise ValueError('query completeness')
+  png=list(root.rglob('managed-'+str(i)+'.png'))[0].read_bytes()
+  if len(png)<24 or png[:8]!=b'\x89PNG\r\n\x1a\n' or png[12:16]!=b'IHDR' or list(struct.unpack('>II',png[16:24]))!=b.get('bitmap'):raise ValueError('actual PNG header dimensions')
 
  teardown=list(root.rglob('managed-teardown.txt'))
  if len(teardown)!=1 or teardown[0].read_text().strip()!='PASS original owned PID/start set absent after Stop':raise ValueError('unverified teardown')
- return 'PASS exact executed case/coverage; manual pixel/input review still REQUIRED'
+ return 'AUTOMATED_GEOMETRY_GATES_COMPLETE_MANUAL_REVIEW_REQUIRED'
 if __name__=='__main__':
  try:
   if len(sys.argv) not in (4,5) or (len(sys.argv)==5 and sys.argv[4]!='--inflight'):raise ValueError('exact args')

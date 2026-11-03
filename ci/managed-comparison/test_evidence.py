@@ -1,4 +1,4 @@
-import json,pathlib,tempfile,unittest,xml.etree.ElementTree as ET
+import struct,json,pathlib,tempfile,unittest,xml.etree.ElementTree as ET
 import transport as t
 import check_case as c
 class Evidence(unittest.TestCase):
@@ -16,7 +16,11 @@ class Evidence(unittest.TestCase):
    (d/'managed-provenance.txt').write_text('case='+case+' manifest='+'a'*64+' inventory='+'b'*64+'\n')
    (d/'managed-teardown.txt').write_text('PASS original owned PID/start set absent after Stop')
    for i in range(5):
-    (d/f'managed-{i}-capture-bracket.json').write_text(json.dumps({'schema':1,'case':case,'manifest':'a'*64,'transition':i,'desktop_pid':123,'desktop_start':'456','desktop_xid':100,'before':[800,1800,800,1800,0,0],'after':[800,1800,800,1800,0,0],'roi_root':[160,630,480,540],'roi_bitmap':[160,630,640,1170],'xterm_unmapped':True,'occluders':[],'manual_pixels':True}))
+    nums=[800,1800,800,1800,0,0,0,0,800,1800,0,0,800,1800,0,0,800,1800,0,0,800,1800,0,0,800,1800,1,0,0,0,1,0,0,0,1,1,1,1,1,0,1,0,0,0,0,0,0,0,0,0,0,0,1]
+    snap=lambda st:{'complete':True,'valid':True,'start_ns':st,'end_ns':st+1,'numbers':nums}
+    (d/f'managed-{i}.png').write_bytes(b'\x89PNG\r\n\x1a\n'+struct.pack('>I',13)+b'IHDR'+struct.pack('>II',800,1800)+b'fixture-not-real-image')
+    (d/f'managed-{i}-capture-bracket.json').write_text(json.dumps({'source_pin':'29d4460b26e69b39af023d255a255e2778251952','capture_start_ns':2,'capture_end_ns':3,'schema':2,'case':case,'manifest':'a'*64,'transition':i,'desktop_pid':123,'desktop_start':'456','desktop_xid':100,'before':[800,1800,800,1800,0,0],'after':[800,1800,800,1800,0,0],'roi_root':[160,630,480,540],'xterm_unmapped':True,'occluders':[],'scope':'x-geometry-and-manual-fullscreen','presentation_binding':'UNVERIFIED','manual_review':'PENDING','legacy_renderQualification':'NOT_EXECUTED_MANUAL_SCOPE','x_occlusion_scope':'central-root-only','bitmap':[800,1800],'pre':snap(1),'post':snap(3),'java_state':'UNCHANGED','query_calls':1,'query_complete':1,'query_zero_cleanup':1}))
+
  def tearDown(self):self.tmp.cleanup()
  def test_roundtrip_excludes_private(self):
   self.assertTrue(t.collect(self.e,self.private,self.out));lines=t.frame(self.out);t.decode(lines,self.dec)
@@ -46,7 +50,7 @@ class Evidence(unittest.TestCase):
  def test_duplicate_pixel(self):
   extra=self.e/'original/extra';extra.mkdir();(extra/'managed-0.png').write_text('SYNTHETIC')
   with self.assertRaises(ValueError):c.check(self.e/'original','original','a'*64)
- def test_bound_ok(self):self.assertIn('PASS',c.check(self.e/'original','original','a'*64))
+ def test_bound_ok(self):self.assertIn('MANUAL_REVIEW_REQUIRED',c.check(self.e/'original','original','a'*64))
  def test_swapped_case(self):
   with self.assertRaises(ValueError):c.check(self.e/'original','patched','a'*64)
  def test_swapped_pin(self):
