@@ -1853,6 +1853,31 @@ class MobileDesktopEntryTest {
     }
 
     private fun xdiagProxyStart(rootfs: File, diagDir: File, lifetimeSec: Int, deadlineNs: Long): XdiagProxy {
+        // Failure-path evidence: EVERY abort below persists the proxy's own
+        // output tail, spawn identity, exit status, sanitized argv/env and
+        // path resolution into diagDir BEFORE the throw (xdiagExport copies
+        // the whole dir). Each artifact write is independent and
+        // best-effort, so a cleanup/reap failure can NEVER suppress them.
+        // Added after run 41563274576 lost the spawn's stderr tail.
+        val abortStage = java.util.concurrent.atomic.AtomicReference("pre-baseline")
+        var spawnProc: Process? = null
+        var rootPidE: Int? = null
+        var argvE: List<String>? = null
+        var spawnEnvE: Map<String, String>? = null
+        var inheritedE: List<String>? = null
+        var ndE: String? = null
+        var preKidsCount = -1
+        var postKidsCount = -1
+        var drain: Thread? = null
+        var rootStartE: String? = null
+        val cleanupDone = java.util.concurrent.atomic.AtomicBoolean(false)
+        val tail = StringBuilder()
+        val drainError = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+        // Monotonic connection counter - the capped tail can trim and a
+        // recount can stay flat or DECREASE, so evidence never comes from
+        // tail size; this counter only ever increases.
+        val gotCount = java.util.concurrent.atomic.AtomicLong(0)
+        try {
         // Collision pre-baseline: any pre-existing xtrace-anchored process
         // is a FOREIGN match we must never touch - abort, kill nothing.
         val baseline = xdiagProcScan("/xdiag/xtrace")
@@ -1860,8 +1885,10 @@ class MobileDesktopEntryTest {
             throw AssertionError("xdiag: pre-existing /xdiag/xtrace process(es) " + baseline.keys +
                 " before start - collision refused, nothing killed")
         }
+        abortStage.set("spawn-build")
         val nd = ctx.applicationInfo.nativeLibraryDir
-        val pb = ProcessBuilder(mutableListOf(
+        ndE = nd
+        val argv = mutableListOf(
             File(nd, "libproot.so").absolutePath,
             "--link2symlink", "-0", "-r", rootfs.absolutePath,
             "-b", "/dev", "-b", "/proc", "-b", "/sys",
@@ -1874,44 +1901,36 @@ class MobileDesktopEntryTest {
             "/bin/sh", "-c",
             "ulimit -f " + XdiagPolicy.traceCapBlocks512() + "; exec " +
             "/usr/bin/timeout -s KILL " + lifetimeSec +
-            " /xdiag/xtrace -d :10 -D :0 -k -n -o /xdiag/xtrace.log"))
-        pb.environment().putAll(mapOf(
+            " /xdiag/xtrace -d :10 -D :0 -k -n -o /xdiag/xtrace.log")
+        argvE = argv
+        val spawnEnv = mapOf(
             "PROOT_LOADER" to File(nd, "libproot_loader.so").absolutePath,
             "PROOT_LOADER_32" to File(nd, "libproot_loader32.so").absolutePath,
             "LD_LIBRARY_PATH" to nd,
             "HOME" to "/root",
             "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             "PROOT_TMP_DIR" to Proot.prootTmpDir(ctx).absolutePath,
-            "TMPDIR" to "/tmp"))
+            "TMPDIR" to "/tmp")
+        spawnEnvE = spawnEnv
+        val pb = ProcessBuilder(argv)
+        pb.environment().putAll(spawnEnv)
+        inheritedE = (pb.environment().keys - spawnEnv.keys).sorted()
         pb.redirectErrorStream(true)
         // Same fail-closed spawn discipline as guestExec.
+        abortStage.set("pre-spawn-child-capture")
         val preKids = selfChildren()
             ?: throw AssertionError("xdiag: pre-spawn child capture UNREADABLE - refusing to launch an untrackable proxy")
+        preKidsCount = preKids.size
+        abortStage.set("spawn")
         val p = pb.start()
-        val postKids = selfChildren()
-        if (postKids == null) {
-            xdiagReapSpawned(p, null)
-            guestAborted = true
-            throw AssertionError("xdiag: post-spawn child capture UNREADABLE - proxy stopped/reaped, capture aborted")
-        }
-        val spawnedKids = postKids - preKids.keys
-        if (spawnedKids.size != 1) {
-            xdiagReapSpawned(p, null)
-            guestAborted = true
-            throw AssertionError("xdiag: spawned proot root not uniquely identifiable (diff=" +
-                spawnedKids.size + ") - reaped, capture aborted")
-        }
-        val rootPid = spawnedKids.keys.first()
-        val tail = StringBuilder()
-        val drainError = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
-        // Monotonic connection counter - the capped tail can trim and a
-        // recount can stay flat or DECREASE, so evidence never comes from
-        // tail size; this counter only ever increases.
-        val gotCount = java.util.concurrent.atomic.AtomicLong(0)
+        spawnProc = p
+        // Stderr drain starts IMMEDIATELY after spawn - before any
+        // identity capture - so even pre-identity aborts keep the
+        // proxy's own output.
         // Bounded reader: NO unbounded forEachLine - a single line is
         // capped at 4KB (truncated + marked), the tail stays capped, and
         // a read error is RECORDED (surfaced at stop), never swallowed.
-        val drain = kotlin.concurrent.thread {
+        drain = kotlin.concurrent.thread {
             try {
                 val r = p.inputStream.bufferedReader()
                 val line = StringBuilder()
@@ -1939,10 +1958,27 @@ class MobileDesktopEntryTest {
                 flushLine()
             } catch (t: Throwable) { drainError.set(t) }
         }
+        abortStage.set("post-spawn-identity")
+        val postKids = selfChildren()
+        if (postKids == null) {
+            guestAborted = true
+            throw AssertionError("xdiag: post-spawn child capture UNREADABLE - capture aborted (cleanup+evidence in the abort handler)")
+        }
+        postKidsCount = postKids.size
+        val spawnedKids = postKids - preKids.keys
+        if (spawnedKids.size != 1) {
+            guestAborted = true
+            throw AssertionError("xdiag: spawned proot root not uniquely identifiable (diff=" +
+                spawnedKids.size + ") - capture aborted (cleanup+evidence in the abort handler)")
+        }
+        val rootPid = spawnedKids.keys.first()
+        rootPidE = rootPid
+        rootStartE = spawnedKids[rootPid]
         // Anchor: exactly one guest xtrace process, pid+starttime, proven
         // descendant of our proot root, within a bounded wait. Then the
         // OWNED TREE is captured whole so teardown can prove every member
         // gone. Every failure path reaps first.
+        abortStage.set("anchor-wait")
         var proxy: XdiagProxy? = null
         val anchorDeadlineNs = System.nanoTime() +
             minOf(10_000_000_000L, deadlineNs - System.nanoTime())
@@ -1965,19 +2001,91 @@ class MobileDesktopEntryTest {
                         " - anchor ambiguous (never kill what we cannot identify)")
                 }
             } catch (t: AssertionError) {
-                xdiagReapSpawned(p, drain); guestAborted = true; throw t
+                guestAborted = true; throw t
             }
             Thread.sleep(250)
         }
         if (proxy == null) {
-            xdiagReapSpawned(p, drain)
             guestAborted = true
-            throw AssertionError("xdiag: proxy anchor did not appear within 10s - spawn reaped, capture aborted")
+            throw AssertionError("xdiag: proxy anchor did not appear within 10s - capture aborted (cleanup+evidence in the abort handler)")
         }
         Log.i(TAG, "xdiag: proxy up pid=" + proxy.anchorPid + " starttime=" + proxy.anchorStart +
             " tree=" + proxy.tree.keys + " lifetime=" + lifetimeSec + "s (in-guest timeout-enforced)")
         return proxy
+        } catch (t: Throwable) {
+            // Cleanup ONCE, idempotent, for any spawned-but-not-returned
+            // process - covers AssertionErrors, interruptions and any
+            // other Throwable from the scan/tree/log paths. A cleanup
+            // failure is SUPPRESSED onto the original, never replaces it.
+            guestAborted = true
+            val sp = spawnProc
+            if (sp != null && cleanupDone.compareAndSet(false, true)) {
+                try { xdiagReapSpawned(sp, drain) }
+                catch (cleanupFailure: Throwable) { t.addSuppressed(cleanupFailure) }
+            }
+            // Evidence AFTER the cleanup attempt, whatever happened above.
+            // Core artifacts generate+write FIRST, each isolated; the
+            // bounded AVC harvest is LAST so its latency or failure can
+            // never suppress the spawn/exit/tail evidence.
+            try {
+                val exitStatus = when {
+                    sp == null -> XdiagAbortEvidence.exitStatus(null, null, null, notSpawned = true)
+                    else -> try {
+                        XdiagAbortEvidence.exitStatus(true, sp.exitValue(), null, false)
+                    } catch (e: IllegalThreadStateException) {
+                        XdiagAbortEvidence.exitStatus(false, null, null, false)
+                    } catch (e: Throwable) {
+                        XdiagAbortEvidence.exitStatus(null, null, e.javaClass.simpleName, false)
+                    }
+                }
+                val drainRef = drain
+                val artifacts = listOf<Pair<String, () -> String>>(
+                    "proxy-abort-stage.txt" to { abortStage.get() + "\n" },
+                    "proxy-spawn-argv.txt" to { (argvE?.joinToString("\n") ?: "UNAVAILABLE") + "\n" },
+                    "proxy-spawn-env.txt" to { XdiagAbortEvidence.envFacts(spawnEnvE, inheritedE) },
+                    "proxy-spawn-paths.txt" to {
+                        val cwd = try { File("/proc/self/cwd").canonicalPath }
+                            catch (e: Throwable) { "PROBE-ERROR(" + e.javaClass.simpleName + ")" }
+                        XdiagAbortEvidence.pathFacts(linkedMapOf(
+                            "nativeLibraryDir" to (ndE ?: "UNKNOWN"),
+                            "rootfs" to rootfs.absolutePath,
+                            "diagDir" to diagDir.absolutePath,
+                            "socketDir" to XServer.socketDir(ctx).absolutePath,
+                            "prootTmpDir" to Proot.prootTmpDir(ctx).absolutePath,
+                            "processCwd" to cwd,
+                            "dataLocalTests" to "/data/local/tests")) + "\n" },
+                    "proxy-identity.txt" to { listOf(
+                        "rootPid=" + (rootPidE?.toString() ?: "UNKNOWN(pre-identity)"),
+                        "rootStarttime=" + (rootStartE ?: "UNAVAILABLE"),
+                        "preKids=" + preKidsCount,
+                        "postKids=" + postKidsCount,
+                        "connections=" + gotCount.get()).joinToString("\n") + "\n" },
+                    "proxy-stderr-tail.txt" to { XdiagAbortEvidence.tailText(
+                        drainRef != null, synchronized(tail) { tail.toString() }) },
+                    "proxy-exit-status.txt" to { exitStatus + "\n" +
+                        "drainError=" + (drainError.get()?.let {
+                            it.javaClass.simpleName + ": " + it.message } ?: "none") + "\n" },
+                    "proxy-avc-window.txt" to {
+                        // Bounded separately (caller-wait bound only - a
+                        // stuck shell worker is abandoned on a daemon
+                        // thread, not guaranteed killed); existing AVC
+                        // lines with timestamps/pids for attribution
+                        // checks - no policy changes.
+                        val l = XdiagAbortEvidence.bounded(8_000) {
+                            device.executeShellCommand("logcat -d -t 800") }
+                        if (l == null) "UNAVAILABLE (logcat read failed/timed out)\n"
+                        else XdiagAbortEvidence.filterAvcLines(l).ifEmpty {
+                            "(no avc/audit lines in window)\n" } })
+                val outcomes = XdiagAbortEvidence.write(diagDir, artifacts)
+                Log.i(TAG, "xdiag: abort evidence persisted: " + outcomes.joinToString("; "))
+            } catch (persistFailure: Throwable) {
+                Log.w(TAG, "xdiag: abort evidence persist FAILED (auxiliary): " +
+                    persistFailure.javaClass.simpleName)
+            }
+            throw t
+        }
     }
+
 
     /** Fail-closed descendant check: walk the ppid chain of [pid] up to
      *  [rootPid] via /proc stat; unreadable-while-alive link = UNKNOWN. */
