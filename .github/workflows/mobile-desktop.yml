@@ -12,6 +12,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 130
     outputs:
+      contract: ${{ steps.receipt.outputs.contract }}
       inputs: ${{ steps.receipt.outputs.inputs }}
       outputs: ${{ steps.receipt.outputs.outputs }}
       repository: ${{ steps.receipt.outputs.repository }}
@@ -54,10 +55,10 @@ jobs:
         env:
           LDOA_DEBUG_KEYSTORE_B64: ${{ secrets.LDOA_DEBUG_KEYSTORE_B64 }}
         run: timeout -k 10 1850 python3 ci/managed-comparison/pinned_repro_signing.py
-      - name: Finite build receipt
+      - name: Finite v2 declared identity receipt
         timeout-minutes: 2
         id: receipt
-        run: timeout -k 2 90 python3 ci/managed-comparison/paired_repro.py --role first --private "$FLOOR_EVIDENCE"
+        run: timeout -k 2 90 python3 ci/managed-comparison/independent_observations.py --role first --private "$FLOOR_EVIDENCE"
       - name: original one fresh API34 emulator on separate hosted runner
         timeout-minutes: 63
         uses: reactivecircus/android-emulator-runner@v2
@@ -82,6 +83,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 130
     outputs:
+      contract: ${{ steps.receipt.outputs.contract }}
       inputs: ${{ steps.receipt.outputs.inputs }}
       outputs: ${{ steps.receipt.outputs.outputs }}
       repository: ${{ steps.receipt.outputs.repository }}
@@ -124,10 +126,11 @@ jobs:
         env:
           LDOA_DEBUG_KEYSTORE_B64: ${{ secrets.LDOA_DEBUG_KEYSTORE_B64 }}
         run: timeout -k 10 1850 python3 ci/managed-comparison/pinned_repro_signing.py
-      - name: Finite build receipt and strict paired digest comparison
+      - name: Finite v2 declared identity and explicit independent-host limits
         timeout-minutes: 2
         id: receipt
         env:
+          FIRST_CONTRACT: ${{ needs.repro_first.outputs.contract }}
           FIRST_INPUTS: ${{ needs.repro_first.outputs.inputs }}
           FIRST_OUTPUTS: ${{ needs.repro_first.outputs.outputs }}
           FIRST_REPOSITORY: ${{ needs.repro_first.outputs.repository }}
@@ -136,7 +139,7 @@ jobs:
           FIRST_SHA: ${{ needs.repro_first.outputs.sha }}
           FIRST_JOB: ${{ needs.repro_first.outputs.job }}
           FIRST_ROLE: ${{ needs.repro_first.outputs.role }}
-        run: timeout -k 2 90 python3 ci/managed-comparison/paired_repro.py --role second --private "$FLOOR_EVIDENCE"
+        run: timeout -k 2 90 python3 ci/managed-comparison/independent_observations.py --role second --private "$FLOOR_EVIDENCE"
       - name: patched one fresh API34 emulator on separate hosted runner
         timeout-minutes: 63
         uses: reactivecircus/android-emulator-runner@v2

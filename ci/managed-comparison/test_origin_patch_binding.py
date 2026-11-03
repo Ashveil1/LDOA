@@ -22,5 +22,5 @@ class PatchBinding(unittest.TestCase):
   root=pathlib.Path(__file__).parents[2];s=(root/'ci/managed-comparison/build-and-test.sh').read_text()
   self.assertIn('if [[ $case == patched ]]; then patch -p1',s)
   self.assertIn("assert man[0]==man[1], 'resource-prefix confound'",s)
-  self.assertEqual(hashlib.sha256((root/'.github/workflows/mobile-desktop.yml').read_bytes()).hexdigest(),'bc56d97ab810ab701d8d0f7e40347685d4454c5e5923c206aea1827009e5a8bb')
+  self.assertEqual(hashlib.sha256((root/'.github/workflows/mobile-desktop.yml').read_bytes()).hexdigest(),'02bf6f0bc0a17da49a58cb555bb32f8770f657c003eb0d9c94855f5506eabea0')
 if __name__=='__main__':unittest.main()

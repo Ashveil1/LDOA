@@ -16,7 +16,10 @@ class Budget(unittest.TestCase):
   root=pathlib.Path(__file__).parents[2];rel='.github/workflows/mobile-desktop.yml'
   old=subprocess.check_output(['git','show','22d480913d3b746659d2bc2d0d576ac20218804c:'+rel],cwd=root,text=True)
   new=(root/rel).read_text()
-  self.assertEqual(new,old.replace('uses: actions/checkout@v4\n        timeout-minutes: 2','uses: actions/checkout@v4\n        timeout-minutes: 4').replace('timeout-minutes: 65','timeout-minutes: 63'))
+  expected=old.replace('uses: actions/checkout@v4\n        timeout-minutes: 2','uses: actions/checkout@v4\n        timeout-minutes: 4').replace('timeout-minutes: 65','timeout-minutes: 63')
+  expected=expected.replace('ci/managed-comparison/paired_repro.py --role','ci/managed-comparison/independent_observations.py --role').replace('Finite build receipt and strict paired digest comparison','Finite v2 declared identity and explicit independent-host limits').replace('Finite build receipt\n','Finite v2 declared identity receipt\n')
+  expected=expected.replace('    outputs:\n      inputs:', '    outputs:\n      contract: ${{ steps.receipt.outputs.contract }}\n      inputs:').replace('          FIRST_INPUTS:', '          FIRST_CONTRACT: ${{ needs.repro_first.outputs.contract }}\n          FIRST_INPUTS:')
+  self.assertEqual(new,expected)
   pin=hashlib.sha256(new.encode()).hexdigest()
   self.assertIn(pin,(root/'ci/managed-comparison/test_origin_patch_binding.py').read_text())
   retired='9adaaa17fcc393c677a507b0a3253fb35b2'+'7d03d719883132ac3ec067a1d7f60'
