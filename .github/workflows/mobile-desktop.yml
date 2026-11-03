@@ -1,5 +1,5 @@
-# LOCAL UNREGISTERED PROPOSAL ONLY, not authorized to commit/dispatch.
-name: managed-desktop-comparison-proposal
+# LOCAL build-only paired reproducibility proposal, not execution authority.
+name: managed-paired-build-repro
 on:
   workflow_dispatch:
     inputs:
@@ -7,13 +7,24 @@ on:
         type: boolean
         default: false
 jobs:
-  comparison:
+  repro_first:
     if: ${{ inputs.execution_approved }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 210
+    timeout-minutes: 65
+    outputs:
+      inputs: ${{ steps.receipt.outputs.inputs }}
+      outputs: ${{ steps.receipt.outputs.outputs }}
+      repository: ${{ steps.receipt.outputs.repository }}
+      run_id: ${{ steps.receipt.outputs.run_id }}
+      run_attempt: ${{ steps.receipt.outputs.run_attempt }}
+      sha: ${{ steps.receipt.outputs.sha }}
+      job: ${{ steps.receipt.outputs.job }}
+      role: ${{ steps.receipt.outputs.role }}
     steps:
-      - name: Set fixed runner-private comparison path
-        run: printf 'FLOOR_EVIDENCE=%s/managed-private\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Private build location
+        run: |
+          printf 'FLOOR_EVIDENCE=%s/managed-private\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          mkdir -m700 "$RUNNER_TEMP/managed-private"
       - uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -24,60 +35,76 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           cache-disabled: true
-      - name: Existing controlled host build dependencies, no retries
+      - name: Same controlled host build dependencies
         timeout-minutes: 10
         run: |
-          mkdir -m700 "$FLOOR_EVIDENCE"
           timeout -k 5 120 sudo apt-get -o Acquire::Retries=0 update
           timeout -k 10 300 sudo apt-get -o Acquire::Retries=0 install -y --no-install-recommends build-essential intltool pkg-config libfm-gtk3-dev libgtk-3-dev bison
-      - name: Matched fixedprefix original and patch, runner-local only
-        timeout-minutes: 12
-        run: |
-          FIXED_PREFIX_REVIEWED_BUILD=yes timeout -k 10 600 bash ci/managed-comparison/build-and-test.sh
-          LOCAL=$(cat "$FLOOR_EVIDENCE/runner-local-location.txt")
-          python3 ci/managed-comparison/prepare_incoming.py --local "$LOCAL" --case original --out "$FLOOR_EVIDENCE/incoming-original" > "$FLOOR_EVIDENCE/pin-original"
-          python3 ci/managed-comparison/prepare_incoming.py --local "$LOCAL" --case patched --out "$FLOOR_EVIDENCE/incoming-patched" > "$FLOOR_EVIDENCE/pin-patched"
-      - name: One debug APK build for two fresh disposable cases, no delivery
-        timeout-minutes: 35
-        run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'ndk;29.0.14206865' 'platforms;android-35' >/dev/null
-          timeout -k 30 1800 ./gradlew assembleDebug assembleDebugAndroidTest
-      - name: KVM
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
-      - name: Original case fresh emulator, exact port5554
-        timeout-minutes: 65
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
-          target: default
-          arch: x86_64
-          profile: pixel_6
-          cores: 4
-          avd-name: managed-original
-          emulator-port: 5554
-          force-avd-creation: true
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -wipe-data -noaudio -no-boot-anim
-          script: MANAGED_CASE_EXEC_APPROVED=yes bash ci/managed-comparison/run-case.sh original "$FLOOR_EVIDENCE/incoming-original" "$(cat "$FLOOR_EVIDENCE/pin-original")"
-      - name: Verify first emulator exited before second case
-        run: timeout -k 2 15 bash -c '! adb devices | grep -q "emulator-5554[[:space:]]"'
-      - name: Patched case fresh emulator same exact port5554
-        timeout-minutes: 65
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
-          target: default
-          arch: x86_64
-          profile: pixel_6
-          cores: 4
-          avd-name: managed-patched
-          emulator-port: 5554
-          force-avd-creation: true
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -wipe-data -noaudio -no-boot-anim
-          script: MANAGED_CASE_EXEC_APPROVED=yes bash ci/managed-comparison/run-case.sh patched "$FLOOR_EVIDENCE/incoming-patched" "$(cat "$FLOOR_EVIDENCE/pin-patched")"
-      - name: Exact bounded ordinary log evidence, source/stage never published
-        if: always()
+      - name: Both source variants and SDK only
+        timeout-minutes: 15
+        run: bash ci/managed-comparison/paired_repro_build.sh first
+      - name: Existing private pinned signing and app-test certificate binding
+        timeout-minutes: 32
+        env:
+          LDOA_DEBUG_KEYSTORE_B64: ${{ secrets.LDOA_DEBUG_KEYSTORE_B64 }}
+        run: timeout -k 10 1850 python3 ci/managed-comparison/pinned_repro_signing.py
+      - name: Finite build receipt
         timeout-minutes: 2
-        run: timeout -k 2 90 python3 ci/managed-comparison/transport.py emit --evidence "$GITHUB_WORKSPACE/comparison-evidence" --private "$FLOOR_EVIDENCE"
-# NO upload-artifact/cache actions. No binary/package/source publication.
+        id: receipt
+        run: timeout -k 2 90 python3 ci/managed-comparison/paired_repro.py --role first --private "$FLOOR_EVIDENCE"
+  repro_second:
+    needs: repro_first
+    if: ${{ inputs.execution_approved && needs.repro_first.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    outputs:
+      inputs: ${{ steps.receipt.outputs.inputs }}
+      outputs: ${{ steps.receipt.outputs.outputs }}
+      repository: ${{ steps.receipt.outputs.repository }}
+      run_id: ${{ steps.receipt.outputs.run_id }}
+      run_attempt: ${{ steps.receipt.outputs.run_attempt }}
+      sha: ${{ steps.receipt.outputs.sha }}
+      job: ${{ steps.receipt.outputs.job }}
+      role: ${{ steps.receipt.outputs.role }}
+    steps:
+      - name: Private build location
+        run: |
+          printf 'FLOOR_EVIDENCE=%s/managed-private\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          mkdir -m700 "$RUNNER_TEMP/managed-private"
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-disabled: true
+      - name: Same controlled host build dependencies
+        timeout-minutes: 10
+        run: |
+          timeout -k 5 120 sudo apt-get -o Acquire::Retries=0 update
+          timeout -k 10 300 sudo apt-get -o Acquire::Retries=0 install -y --no-install-recommends build-essential intltool pkg-config libfm-gtk3-dev libgtk-3-dev bison
+      - name: Both source variants and SDK only
+        timeout-minutes: 15
+        run: bash ci/managed-comparison/paired_repro_build.sh second
+      - name: Existing private pinned signing and app-test certificate binding
+        timeout-minutes: 32
+        env:
+          LDOA_DEBUG_KEYSTORE_B64: ${{ secrets.LDOA_DEBUG_KEYSTORE_B64 }}
+        run: timeout -k 10 1850 python3 ci/managed-comparison/pinned_repro_signing.py
+      - name: Finite build receipt and strict paired digest comparison
+        timeout-minutes: 2
+        id: receipt
+        env:
+          FIRST_INPUTS: ${{ needs.repro_first.outputs.inputs }}
+          FIRST_OUTPUTS: ${{ needs.repro_first.outputs.outputs }}
+          FIRST_REPOSITORY: ${{ needs.repro_first.outputs.repository }}
+          FIRST_RUN_ID: ${{ needs.repro_first.outputs.run_id }}
+          FIRST_RUN_ATTEMPT: ${{ needs.repro_first.outputs.run_attempt }}
+          FIRST_SHA: ${{ needs.repro_first.outputs.sha }}
+          FIRST_JOB: ${{ needs.repro_first.outputs.job }}
+          FIRST_ROLE: ${{ needs.repro_first.outputs.role }}
+        run: timeout -k 2 90 python3 ci/managed-comparison/paired_repro.py --role second --private "$FLOOR_EVIDENCE"
+# No emulators/KVM/artifacts/cache upload/source publication/automatic fallback.
