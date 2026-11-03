@@ -3395,10 +3395,52 @@ class MobileDesktopEntryTest {
             val result=guestExec(root,remaining,*args,byteCapture=cap)
             requireGuest(result,args.joinToString(" "));return cap.decode()
         }
+        // Managed-only direct desktop capture. Identity: tracked xterm's
+        // direct child WINDOWID, never a class-only selection.
+        val xtProcess=tree.filter { (p,st)->anchoredRead(p,st,"cmdline")?.replace(0.toChar(),' ')?.trim()?.startsWith("xterm ")==true }
+        check(xtProcess.size==1);val xtPid=xtProcess.keys.single();val xtStart=xtProcess.values.single()
+        val linked=tree.mapNotNull { (p,st)->
+            val stat=anchoredRead(p,st,"stat") ?: error("unreadable tracked member")
+            val tail=stat.substringAfterLast(')').trim().split(Regex("\\s+"))
+            if(tail.size<2||tail[1].toIntOrNull()!=xtPid)null else {
+                val env=anchoredRead(p,st,"environ") ?: error("unreadable xterm child")
+                val id=env.split(0.toChar()).firstOrNull { it.startsWith("WINDOWID=") }?.substringAfter('=')?.toLongOrNull()
+                id?.let { Triple(p,st,it) }
+            }
+        }
+        check(linked.size==1);val xt=linked.single();val xtId=xt.third
+        check(RenderProbeParse.xpropClass(guest("xprop","-id",xtId.toString(),"WM_CLASS"))?.second=="XTerm")
+        check(RenderProbeParse.searchIds(guest("xdotool","search","--class","XTerm"))==listOf(xtId))
+        fun xtCurrent(){check(procStartTime(xtPid)==xtStart&&procStartTime(xt.first)==xt.second)}
+        fun mapState()=RenderProbeParse.winStats(guest("xwininfo","-id",xtId.toString()))?.mapState ?: error("xterm map parse")
+        fun restoreXterm(){
+            val until=System.nanoTime()+30_000_000_000L
+            fun restoreGuest(vararg args:String):String {
+                xtCurrent();val ms=minOf(10000L,(until-System.nanoTime())/1000000);check(ms>0)
+                val cap=XdiagByteCapture(System.nanoTime()+ms*1000000)
+                val result=guestExec(root,ms,*args,byteCapture=cap);requireGuest(result,"managed restore");return cap.decode()
+            }
+            restoreGuest("xdotool","windowactivate",xtId.toString())
+            while(true){
+                val st=RenderProbeParse.winStats(restoreGuest("xwininfo","-id",xtId.toString())) ?: error("restore map parse")
+                check(System.nanoTime()<until)
+                if(st.mapState=="IsViewable")break
+                Thread.sleep(250)
+            }
+            xtCurrent()
+        }
+        var minimized=false
+        var primary:Throwable?=null
         var mismatches=0
         val observed=mutableListOf<Pair<Int,Int>>()
         val sizes=listOf(1080 to 2400,900 to 2000,800 to 1800,1800 to 800,1080 to 2400)
         try {
+            xtCurrent();check(mapState()=="IsViewable")
+            minimized=true // obligation armed before possibly partial command
+            guest("xdotool","windowminimize",xtId.toString())
+            val unmapEnd=minOf(end,System.nanoTime()+20_000_000_000L)
+            while(mapState()!="IsUnMapped"&&System.nanoTime()<unmapEnd)Thread.sleep(250)
+            check(mapState()=="IsUnMapped");xtCurrent()
             for((i,wh) in sizes.withIndex()) {
                 // Disposable Android display override drives actual Lorie
                 // surface resize. Root/desktop must change from prior state,
@@ -3433,12 +3475,47 @@ class MobileDesktopEntryTest {
                 val fit=d.w==r.w&&d.h==r.h&&d.absX==0&&d.absY==0
                 if(!fit)mismatches++
                 raw.appendText("case=$case transition=$i requested=${wh.first}x${wh.second} anchored=$pid/$ps fit=$fit\n$rootRaw\n$deskRaw\n")
+                xtCurrent();check(mapState()=="IsUnMapped")
+                // Central ACTUAL ROOT band, not requested dimensions or an
+                // offscreen original-floor rectangle. Tray outside this ROI.
+                val rx=r.w/5;val ry=r.h*35/100;val rw=r.w*3/5;val rh=r.h*3/10
+                check(rw>0&&rh>0&&d.mapState=="IsViewable")
+                check(rx>=d.absX&&ry>=d.absY&&rx+rw<=d.absX+d.w&&ry+rh<=d.absY+d.h) { "central root ROI outside desktop" }
+                fun clearROI():List<String>{
+                    val kids=RenderProbeParse.topLevelChildren(guest("xwininfo","-root","-children")) ?: error("root children parse")
+                    return kids.filter { it.id!=candidates.single() }.mapNotNull { kid->
+                        val st=RenderProbeParse.winStats(guest("xwininfo","-id",kid.id.toString())) ?: error("unknown top-level stats")
+                        if(st.mapState=="IsViewable"&&st.overlaps(rx,ry,rw,rh))kid.id.toString() else null
+                    }
+                }
+                check(clearROI().isEmpty()) { "desktop ROI occluded" }
+                val before=key
+                val lv=device.findObject(By.res("dev.phonelinux.proto:id/lorieView")) ?: error("missing lorie surface")
+                val vb=lv.visibleBounds
                 val bmp=InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot() ?: error("pixels unavailable")
-                try { File(out,"managed-$i.png").outputStream().use { check(bmp.compress(Bitmap.CompressFormat.PNG,100,it)) } }
+                var mapped= intArrayOf()
+                try {
+                    val sx=vb.width().toFloat()/r.w;val sy=vb.height().toFloat()/r.h
+                    check(vb.width()>=bmp.width/2&&kotlin.math.abs(sx/sy-1f)<=0.03f)
+                    mapped=RenderProbeParse.mapRect(rx,ry,rw,rh,sx,sy,vb.left,vb.top,bmp.width,bmp.height) ?: error("ambiguous screenshot ROI")
+                    File(out,"managed-$i.png").outputStream().use { check(bmp.compress(Bitmap.CompressFormat.PNG,100,it)) }
+                }
                 finally { bmp.recycle() }
+                val ar=RenderProbeParse.winStats(guest("xwininfo","-root")) ?: error("postcapture root")
+                val ad=RenderProbeParse.winStats(guest("xwininfo","-id",candidates.single().toString())) ?: error("postcapture desktop")
+                val after=listOf(ar.w,ar.h,ad.w,ad.h,ad.absX,ad.absY)
+                check(after==before&&clearROI().isEmpty());xtCurrent();check(mapState()=="IsUnMapped")
+                val bracket=org.json.JSONObject().put("schema",1).put("case",case).put("manifest",pin).put("transition",i)
+                    .put("desktop_pid",pid).put("desktop_start",ps).put("desktop_xid",candidates.single())
+                    .put("before",org.json.JSONArray(before)).put("after",org.json.JSONArray(after))
+                    .put("xterm_unmapped",true).put("occluders",org.json.JSONArray()).put("manual_pixels",true)
+                    .put("roi_root",org.json.JSONArray(listOf(rx,ry,rw,rh)))
+                    .put("roi_bitmap",org.json.JSONArray(mapped.toList()))
+                File(out,"managed-$i-capture-bracket.json").writeText(bracket.toString()+"\n")
                 if(case=="patched")check(fit) { "patched desktop does not match actual root" }
             }
             check(observed.any { it.first>it.second }&&observed.any { it.second>it.first }) { "actual portrait/landscape not observed" }
+            restoreXterm();minimized=false
             // Full preexisting topology/occluder/uncovered-color gate onfinal
             // portrait only. Its failure is a product finding, not obscured.
             if(case=="patched") renderQualification(rootPid,at,start)
@@ -3463,7 +3540,16 @@ class MobileDesktopEntryTest {
             raw.appendText("INPUT dispatched Android keycodes echo7; screenshot must showeffect, no input PASS from injection return\n")
             if(case=="original")check(mismatches>0) { "original floor NOT reproduced" }
             raw.appendText("CASE geometry observations complete; original_mismatches=$mismatches; pixels/input manual review required\n")
-        } finally { device.executeShellCommand("wm size reset") }
+        } catch(t:Throwable){primary=t;throw t}
+        finally {
+            try {
+                if(minimized){
+                    if(guestAborted)error("managed restore forbidden after unresolved helper cleanup")
+                    restoreXterm()
+                }
+            }catch(t:Throwable){if(primary!=null)primary.addSuppressed(t) else throw t}
+            finally {device.executeShellCommand("wm size reset")}
+        }
     }
 
     /** Explicitly gated managed diagnostic, not production enablement. */

@@ -1,4 +1,4 @@
-import pathlib,tempfile,unittest,xml.etree.ElementTree as ET
+import json,pathlib,tempfile,unittest,xml.etree.ElementTree as ET
 import transport as t
 import check_case as c
 class Evidence(unittest.TestCase):
@@ -9,11 +9,14 @@ class Evidence(unittest.TestCase):
   for case in ('original','patched'):
    d=self.e/case;d.mkdir(parents=True)
    for n in t.CASE_FILES:(d/n).write_text('SYNTHETIC not pixels')
-   (d/'transfer-guards.txt').write_text('schema=1\n'+''.join('guard='+l+' rc=0\n' for l in ['context-identity','parent-nonlink','parent-type','incoming-absent','incoming-nonlink','tmp-absent','tmp-nonlink','push','private-copy']))
+   (d/'transfer-guards.txt').write_text('schema=1\n'+''.join('guard='+l+' rc=0\n' for l in ['context-identity','parent-nonlink','parent-type','incoming-absent','incoming-nonlink','tmp-absent','tmp-nonlink','tmp-scaffold','push','tmp-inventory','private-copy']))
+   (d/'caller.txt').write_text('caller_exit=0\n');(d/'phase.txt').write_text('instrumentation_caller_rc=0\n')
    (d/'managed-junit.xml').write_text('<testsuite tests="1" failures="0" skipped="0"><testcase classname="dev.phonelinux.proto.MobileDesktopEntryTest" name="mobileEntryManagedDesktopComparison"/></testsuite>')
-   (d/'managed-comparison.txt').write_text('case='+case+' manifest='+'a'*64+'\n'+''.join('case='+case+' transition='+str(i)+' requested=800x1800 anchored=123/456 fit=true\n' for i in range(5))+'CASE geometry observations complete')
+   (d/'managed-comparison.txt').write_text('case='+case+' manifest='+'a'*64+'\n'+''.join('case='+case+' transition='+str(i)+' requested=800x1800 anchored=123/456 fit='+('false' if case=='original' else 'true')+'\n' for i in range(5))+'CASE geometry observations complete')
    (d/'managed-provenance.txt').write_text('case='+case+' manifest='+'a'*64+' inventory='+'b'*64+'\n')
    (d/'managed-teardown.txt').write_text('PASS original owned PID/start set absent after Stop')
+   for i in range(5):
+    (d/f'managed-{i}-capture-bracket.json').write_text(json.dumps({'schema':1,'case':case,'manifest':'a'*64,'transition':i,'desktop_pid':123,'desktop_start':'456','desktop_xid':100,'before':[800,1800,800,1800,0,0],'after':[800,1800,800,1800,0,0],'roi_root':[160,630,480,540],'roi_bitmap':[160,630,640,1170],'xterm_unmapped':True,'occluders':[],'manual_pixels':True}))
  def tearDown(self):self.tmp.cleanup()
  def test_roundtrip_excludes_private(self):
   self.assertTrue(t.collect(self.e,self.private,self.out));lines=t.frame(self.out);t.decode(lines,self.dec)
@@ -88,7 +91,7 @@ class Evidence(unittest.TestCase):
   with self.assertRaises(ValueError):c.check(self.e/'original','original','a'*64)
  def test_source_route(self):
   p=pathlib.Path(__file__).parent
-  w=(p/'workflow-proposal.yml' if (p/'workflow-proposal.yml').exists() else p.parents[1]/'.github/workflows/managed-comparison.yml').read_text()
+  w=(p.parents[1]/'.github/workflows/mobile-desktop.yml').read_text()
   self.assertNotIn('uses: actions/upload-artifact',w);self.assertIn('cache-disabled: true',w)
   self.assertEqual(w.count('emulator-port: 5554'),2);self.assertIn('managed-original',w);self.assertIn('managed-patched',w)
 if __name__=='__main__':unittest.main()

@@ -3,15 +3,18 @@
 Decoder accepts timestamp/prefix before MCMP1 frame, not after its payload.
 No executable/archive source binaries, raw environment, credentials or HOME.
 """
-import argparse,base64,hashlib,json,pathlib,re,sys
+import argparse,base64,hashlib,json,pathlib,re,sys,os
+import paired_repro
 MAX_RAW=24*1024*1024
 MAX_ENCODED=34*1024*1024
 CHUNK=3072
 MAX_CHUNKS=8500
 MAX_LINE=4608
 PREFIX='MCMP1 '
-ROOT_FILES={'coverage.json','host-phase.txt'}
+ROOT_FILES={'coverage.json','host-phase.txt','runtime-sdk.json'}
+BRACKETS={'managed-'+str(i)+'-capture-bracket.json' for i in range(5)}
 CASE_FILES={'transfer-guards.txt','managed-setup-raw.txt','managed-setup-capture.txt','managed-abi-raw.txt','managed-abi-capture.txt','managed-closure-raw.txt','managed-closure-capture.txt','managed-comparison.txt','managed-abi.txt','managed-provenance.txt','managed-teardown.txt','managed-junit.xml','managed-input.png','managed-0.png','managed-1.png','managed-2.png','managed-3.png','managed-4.png','instrumentation.txt','phase.txt','caller.txt'}
+CASE_FILES |= BRACKETS
 def allowed(name):
     p=pathlib.PurePosixPath(name)
     return name in ROOT_FILES or (len(p.parts)==2 and p.parts[0] in ('original','patched') and p.parts[1] in CASE_FILES and str(p)==name)
@@ -97,7 +100,8 @@ def decode(lines,out):
     (out/'transport-manifest.json').write_text(json.dumps(manifest,indent=2))
     return manifest
 
-def collect(evidence,private,out):
+def collect(evidence,private,out,expected_case=None):
+    assert expected_case in (None,'original','patched'),'expected case'
     # Hard separation: runner-local E(source/stages) never an export subtree.
     evidence=evidence.resolve();private=private.resolve()
     assert evidence!=private and private not in evidence.parents and evidence not in private.parents,'private/output overlap'
@@ -109,7 +113,13 @@ def collect(evidence,private,out):
         assert re.fullmatch(rb'schema=1\nphase=(host-check|source-fetch|extract|configure|build|stage|elf-inspect|resource-equality|source-inventory|recipe-copy|complete) case=(none|original|patched|both) rc=(0|[1-9][0-9]{0,2})\n',raw),'host receipt syntax'
         (out/'host-phase.txt').write_bytes(raw);seen.add('host-phase.txt');total+=len(raw)
     else:issues.append('host-phase.txt: count 0')
-    for case in ['original','patched']:
+    if expected_case:
+        sdk=evidence/'runtime-sdk.json'
+        if not sdk.is_file() or sdk.is_symlink():issues.append('runtime-sdk missing/type')
+        else:
+            assert sdk.stat().st_size<=2048
+            raw=sdk.read_bytes();json.loads(raw);(out/'runtime-sdk.json').write_bytes(raw);seen.add('runtime-sdk.json')
+    for case in ([expected_case] if expected_case else ['original','patched']):
         source=evidence/case
         for name in sorted(CASE_FILES):
             matches=list(source.rglob(name)) if source.is_dir() else []
@@ -125,18 +135,19 @@ def collect(evidence,private,out):
             target=out/case/name;target.parent.mkdir(exist_ok=True)
             with p.open('rb') as f:b=f.read(4*1024*1024+1)
             assert len(b)<=4*1024*1024;target.write_bytes(b);seen.add(case+'/'+name)
-    (out/'coverage.json').write_text(json.dumps({'complete':not issues,'issues':issues,'selected':sorted(seen),'private_excluded':True}))
+    binding=paired_repro.binding(os.environ,'first' if expected_case=='original' else 'second') if expected_case else None
+    (out/'coverage.json').write_text(json.dumps({'binding':binding,'complete':not issues,'issues':issues,'selected':sorted(seen),'private_excluded':True,'expected_case':expected_case}))
     return not issues
 
 def main():
     import tempfile
     ap=argparse.ArgumentParser();sub=ap.add_subparsers(dest='mode',required=True)
-    p=sub.add_parser('emit');p.add_argument('--evidence',type=pathlib.Path,required=True);p.add_argument('--private',type=pathlib.Path,required=True)
+    p=sub.add_parser('emit');p.add_argument('--evidence',type=pathlib.Path,required=True);p.add_argument('--private',type=pathlib.Path,required=True);p.add_argument('--expected-case',choices=['original','patched'])
     p=sub.add_parser('decode');p.add_argument('--log',type=pathlib.Path,required=True);p.add_argument('--out',type=pathlib.Path,required=True)
     a=ap.parse_args()
     if a.mode=='emit':
         with tempfile.TemporaryDirectory() as d:
-            root=pathlib.Path(d)/'out';complete=collect(a.evidence,a.private,root)
+            root=pathlib.Path(d)/'out';complete=collect(a.evidence,a.private,root,a.expected_case)
             for line in frame(root):print(line,flush=True)
         return 0 if complete else 1
     decode(a.log.read_text().splitlines(),a.out);return 0

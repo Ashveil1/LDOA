@@ -8,7 +8,7 @@ MAX_ENTRIES=1024;MAX_FILE=32*1024*1024;MAX_TOTAL=128*1024*1024
 APK_CAP=256*1024*1024 # proposed resource budget, not measured APK size
 PREFIX='opt/ldoa/pcmanfm/1.3.2-4build2-floor1'
 SOURCE={'orig.tar.xz':'14cb7b247493c4cce65fbb5902611e3ad00a7a870fbc1e50adc50428c5140cf7','debian.tar.xz':'ac2538fe14f44bd56ea77f1bba8c4f16349898ae259e2b602465f4d2faec0723','default-size.patch':'ae69d35d1215efc6e521c7fbe81ceacb261fd0c4917c2828ffb385bded7d6829'}
-RECIPES=['build-and-test.sh','prepare_incoming.py','directory_plan.py','incoming-transfer.sh','run-case.sh','transport.py','paired_repro.py','paired_repro_build.sh','pinned_repro_signing.py']
+RECIPES=['build-and-test.sh','prepare_incoming.py','directory_plan.py','incoming-transfer.sh','run-case.sh','transport.py','paired_repro.py','paired_repro_build.sh','pinned_repro_signing.py','runtime_sdk.py','check_case.py','split_join.py']
 PACKAGES=['gcc','gcc-13','binutils','make','pkg-config','libc6-dev','libfm-gtk3-dev','libgtk-3-dev','intltool','bison','libglib2.0-dev','libpango1.0-dev','libcairo2-dev','libgdk-pixbuf-2.0-dev','libatk1.0-dev','zlib1g-dev']
 def canonical(x):return json.dumps(x,sort_keys=True,separators=(',',':')).encode('ascii')
 def digest(x):return hashlib.sha256(canonical(x)).hexdigest()
