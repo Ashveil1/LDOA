@@ -32,6 +32,15 @@ import kotlin.math.roundToInt
 object GuestMobileShell {
     private const val TAG = "PhoneLinuxMobile"
 
+    // LOCAL diagnostic proposal only. Fixed two-choice selector, not PATH,
+    // arbitrary command input, package provisioner, or Files routing.
+    @Volatile internal var managedDesktopForTest = false
+    private const val MANAGED_DESKTOP = "/opt/ldoa/pcmanfm/1.3.2-4build2-floor1/bin/pcmanfm"
+    internal fun desktopExecutableForTest(): String {
+        check(!managedDesktopForTest || BuildConfig.DEBUG) { "managed desktop diagnostic requires debug build" }
+        return if (managedDesktopForTest) MANAGED_DESKTOP else "pcmanfm"
+    }
+
     /** noble main/universe, all verified on packages.ubuntu.com
      *  2026-10-29. Independent of the GNOME package set: mobile mode must
      *  not require a prior GNOME provision. */
@@ -132,6 +141,7 @@ object GuestMobileShell {
      *  script; teardown keeps walking host parentage from the tracked
      *  proot root (ownership verified by the Gate-2 test matrix). */
     fun launchMobileSession(ctx: Context, rootfs: File): Process {
+        val desktopExecutable = desktopExecutableForTest()
         val ui = MobileModeSettings.read(ctx)
         val dpi = xftDpi(ctx, ui)
         val trayH = if (ui.panelSize == "large") 64 else 48
@@ -208,7 +218,7 @@ object GuestMobileShell {
             fc-cache -f >/dev/null 2>&1
             # App-owned per-launch profile (SessionConfig), never the
             # user's ~/.config/pcmanfm.
-            XDG_CONFIG_HOME="${'$'}SESSION_CFG" pcmanfm --desktop &
+            XDG_CONFIG_HOME="${'$'}SESSION_CFG" '$desktopExecutable' --desktop &
             xterm -fa "DejaVu Sans Mono" -fs ${'$'}{TERM_FONT:-13}$xtermGeometry &
             XTPID=${'$'}!
             echo "mobile-launch: xterm pid=${'$'}XTPID ctty-fd0=${'$'}(readlink /proc/${'$'}XTPID/fd/0 2>/dev/null)"

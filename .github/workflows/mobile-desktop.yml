@@ -1,34 +1,19 @@
-name: mobile-desktop
-
-# DISPATCH-ONLY investigation lane for the additive LDOA mobile desktop
-# mode (Phase A, user-approved 2026-10-29). Never runs on push: per-push
-# cycles belong to the sibling-owned lanes. Distinct artifact names. A
-# green job means the mobile session launched/rendered/tore down in the
-# x86_64 emulator - never ARM or device qualification.
+# LOCAL UNREGISTERED PROPOSAL ONLY, not authorized to commit/dispatch.
+name: managed-desktop-comparison-proposal
 on:
   workflow_dispatch:
     inputs:
-      pcmanfm_peer_no_payload:
-        description: "Opt-in owned distro pcmanfm peer/path diagnostic only, ZERO protocol bytes; exact method and non-skipped evidence required"
+      execution_approved:
         type: boolean
         default: false
-      xdiag_capture:
-        description: "Run the dispatch-gated xdiag proxied-capture diagnostic (MobileDesktopEntryTest#mobileEntryXdiagCapture) instead of the render lifecycle test; diagnostic artifacts only, no render gate"
-        type: boolean
-        default: false
-
 jobs:
-  mobile-shell-spike:
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    timeout-minutes: 150
+  comparison:
+    if: ${{ inputs.execution_approved }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 210
+    env:
+      FLOOR_EVIDENCE: ${{ runner.temp }}/managed-private
     steps:
-      - name: Reject conflicting diagnostic selection before checkout/build
-        env:
-          PEER_ONLY: ${{ inputs.pcmanfm_peer_no_payload }}
-          XDIAG_ONLY: ${{ inputs.xdiag_capture }}
-        run: |
-          if [ "$PEER_ONLY" = "true" ] && [ "$XDIAG_ONLY" = "true" ]; then echo "conflicting diagnostic selection"; exit 1; fi
       - uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -38,117 +23,61 @@ jobs:
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
         with:
-          cache-disabled: ${{ inputs.pcmanfm_peer_no_payload }}
-      - name: Install NDK + bison for vendored :lorie X server
+          cache-disabled: true
+      - name: Existing controlled host build dependencies, no retries
+        timeout-minutes: 10
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq bison
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;29.0.14206865" "platforms;android-35" >/dev/null
-      - name: Enable KVM
+          mkdir -m700 "$FLOOR_EVIDENCE"
+          timeout -k 5 120 sudo apt-get -o Acquire::Retries=0 update
+          timeout -k 10 300 sudo apt-get -o Acquire::Retries=0 install -y --no-install-recommends build-essential intltool pkg-config libfm-gtk3-dev libgtk-3-dev bison
+      - name: Matched fixedprefix original and patch, runner-local only
+        timeout-minutes: 12
+        run: |
+          FIXED_PREFIX_REVIEWED_BUILD=yes timeout -k 10 600 bash ci/managed-comparison/build-and-test.sh
+          LOCAL=$(cat "$FLOOR_EVIDENCE/runner-local-location.txt")
+          python3 ci/managed-comparison/prepare_incoming.py --local "$LOCAL" --case original --out "$FLOOR_EVIDENCE/incoming-original" > "$FLOOR_EVIDENCE/pin-original"
+          python3 ci/managed-comparison/prepare_incoming.py --local "$LOCAL" --case patched --out "$FLOOR_EVIDENCE/incoming-patched" > "$FLOOR_EVIDENCE/pin-patched"
+      - name: One debug APK build for two fresh disposable cases, no delivery
+        timeout-minutes: 35
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'ndk;29.0.14206865' 'platforms;android-35' >/dev/null
+          timeout -k 30 1800 ./gradlew assembleDebug assembleDebugAndroidTest
+      - name: KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
-      - name: Run mobile desktop spike on emulator (x86_64)
+      - name: Original case fresh emulator, exact port5554
+        timeout-minutes: 65
         uses: reactivecircus/android-emulator-runner@v2
-        # Step-level backstop: 85min >= worst serial sum of EVERY bounded
-        # wait below, INCLUDING kill-after tails and the action's 600s
-        # emulator boot wait (4140s N + 130s K + 600s boot + 60s misc =
-        # 4930s = 82.2min), so per-command bounds always fire first and
-        # preserve
-        # their tee'd logs; 65min below the 150-min job timeout (run
-        # 41571335711: one unbounded adb held 2h21m to the job backstop).
-        # Also the mitigation for a setsid-style pipe-hold escape, which
-        # a per-command timeout cannot bound; even then, orphan death and
-        # in-flight log flush are NOT guaranteed - the upload captures
-        # whatever is on disk at that point.
-        timeout-minutes: 85
         with:
           api-level: 34
-          # EXPERIMENT (boot-ANR storm probe, ONE run): AOSP default image
-          # instead of google_apis - no GMS first-run storm during boot.
-          # Verified available: system-images;android-34;default;x86_64 in
-          # dl.google.com sys-img2-1.xml. App + test have ZERO GMS deps
-          # (gradle/imports/manifest checked). Changed surface: no Play
-          # Services, AOSP launcher instead of Pixel Launcher; the CI
-          # emulator is not the user's POCO either way.
           target: default
           arch: x86_64
           profile: pixel_6
           cores: 4
-          script: |
-            echo "phase: pre-test-adb $(date -u +%FT%TZ)" > phase.txt
-            timeout -k 5 30 adb -s emulator-5554 logcat -G 16M || true
-            timeout -k 5 30 adb -s emulator-5554 logcat -c || true
-            timeout -k 5 30 adb -s emulator-5554 shell settings put global anr_show_background 0 || true
-            if [ "$(cat ci/launcher-suppression.conf 2>/dev/null || echo on)" = "on" ]; then timeout -k 5 30 adb -s emulator-5554 shell pm disable-user --user 0 com.google.android.apps.nexuslauncher || true; echo "launcher suppression: ON"; else echo "launcher suppression: OFF"; fi
-            # Live-only focus/no-ANR readiness gate (ci/launcher_gate.py),
-            # at boot AND after the heavy build immediately before
-            # instrumentation (run 41510706613: the launcher ANR'd DURING the
-            # build at 19:34:34; a boot-only check cannot cover that
-            # recurrence). Live reads only; never lastanr (frozen replay is
-            # not current unhealthiness). READY = two consecutive consistent
-            # observations of a parseable non-null focused component with no
-            # ANR dialog - a focus/no-ANR precondition, NOT proof of launcher
-            # responsiveness. Failure is environmental + early exit: no
-            # dismissal, no restart, no suppression change.
-            # Read-only evidence at gate failure (bounded per adb call, each
-            # guarded: capture can never mask the gate's exit). Files land in
-            # paths the always() artifact upload already covers.
-            mkdir -p screenshots
-            echo "phase: gate-boot $(date -u +%FT%TZ)" >> phase.txt
-            # Caller-boundary wrap (independent of the helper's internal
-            # 150s budget): the CALLER is bounded even if the helper hangs
-            # outside its own deadlines.
-            timeout -k 10 180 python3 ci/launcher_gate.py boot || { timeout -k 5 60 sh ci/gate_capture.sh boot; exit 1; }
-            echo "phase: assemble $(date -u +%FT%TZ)" >> phase.txt
-            # Explicit exit status (bash pipefail): tee masks gradle's AND
-            # timeout's code (124) in a plain sh pipe; the grep gate stays
-            # as the failure detector, rc is recorded for evidence.
-            bash -o pipefail -c "timeout -k 30 1800 ./gradlew assembleDebug assembleDebugAndroidTest 2>&1 | tee /tmp/build.log"; rc=$?; echo "phase: assemble-done rc=$rc $(date -u +%FT%TZ)" >> phase.txt; [ $rc -eq 0 ] || { echo "assemble pipeline rc=$rc nonzero"; exit 1; }
-            grep -q "BUILD SUCCESSFUL" /tmp/build.log || { echo "assemble FAILED before readiness gate + instrumentation"; exit 1; }
-            echo "phase: gate-post-build $(date -u +%FT%TZ)" >> phase.txt
-            timeout -k 10 180 python3 ci/launcher_gate.py post-build || { timeout -k 5 60 sh ci/gate_capture.sh post-build; exit 1; }
-            echo "phase: instrumentation $(date -u +%FT%TZ)" >> phase.txt
-            # Bounded caller wait (run 41571335711): 1500s = test-internal
-            # overall deadline 1180s + install/UTP margin, KILL escalation,
-            # explicit rc via pipefail (tee masks 124 in a plain pipe).
-            bash -o pipefail -c "timeout -k 30 1500 ./gradlew connectedDebugAndroidTest \"-Pandroid.testInstrumentationRunnerArguments.class=dev.phonelinux.proto.MobileDesktopEntryTest${{ inputs.pcmanfm_peer_no_payload && '#mobileEntryPcmanfmPeerNoPayload' || '' }}${{ inputs.xdiag_capture && '#mobileEntryXdiagCapture' || '' }}\" -Pandroid.testInstrumentationRunnerArguments.ldoa_ci_emulator=true ${{ inputs.pcmanfm_peer_no_payload && '-Pandroid.testInstrumentationRunnerArguments.ldoa_pcmanfm_peer_nopayload=true' || '' }} ${{ inputs.xdiag_capture && '-Pandroid.testInstrumentationRunnerArguments.ldoa_xdiag=true' || '' }} --info 2>&1 | tee /tmp/instr.log"; rc=$?; echo "phase: instrumentation-done rc=$rc $(date -u +%FT%TZ)" >> phase.txt; [ $rc -eq 0 ] || touch /tmp/PHONELINUX_TESTS_FAILED
-            grep -q "BUILD SUCCESSFUL" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
-            if [ "${{ inputs.pcmanfm_peer_no_payload }}" = "true" ]; then timeout -k 2 15 python3 ci/check_pcmanfm_peer_result.py app/build/outputs/androidTest-results app/build/outputs/connected_android_test_additional_output > peer-selection-result.txt 2>&1 || touch /tmp/PHONELINUX_TESTS_FAILED; cat peer-selection-result.txt; fi
-            # NO post-task run-as guest-log pulls (run 41457173978): they
-            # execute after connectedAndroidTest has uninstalled both APKs
-            # and archive error text ("run-as: unknown package", cat/adb
-            # errors) as if it were a guest log. Authoritative guest logs =
-            # additional_test_output pre-stop/post-stop exports (pulled by
-            # gradle BEFORE uninstall); failure metadata = androidTest-results.
-            echo "guest logs: post-task run-as pulls REMOVED (post-uninstall, archived error strings as logs - run 41457173978)" > pull-status.txt
-            echo "authoritative guest logs: app/build/outputs/connected_android_test_additional_output/** (exported pre-stop/post-stop by the test, pulled before uninstall)" >> pull-status.txt
-            echo "failure metadata: app/build/outputs/androidTest-results/** (instrument XML, even on FAILED)" >> pull-status.txt
-            cat pull-status.txt
-            echo "phase: post-test-evidence $(date -u +%FT%TZ)" >> phase.txt
-            # Bounded (run 41571335711): unbounded, this blocked 2h21m on
-            # "waiting for device" after the emulator went offline until
-            # the job timeout; || true never fires on a hang.
-            timeout -k 10 120 adb -s emulator-5554 logcat -d > /tmp/shotlog.txt || true
-            mkdir -p screenshots
-            timeout -k 5 60 python3 .github/scripts/extract_shots.py /tmp/shotlog.txt screenshots || true
-            timeout -k 5 60 python3 .github/scripts/extract_shots.py /tmp/instr.log screenshots || true
-            find screenshots -type f | sort || true
-            if [ -f /tmp/PHONELINUX_TESTS_FAILED ]; then exit 1; fi
-      - name: Peer diagnostic ordinary-log evidence only, no paid artifact/cache storage
-        if: ${{ always() && inputs.pcmanfm_peer_no_payload }}
-        timeout-minutes: 2
-        run: timeout -k 2 90 python3 ci/pcmanfm-peer-log/transport.py emit --workspace "$GITHUB_WORKSPACE"
-      - uses: actions/upload-artifact@v4
-        if: ${{ always() && !inputs.pcmanfm_peer_no_payload }}
+          avd-name: managed-original
+          emulator-port: 5554
+          force-avd-creation: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -wipe-data -noaudio -no-boot-anim
+          script: MANAGED_CASE_EXEC_APPROVED=yes bash ci/managed-comparison/run-case.sh original "$FLOOR_EVIDENCE/incoming-original" "$(cat "$FLOOR_EVIDENCE/pin-original")"
+      - name: Verify first emulator exited before second case
+        run: timeout -k 2 15 bash -c '! adb devices | grep -q "emulator-5554[[:space:]]"'
+      - name: Patched case fresh emulator same exact port5554
+        timeout-minutes: 65
+        uses: reactivecircus/android-emulator-runner@v2
         with:
-          name: mobile-desktop-evidence
-          path: |
-            screenshots/
-            pull-status.txt
-            phase.txt
-            peer-selection-result.txt
-            app/build/outputs/connected_android_test_additional_output/**
-            app/build/outputs/androidTest-results/**
-            /tmp/shotlog.txt
-            /tmp/instr.log
-            /tmp/build.log
+          api-level: 34
+          target: default
+          arch: x86_64
+          profile: pixel_6
+          cores: 4
+          avd-name: managed-patched
+          emulator-port: 5554
+          force-avd-creation: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -wipe-data -noaudio -no-boot-anim
+          script: MANAGED_CASE_EXEC_APPROVED=yes bash ci/managed-comparison/run-case.sh patched "$FLOOR_EVIDENCE/incoming-patched" "$(cat "$FLOOR_EVIDENCE/pin-patched")"
+      - name: Exact bounded ordinary log evidence, source/stage never published
+        if: always()
+        timeout-minutes: 2
+        run: timeout -k 2 90 python3 ci/managed-comparison/transport.py emit --evidence "$GITHUB_WORKSPACE/comparison-evidence" --private "$FLOOR_EVIDENCE"
+# NO upload-artifact/cache actions. No binary/package/source publication.

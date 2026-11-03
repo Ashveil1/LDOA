@@ -98,6 +98,11 @@ class MobileDesktopEntryTest {
             org.junit.Assume.assumeTrue("peer diagnostic is explicitly gated, no payload",
                 InstrumentationRegistry.getArguments().getString("ldoa_pcmanfm_peer_nopayload") == "true")
         }
+        if (testName.methodName == "mobileEntryManagedDesktopComparison") {
+            org.junit.Assume.assumeTrue("managed desktop comparison explicitly gated",
+                InstrumentationRegistry.getArguments().getString("ldoa_managed_desktop") == "true")
+
+        }
         val instr = InstrumentationRegistry.getInstrumentation()
         device = UiDevice.getInstance(instr)
         ctx = instr.targetContext
@@ -151,21 +156,108 @@ class MobileDesktopEntryTest {
         }
         assertTrue("ubuntu rootfs installed (mobile button requires it)",
             installer.isInstalled(Distros.UBUNTU))
+        if(testName.methodName == "mobileEntryManagedDesktopComparison") {
+            val args=InstrumentationRegistry.getArguments()
+            val case=args.getString("ldoa_managed_case") ?: error("missing case")
+            val pin=args.getString("ldoa_managed_manifest") ?: error("missing manifest pin")
+            val root=installer.rootfsDir(Distros.UBUNTU)
+            val out=ctx.externalMediaDirs.first().let { File(it,"additional_test_output") };check(out.isDirectory||out.mkdirs())
+            val inventoryPin=ManagedIncomingForTest.stage(root,File(ctx.filesDir,"managed-incoming"),pin,case)
+            // Single bounded diagnostic provisioning command, no retry/repair.
+            val packages="dbus-x11 bsdutils jwm xterm x11-utils x11-xserver-utils xdotool pcmanfm fonts-dejavu-core hicolor-icon-theme binutils"
+            val setupCapture=XdiagByteCapture(System.nanoTime()+180_000_000_000L)
+            val setup=guestExec(root,180000,"/bin/sh","-c","apt-get -o Acquire::Retries=0 update && apt-get -o Acquire::Retries=0 install -y --no-install-recommends $packages",byteCapture=setupCapture)
+            File(out,"managed-setup-raw.txt").writeBytes(setupCapture.bytes())
+            File(out,"managed-setup-capture.txt").writeText(setupCapture.metadata())
+            requireGuest(setup,"single diagnostic dependency provision");setupCapture.requireComplete()
+            val cmd="""P=/opt/ldoa/pcmanfm/1.3.2-4build2-floor1; test "${'$'}(sha256sum "${'$'}P/inventory.sha256" | cut -d' ' -f1)" = '$inventoryPin' && cd "${'$'}P" && sha256sum -c inventory.sha256 && readelf -h -l -d --version-info bin/pcmanfm && env -u LD_LIBRARY_PATH -u LD_PRELOAD ldd -r -v bin/pcmanfm"""
+            // Raw capture capped with existing tested worker; UNKNOWN on EOF,
+            // overflow, timeout, unjoined drainer, nonzero or cleanup ambiguity.
+            val capture=XdiagByteCapture(System.nanoTime()+30_000_000_000L)
+            val result=guestExec(root,30000,"/bin/sh","-c",cmd,byteCapture=capture)
+            File(out,"managed-abi-raw.txt").writeBytes(capture.bytes())
+            File(out,"managed-abi-capture.txt").writeText(capture.metadata())
+            requireGuest(result,"actual guest ABI")
+            val abi=capture.decode()
+            check(!Regex("not found|undefined symbol|wrong ELF|cannot open|error",RegexOption.IGNORE_CASE).containsMatchIn(abi)) { "guest ABI refused" }
+            check(abi.contains("ELF64")&&abi.contains("Advanced Micro Devices X86-64")&&abi.contains("2's complement, little endian"))
+            check(abi.contains("Requesting program interpreter: /lib64/ld-linux-x86-64.so.2"))
+            val required=setOf("libX11.so.6","libglib-2.0.so.0","libfm-gtk3.so.4","libgtk-3.so.0","libgdk-3.so.0","libpangocairo-1.0.so.0","libpango-1.0.so.0","libatk-1.0.so.0","libcairo.so.2","libgdk_pixbuf-2.0.so.0","libfm.so.4","libgio-2.0.so.0","libgobject-2.0.so.0","libc.so.6")
+            val needed=Regex("\\(NEEDED\\).*?\\[([^\\]]+)\\]").findAll(abi).map { it.groupValues[1] }.toSet()
+            check(needed==required)
+            val resolved=Regex("(?m)^\\s*(\\S+) => (/\\S+) \\(0x[0-9a-f]+\\)").findAll(abi).associate { it.groupValues[1] to it.groupValues[2] }
+            check(required.all { it in resolved })
+            check(resolved.size<=128)
+            val closure=StringBuilder()
+            val closureEnd=System.nanoTime()+120_000_000_000L
+            File(out,"managed-closure-raw.txt").writeText("")
+            File(out,"managed-closure-capture.txt").writeText("")
+            for(path in (resolved.values+"/lib64/ld-linux-x86-64.so.2").toSet()) {
+                check(path.matches(Regex("/(?:usr/)?lib(?:64)?/[A-Za-z0-9_./+-]+"))&&!path.split('/').contains(".."))
+                val left=minOf(10000L,(closureEnd-System.nanoTime())/1000000)
+                check(left>0) { "ABI closure overall deadline" }
+                val c=XdiagByteCapture(System.nanoTime()+left*1000000)
+                val r=guestExec(root,left,"/bin/sh","-c","readelf -h '$path' && sha256sum '$path' && { dpkg-query -S '$path' || { real=${'$'}(readlink -f '$path') && printf 'canonical=%s\\n' \"${'$'}real\" && dpkg-query -S \"${'$'}real\"; }; }",byteCapture=c)
+                check(File(out,"managed-closure-raw.txt").length()+c.bytes().size<=256*1024) { "closure raw byte cap" }
+                File(out,"managed-closure-raw.txt").appendBytes(c.bytes())
+                File(out,"managed-closure-capture.txt").appendText("path=$path\n"+c.metadata())
+                requireGuest(r,"guest dependency $path")
+                val text=c.decode();check(text.contains("ELF64")&&text.contains("Advanced Micro Devices X86-64"))
+                check(Regex("(?m)^[0-9a-f]{64}  ").containsMatchIn(text))
+                check(closure.length+text.length<=256*1024);closure.append(text).append('\n')
+            }
+            File(out,"managed-abi.txt").writeText(abi+"\n-- target guest library closure --\n"+closure)
+            File(out,"managed-provenance.txt").writeText("case=$case manifest=$pin inventory=$inventoryPin\n")
+        }
+
     }
 
     @After
     fun tearDown() {
-        // JUnit4 runs @After in a finally around @Before (RunAfters wraps
-        // RunBefores): an assumption skip in setUp STILL lands here with
-        // ctx/device UNINITIALIZED. Guard first - never touch lateinit
-        // state after an early skip.
+        // Reset even when @Before skipped before lateinit initialization.
+        GuestMobileShell.managedDesktopForTest = false
         if (!::ctx.isInitialized || !::device.isInitialized) return
-        exportGuestLogs("pre-stop")
-        try { XServer.stopDesktopMode(ctx) } catch (t: Throwable) { }
-        exportGuestLogs("post-stop")
-        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
-        SessionService.stop(ctx)
-        XServer.resetOwnershipStateForTest()
+        if(testName.methodName!="mobileEntryManagedDesktopComparison") {
+            // Preserve dc96ae1 default-lane teardown semantics exactly.
+            exportGuestLogs("pre-stop")
+            try { XServer.stopDesktopMode(ctx) } catch (t: Throwable) { }
+            exportGuestLogs("post-stop")
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            SessionService.stop(ctx)
+            XServer.resetOwnershipStateForTest()
+            return
+        }
+        // JUnit RunAfters combines these cleanup failures with the primary
+        // @Before/@Test failure. Never replace it or skip a later cleanup.
+        val failures=mutableListOf<Throwable>()
+        val managed=testName.methodName=="mobileEntryManagedDesktopComparison"
+        var managedSnapshotComplete=false
+        var managedOwned:Map<Int,String> = emptyMap()
+        try { exportGuestLogs("pre-stop") } catch(t:Throwable) { failures.add(t) }
+        if(managed) try {
+            val unknown=mutableMapOf<Int,String>()
+            managedOwned=pidTreeSnapshot(XServer.sessionRootPidForTest,unknown)
+            managedSnapshotComplete=unknown.isEmpty()&&managedOwned.isNotEmpty()
+            check(managedSnapshotComplete) { "UNKNOWN pre-Stop process snapshot" }
+        } catch(t:Throwable) { failures.add(t) }
+        var stopped=false
+        try { XServer.stopDesktopMode(ctx);stopped=true }
+        catch(t:Throwable) { failures.add(t) }
+        if(managed) try {
+            check(stopped&&managedSnapshotComplete) { "UNKNOWN Stop or owned snapshot" }
+            check(managedOwned.all { (pid,start)->
+                val current=readProcStat(pid)
+                current.second==android.system.OsConstants.ENOENT ||
+                    (current.first!=null&&parseStartTime(current.first!!)!=start)
+            }) { "UNKNOWN owned identities remain after Stop" }
+            val out=ctx.externalMediaDirs.first().let { File(it,"additional_test_output") };check(out.isDirectory||out.mkdirs())
+            File(out,"managed-teardown.txt").writeText("PASS original owned PID/start set absent after Stop\n")
+        } catch(t:Throwable) { failures.add(t) }
+        try { exportGuestLogs("post-stop") } catch(t:Throwable) { failures.add(t) }
+        try { InstrumentationRegistry.getInstrumentation().waitForIdleSync() } catch(t:Throwable) { failures.add(t) }
+        try { SessionService.stop(ctx) } catch(t:Throwable) { failures.add(t) }
+        try { XServer.resetOwnershipStateForTest() } catch(t:Throwable) { failures.add(t) }
+        org.junit.runners.model.MultipleFailureException.assertEmpty(failures)
     }
 
     /** Guest-log preservation into the runner-collected directory. Route
@@ -1209,7 +1301,7 @@ class MobileDesktopEntryTest {
                     assertTrue("render/process: ambiguous jwm in tree", jwmPid < 0)
                     jwmPid = pid; jwmCmd = cmd
                 }
-                cmd == "pcmanfm --desktop" -> {
+                cmd == GuestMobileShell.desktopExecutableForTest()+" --desktop" -> {
                     assertTrue("render/process: ambiguous pcmanfm in tree", pcmanPid < 0)
                     pcmanPid = pid
                 }
@@ -3278,6 +3370,109 @@ class MobileDesktopEntryTest {
         failure.get()?.let { throw AssertionError("UNKNOWN no-payload peer diagnostic",it) }
     }
 
+    /** Matched-case observation. Original floor mismatch is recorded, not
+     * assumption-skipped; patched must fit each ACTUAL root transition.
+     * RenderQualification checks uncovered pixels; not an FPS test. */
+    private fun managedComparison(rootPid:Int,at:Long,start:String) {
+        val root=DistroInstaller(ctx).rootfsDir(Distros.UBUNTU)
+        val out=ctx.externalMediaDirs.first().let { File(it,"additional_test_output") }
+        check(out.isDirectory||out.mkdirs())
+        val raw=File(out,"managed-comparison.txt")
+        val case=InstrumentationRegistry.getArguments().getString("ldoa_managed_case")!!
+        val pin=InstrumentationRegistry.getArguments().getString("ldoa_managed_manifest")!!
+        raw.writeText("case=$case manifest=$pin\n")
+        val unread=mutableMapOf<Int,String>();val tree=pidTreeSnapshot(rootPid,unread)
+        check(unread.isEmpty()&&tree[rootPid]==start)
+        val selected=GuestMobileShell.desktopExecutableForTest()+" --desktop"
+        val desktop=tree.filter { (p,st)->anchoredRead(p,st,"cmdline")?.replace(0.toChar(),' ')?.trim()==selected }
+        check(desktop.size==1);val pid=desktop.keys.single();val ps=desktop.values.single()
+        val end=System.nanoTime()+600_000_000_000L
+        fun guest(vararg args:String):String {
+            check(System.nanoTime()<end&&procStartTime(rootPid)==start&&procStartTime(pid)==ps)
+            val remaining=minOf(10000L,(end-System.nanoTime())/1000000);check(remaining>0)
+            val cap=XdiagByteCapture(System.nanoTime()+remaining*1000000)
+            val result=guestExec(root,remaining,*args,byteCapture=cap)
+            requireGuest(result,args.joinToString(" "));return cap.decode()
+        }
+        var mismatches=0
+        val observed=mutableListOf<Pair<Int,Int>>()
+        val sizes=listOf(1080 to 2400,900 to 2000,800 to 1800,1800 to 800,1080 to 2400)
+        try {
+            for((i,wh) in sizes.withIndex()) {
+                // Disposable Android display override drives actual Lorie
+                // surface resize. Root/desktop must change from prior state,
+                // never claim requested wm dimensions ARE guest dimensions.
+                device.executeShellCommand("wm size ${wh.first}x${wh.second}")
+                Thread.sleep(2000)
+                val rootRaw=guest("xwininfo","-root")
+                val ids=((RenderProbeParse.searchIds(guest("xdotool","search","--class","pcmanfm")) ?: error("desktop candidates"))+
+                    (RenderProbeParse.searchIds(guest("xdotool","search","--class","Pcmanfm")) ?: error("desktop candidates uppercase"))).distinct()
+                val candidates=ids.filter { id ->
+                    val prop=guest("xprop","-id",id.toString(),"_NET_WM_PID","_NET_WM_WINDOW_TYPE")
+                    prop.contains("_NET_WM_WINDOW_TYPE_DESKTOP")&&Regex("(?m)^_NET_WM_PID\\(CARDINAL\\) = $pid$").containsMatchIn(prop)
+                }
+                check(candidates.size==1)
+                val deskRaw=guest("xwininfo","-id",candidates.single().toString())
+                val r=RenderProbeParse.winStats(rootRaw) ?: error("root parse")
+                val d=RenderProbeParse.winStats(deskRaw) ?: error("desktop parse")
+                observed.add(r.w to r.h)
+                if(i>0)check(observed[i]!=observed[i-1]) { "requested display transition did not change actual root" }
+                val stableEnd=minOf(end,System.nanoTime()+20_000_000_000L)
+                val key=listOf(r.w,r.h,d.w,d.h,d.absX,d.absY)
+                var consecutive=1
+                while(consecutive<3&&System.nanoTime()<stableEnd) {
+                    Thread.sleep(500)
+                    val rr=RenderProbeParse.winStats(guest("xwininfo","-root")) ?: error("stable root parse")
+                    val dd=RenderProbeParse.winStats(guest("xwininfo","-id",candidates.single().toString())) ?: error("stable desktop parse")
+                    check(System.nanoTime()<stableEnd) { "late geometry observation" }
+                    check(listOf(rr.w,rr.h,dd.w,dd.h,dd.absX,dd.absY)==key) { "geometry changing after initial capture; UNKNOWN, no lucky final frame" }
+                    consecutive++
+                }
+                check(consecutive==3) { "geometry stability deadline" }
+                val fit=d.w==r.w&&d.h==r.h&&d.absX==0&&d.absY==0
+                if(!fit)mismatches++
+                raw.appendText("case=$case transition=$i requested=${wh.first}x${wh.second} anchored=$pid/$ps fit=$fit\n$rootRaw\n$deskRaw\n")
+                val bmp=InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot() ?: error("pixels unavailable")
+                try { File(out,"managed-$i.png").outputStream().use { check(bmp.compress(Bitmap.CompressFormat.PNG,100,it)) } }
+                finally { bmp.recycle() }
+                if(case=="patched")check(fit) { "patched desktop does not match actual root" }
+            }
+            check(observed.any { it.first>it.second }&&observed.any { it.second>it.first }) { "actual portrait/landscape not observed" }
+            // Full preexisting topology/occluder/uncovered-color gate onfinal
+            // portrait only. Its failure is a product finding, not obscured.
+            if(case=="patched") renderQualification(rootPid,at,start)
+            else raw.appendText("Original geometry mismatch retained; strictfullrenderqualification not expected to pass floor mismatch. OriginalPNG evidence remains manual.\n")
+            // Actual Android key routing to currently focused xterm. Fixed
+            // command writes owned diagnostic file; no Files/socket payload.
+            val xt=RenderProbeParse.searchIds(guest("xdotool","search","--class","XTerm")) ?: error("xterm ids")
+            check(xt.size==1);guest("xdotool","windowactivate",xt.single().toString())
+            check(device.pressKeyCode(android.view.KeyEvent.KEYCODE_E))
+            check(device.pressKeyCode(android.view.KeyEvent.KEYCODE_C))
+            check(device.pressKeyCode(android.view.KeyEvent.KEYCODE_H))
+            check(device.pressKeyCode(android.view.KeyEvent.KEYCODE_O))
+            check(device.pressKeyCode(android.view.KeyEvent.KEYCODE_SPACE))
+            check(device.pressKeyCode(android.view.KeyEvent.KEYCODE_7))
+            check(device.pressKeyCode(android.view.KeyEvent.KEYCODE_ENTER))
+            // Visible terminal effect needs actual screenshot inspection;
+            // key injection returningtrue is NOT accepted as rendered input.
+            Thread.sleep(1000) // bounded rendering settle; manual effect inspection still required
+            val input=InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot() ?: error("input screenshot")
+            try { File(out,"managed-input.png").outputStream().use { check(input.compress(Bitmap.CompressFormat.PNG,100,it)) } }
+            finally { input.recycle() }
+            raw.appendText("INPUT dispatched Android keycodes echo7; screenshot must showeffect, no input PASS from injection return\n")
+            if(case=="original")check(mismatches>0) { "original floor NOT reproduced" }
+            raw.appendText("CASE geometry observations complete; original_mismatches=$mismatches; pixels/input manual review required\n")
+        } finally { device.executeShellCommand("wm size reset") }
+    }
+
+    /** Explicitly gated managed diagnostic, not production enablement. */
+    @Test
+    fun mobileEntryManagedDesktopComparison() {
+        GuestMobileShell.managedDesktopForTest = true
+        try { mobileEntryLifecycle() }
+        finally { GuestMobileShell.managedDesktopForTest = false }
+    }
+
     @Test
     fun mobileEntryLifecycle() {
         val prefs = ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
@@ -3425,6 +3620,10 @@ class MobileDesktopEntryTest {
             // Render qualification (production-pair run): generated profile
             // on disk, identity-anchored process args/environment, and the
             // uncovered root via a non-destructive iconify+restore.
+            if(testName.methodName == "mobileEntryManagedDesktopComparison") {
+                managedComparison(rootPid,openTapAt,launchRootStart!!)
+                return@use
+            }
             renderQualification(rootPid, openTapAt, launchRootStart!!)
 
             // 2. Repeat open REUSES the tracked session (same handle).
