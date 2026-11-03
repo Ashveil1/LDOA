@@ -3415,42 +3415,90 @@ class MobileDesktopEntryTest {
         check(linked.size==1);val xt=linked.single();val xtId=xt.third
         check(RenderProbeParse.xpropClass(guest("xprop","-id",xtId.toString(),"WM_CLASS"))?.second=="XTerm")
         check(RenderProbeParse.searchIds(guest("xdotool","search","--class","XTerm"))==listOf(xtId))
-        fun xtCurrent(){check(procStartTime(xtPid)==xtStart&&procStartTime(xt.first)==xt.second)}
-        fun mapState()=RenderProbeParse.winStats(guest("xwininfo","-id",xtId.toString()))?.mapState ?: error("xterm map parse")
-        fun restoreXterm(){
-            val until=System.nanoTime()+30_000_000_000L
-            fun restoreGuest(vararg args:String):String {
-                xtCurrent();val ms=minOf(10000L,(until-System.nanoTime())/1000000);check(ms>0)
-                val cap=XdiagByteCapture(System.nanoTime()+ms*1000000)
-                val result=guestExec(root,ms,*args,byteCapture=cap);requireGuest(result,"managed restore");return cap.decode()
-            }
-            restoreGuest("xdotool","windowactivate",xtId.toString())
-            while(true){
-                val st=RenderProbeParse.winStats(restoreGuest("xwininfo","-id",xtId.toString())) ?: error("restore map parse")
-                check(System.nanoTime()<until)
-                if(st.mapState=="IsViewable")break
-                Thread.sleep(250)
-            }
-            xtCurrent()
+        // Resolve actual session WM ownership, not a panel-appearance guess.
+        val wmKinds=setOf("jwm","openbox","icewm","fluxbox")
+        val wmOwners=tree.mapNotNull { (p,st)->
+            val cmd=anchoredRead(p,st,"cmdline") ?: error("managed WM inventory unreadable")
+            val kind=cmd.substringBefore(0.toChar()).substringAfterLast('/')
+            if(kind in wmKinds)Triple(p,st,kind) else null
         }
-        var minimized=false
+        val wm=ManagedXtermLifecycle.selectWm(wmOwners){raw.appendText(it+"\n")}
+        var transition=-1
+        var lifecycleUntil=end
+        lateinit var lifecycle:ManagedXtermLifecycle
+        fun lifeGuest(op:String,vararg args:String):String = lifecycle.query(transition,op) {
+            val ms=minOf(10000L,(lifecycleUntil-System.nanoTime())/1000000)
+            check(ms>0&&!guestAborted) { "managed lifecycle unavailable" }
+            val cap=XdiagByteCapture(System.nanoTime()+ms*1000000,cap=16384)
+            var result:GuestOut?=null;var failure:Throwable?=null
+            try {result=guestExec(root,ms,*args,byteCapture=cap)}catch(t:Throwable){failure=t}
+            val capture=cap.snapshot();val meta=capture.metadata
+            guestCalls++
+            if(capture.complete)guestComplete++
+            val cleanup=result?.leftover?.isEmpty()==true&&!guestAborted
+            if(result?.code==0&&cleanup)guestZero++
+            val decoded=if(capture.complete)runCatching{cap.decode()}.getOrNull() else null
+            ManagedXtermLifecycle.Query(decoded ?: "",result?.code ?: -2,
+                meta.contains("eof: true\n"),meta.contains("overflow: true\n"),meta.contains("deadline: true\n"),
+                capture.complete&&decoded!=null,cleanup,failure)
+        }
+        lifecycle=ManagedXtermLifecycle(listOf(xtPid to xtStart,xt.first to xt.second,wm.first to wm.second),
+            {procStartTime(it)}, {
+                val st=RenderProbeParse.winStats(lifeGuest("MAP","xwininfo","-id",xtId.toString()))?.mapState
+                ManagedXtermLifecycle.MapState.values().firstOrNull{it.name==st} ?: ManagedXtermLifecycle.MapState.UNKNOWN
+            }, {raw.appendText("$it xid=$xtId\n")})
+        fun restoreXterm(){
+            lifecycleUntil=minOf(end,System.nanoTime()+ManagedXtermLifecycle.RESTORE_NS)
+            lifecycle.observe(transition,"RESTORE") // before activation, refuse a changed owner
+            lifeGuest("ACTIVATE","xdotool","windowactivate",xtId.toString())
+            var consecutive=0
+            repeat(ManagedXtermLifecycle.MAX_OBSERVATIONS) {
+                check(System.nanoTime()<lifecycleUntil) { "managed restore deadline" }
+                val st=lifecycle.observe(transition,"RESTORE")
+                check(System.nanoTime()<lifecycleUntil) { "managed restore late observation" }
+                consecutive=if(st.map==ManagedXtermLifecycle.MapState.IsViewable)consecutive+1 else 0
+                if(consecutive==ManagedXtermLifecycle.CONSECUTIVE) {
+                    val focus=lifeGuest("FOCUS","xdotool","getwindowfocus").trim().toLongOrNull()
+                    raw.appendText("LIFE_FOCUS transition=$transition expected=$xtId observed=${focus ?: -1}\n")
+                    check(focus==xtId&&System.nanoTime()<lifecycleUntil) { "managed restore focus/deadline" }
+                    return
+                }
+                Thread.sleep(ManagedXtermLifecycle.PAUSE_MS)
+            }
+            error("managed restore observation cap")
+        }
         var primary:Throwable?=null
         var mismatches=0
         val observed=mutableListOf<Pair<Int,Int>>()
         val sizes=listOf(1080 to 2400,900 to 2000,800 to 1800,1800 to 800,1080 to 2400)
         try {
-            xtCurrent();check(mapState()=="IsViewable")
-            minimized=true // obligation armed before possibly partial command
-            guest("xdotool","windowminimize",xtId.toString())
-            val unmapEnd=minOf(end,System.nanoTime()+20_000_000_000L)
-            while(mapState()!="IsUnMapped"&&System.nanoTime()<unmapEnd)Thread.sleep(250)
-            check(mapState()=="IsUnMapped");xtCurrent()
+            check(lifecycle.observe(-1,"INITIAL").map==ManagedXtermLifecycle.MapState.IsViewable)
             for((i,wh) in sizes.withIndex()) {
                 // Disposable Android display override drives actual Lorie
                 // surface resize. Root/desktop must change from prior state,
                 // never claim requested wm dimensions ARE guest dimensions.
+                transition=i
                 device.executeShellCommand("wm size ${wh.first}x${wh.second}")
-                Thread.sleep(2000)
+                Thread.sleep(2000) // lead only; actual lifecycle and geometry still verified
+                lifecycleUntil=minOf(end,System.nanoTime()+ManagedXtermLifecycle.PREPARE_NS)
+                var priorRoot:Pair<Int,Int>?=null;var rootConsecutive=0
+                repeat(ManagedXtermLifecycle.MAX_OBSERVATIONS) {
+                    if(rootConsecutive<ManagedXtermLifecycle.CONSECUTIVE) {
+                        check(System.nanoTime()<lifecycleUntil) { "managed root settle deadline" }
+                        val st=RenderProbeParse.winStats(guest("xwininfo","-root")) ?: error("managed root settle parse")
+                        val size=st.w to st.h
+                        raw.appendText("LIFE_ROOT transition=$i w=${st.w} h=${st.h}\n")
+                        rootConsecutive=if(size==priorRoot)rootConsecutive+1 else 1;priorRoot=size
+                        if(rootConsecutive<ManagedXtermLifecycle.CONSECUTIVE)Thread.sleep(ManagedXtermLifecycle.PAUSE_MS)
+                    }
+                }
+                check(rootConsecutive==ManagedXtermLifecycle.CONSECUTIVE&&System.nanoTime()<lifecycleUntil)
+                lifecycle.prepare(i,lifecycleUntil,{
+                    lifecycle.minimize { // obligation BEFORE a possibly partial command
+                        lifeGuest("MINIMIZE","xdotool","windowminimize",xtId.toString())
+                    }
+                },{Thread.sleep(ManagedXtermLifecycle.PAUSE_MS)})
+                // Preparation can alter WM layout. All geometry below is fresh.
                 val rootRaw=guest("xwininfo","-root")
                 val ids=((RenderProbeParse.searchIds(guest("xdotool","search","--class","pcmanfm")) ?: error("desktop candidates"))+
                     (RenderProbeParse.searchIds(guest("xdotool","search","--class","Pcmanfm")) ?: error("desktop candidates uppercase"))).distinct()
@@ -3479,7 +3527,7 @@ class MobileDesktopEntryTest {
                 val fit=d.w==r.w&&d.h==r.h&&d.absX==0&&d.absY==0
                 if(!fit)mismatches++
                 raw.appendText("case=$case transition=$i requested=${wh.first}x${wh.second} anchored=$pid/$ps fit=$fit\n$rootRaw\n$deskRaw\n")
-                xtCurrent();check(mapState()=="IsUnMapped")
+                lifecycle.requireUnmapped(i,"PRE_CAPTURE")
                 // Central ACTUAL ROOT band, not requested dimensions or an
                 // offscreen original-floor rectangle. Tray outside this ROI.
                 val rx=r.w/5;val ry=r.h*35/100;val rw=r.w*3/5;val rh=r.h*3/10
@@ -3507,7 +3555,8 @@ class MobileDesktopEntryTest {
                 val ar=RenderProbeParse.winStats(guest("xwininfo","-root")) ?: error("postcapture root")
                 val ad=RenderProbeParse.winStats(guest("xwininfo","-id",candidates.single().toString())) ?: error("postcapture desktop")
                 val after=listOf(ar.w,ar.h,ad.w,ad.h,ad.absX,ad.absY)
-                val occluders=clearROI();xtCurrent();val unmapped=mapState()=="IsUnMapped"
+                val occluders=clearROI()
+                val unmapped=lifecycle.observe(i,"POST_CAPTURE").map==ManagedXtermLifecycle.MapState.IsUnMapped
                 fun snapshotJson(v:ManagedManualSnapshot)=org.json.JSONObject()
                     .put("complete",v.complete).put("valid",v.valid())
                     .put("start_ns",v.startNs).put("end_ns",v.endNs)
@@ -3530,12 +3579,14 @@ class MobileDesktopEntryTest {
                 if(case=="patched")check(fit) { "patched desktop does not match actual root" }
             }
             check(observed.any { it.first>it.second }&&observed.any { it.second>it.first }) { "actual portrait/landscape not observed" }
-            restoreXterm();minimized=false
+            lifecycle.restore { restoreXterm() }
             raw.appendText("legacy_renderQualification=NOT_EXECUTED_MANUAL_SCOPE; sections0-5 session/provisioning and legacy color/nonblack/topology exclusive checks UNQUALIFIED\n")
             // Actual Android key routing to currently focused xterm. Fixed
             // command writes owned diagnostic file; no Files/socket payload.
-            val xt=RenderProbeParse.searchIds(guest("xdotool","search","--class","XTerm")) ?: error("xterm ids")
-            check(xt.size==1);guest("xdotool","windowactivate",xt.single().toString())
+            check(lifecycle.observe(transition,"INPUT").map==ManagedXtermLifecycle.MapState.IsViewable)
+            val inputFocus=lifeGuest("FOCUS","xdotool","getwindowfocus").trim().toLongOrNull()
+            raw.appendText("LIFE_FOCUS transition=$transition expected=$xtId observed=${inputFocus ?: -1}\n")
+            check(inputFocus==xtId) { "managed input focus" }
             check(device.pressKeyCode(android.view.KeyEvent.KEYCODE_E))
             check(device.pressKeyCode(android.view.KeyEvent.KEYCODE_C))
             check(device.pressKeyCode(android.view.KeyEvent.KEYCODE_H))
@@ -3555,7 +3606,7 @@ class MobileDesktopEntryTest {
         } catch(t:Throwable){primary=t;throw t}
         finally {
             try {
-                if(minimized){
+                lifecycle.finish(primary) {
                     if(guestAborted)error("managed restore forbidden after unresolved helper cleanup")
                     restoreXterm()
                 }

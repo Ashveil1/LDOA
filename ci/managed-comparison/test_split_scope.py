@@ -31,5 +31,5 @@ class Scope(unittest.TestCase):
  def test_bracket_schema_false_not_implicit_pixels(self):
   source=(pathlib.Path(__file__).parents[2]/'app/src/androidTest/java/dev/phonelinux/proto/MobileDesktopEntryTest.kt').read_text()
   self.assertIn('"manual_review","PENDING"',source);self.assertIn('check(after==before&&occluders.isEmpty()&&unmapped)',source)
-  self.assertLess(source.index('guest("xdotool","windowminimize",xtId.toString())',source.index('private fun managedComparison')),source.index('for((i,wh) in sizes.withIndex())',source.index('private fun managedComparison')))
+  self.assertLess(source.index('for((i,wh) in sizes.withIndex())',source.index('private fun managedComparison')),source.index('lifeGuest("MINIMIZE","xdotool","windowminimize",xtId.toString())',source.index('private fun managedComparison')))
 if __name__=='__main__':unittest.main()
