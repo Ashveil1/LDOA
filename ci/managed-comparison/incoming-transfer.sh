@@ -14,10 +14,37 @@ PIN=$2
 [[ -z $(find "$CASE" -type l -print -quit) ]]
 [[ $(find "$CASE" -type f | wc -l) -le 1024 ]]
 [[ $(du -sb "$CASE" | cut -f1) -le 134217728 ]]
-# Exact package/debug identity must be installed on opted-in disposable CI.
-timeout -k 2 15 adb -s "$SERIAL" shell "run-as dev.phonelinux.proto sh -c 'test \"\$(pwd -P)\" = \"\$(readlink -f /data/data/dev.phonelinux.proto)\" && test ! -L files && { test ! -e files || test -d files; } && test ! -e files/managed-incoming && test ! -L files/managed-incoming'"
-timeout -k 2 15 adb -s "$SERIAL" shell "test ! -e /data/local/tmp/ldoa-managed-incoming && test ! -L /data/local/tmp/ldoa-managed-incoming"
+# Fixed labels and rc only. Never echo canonical paths or private contents.
+RECEIPT="$GITHUB_WORKSPACE/comparison-evidence/$MANAGED_TRANSFER_CASE/transfer-guards.txt"
+[[ $MANAGED_TRANSFER_CASE == original || $MANAGED_TRANSFER_CASE == patched ]]
+[[ -d $(dirname "$RECEIPT") && ! -e "$RECEIPT" && ! -L "$RECEIPT" ]]
+printf 'schema=1\n' > "$RECEIPT"
+guard() {
+ local label=$1;shift
+ local rc=0
+ "$@" >/dev/null 2>&1 || rc=$?
+ printf 'guard=%s rc=%s\n' "$label" "$rc" >> "$RECEIPT"
+ return "$rc"
+}
+SCRIPT=$(realpath -e "$0")
+BODY="$(dirname "$SCRIPT")/identity-body.sh"
+guard context-identity timeout -k 2 15 adb -s "$SERIAL" shell -T run-as dev.phonelinux.proto sh < "$BODY"
+guard parent-nonlink timeout -k 2 15 adb -s "$SERIAL" shell "run-as dev.phonelinux.proto sh -c 'test ! -L files'"
+guard parent-type timeout -k 2 15 adb -s "$SERIAL" shell "run-as dev.phonelinux.proto sh -c 'test ! -e files || test -d files'"
+guard incoming-absent timeout -k 2 15 adb -s "$SERIAL" shell "run-as dev.phonelinux.proto sh -c 'test ! -e files/managed-incoming'"
+guard incoming-nonlink timeout -k 2 15 adb -s "$SERIAL" shell "run-as dev.phonelinux.proto sh -c 'test ! -L files/managed-incoming'"
+guard tmp-absent timeout -k 2 15 adb -s "$SERIAL" shell "test ! -e /data/local/tmp/ldoa-managed-incoming"
+guard tmp-nonlink timeout -k 2 15 adb -s "$SERIAL" shell "test ! -L /data/local/tmp/ldoa-managed-incoming"
 # /data/local/tmp is ephemeral emulator storage, not Actions artifact service.
-timeout -k 5 120 adb -s "$SERIAL" push "$CASE" /data/local/tmp/ldoa-managed-incoming
-timeout -k 2 30 adb -s "$SERIAL" shell "run-as dev.phonelinux.proto sh -c 'test \"\$(pwd -P)\" = \"\$(readlink -f /data/data/dev.phonelinux.proto)\" && test ! -L files && { if test -e files; then test -d files; else mkdir -m 700 files; fi; } && test ! -e files/managed-incoming && test ! -L files/managed-incoming && mkdir -m 700 files/managed-incoming && cp -R /data/local/tmp/ldoa-managed-incoming/. files/managed-incoming/'"
+guard push timeout -k 5 120 adb -s "$SERIAL" push "$CASE" /data/local/tmp/ldoa-managed-incoming
+# Same stdin shell runs exact identitybody and then the exclusive copy, so
+# no separate run-as invocation gap between identity and mutation.
+COPY_BODY=$(mktemp)
+trap 'rm -f "$COPY_BODY"' EXIT
+printf 'set -e\n' > "$COPY_BODY"
+cat "$BODY" >> "$COPY_BODY"
+cat >> "$COPY_BODY" <<'DEVICE_COPY'
+test ! -L files && { if test -e files; then test -d files; else mkdir -m 700 files; fi; } && test ! -e files/managed-incoming && test ! -L files/managed-incoming && mkdir -m 700 files/managed-incoming && cp -R /data/local/tmp/ldoa-managed-incoming/. files/managed-incoming/
+DEVICE_COPY
+guard private-copy timeout -k 2 30 adb -s "$SERIAL" shell -T run-as dev.phonelinux.proto sh < "$COPY_BODY"
 echo 'TRANSFER ONLY; package hash/pin reverified in-app before exclusive rootfs stage; NO launch here.'

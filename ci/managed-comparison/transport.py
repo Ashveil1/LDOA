@@ -11,7 +11,7 @@ MAX_CHUNKS=8500
 MAX_LINE=4608
 PREFIX='MCMP1 '
 ROOT_FILES={'coverage.json','host-phase.txt'}
-CASE_FILES={'managed-setup-raw.txt','managed-setup-capture.txt','managed-abi-raw.txt','managed-abi-capture.txt','managed-closure-raw.txt','managed-closure-capture.txt','managed-comparison.txt','managed-abi.txt','managed-provenance.txt','managed-teardown.txt','managed-junit.xml','managed-input.png','managed-0.png','managed-1.png','managed-2.png','managed-3.png','managed-4.png','instrumentation.txt','phase.txt','caller.txt'}
+CASE_FILES={'transfer-guards.txt','managed-setup-raw.txt','managed-setup-capture.txt','managed-abi-raw.txt','managed-abi-capture.txt','managed-closure-raw.txt','managed-closure-capture.txt','managed-comparison.txt','managed-abi.txt','managed-provenance.txt','managed-teardown.txt','managed-junit.xml','managed-input.png','managed-0.png','managed-1.png','managed-2.png','managed-3.png','managed-4.png','instrumentation.txt','phase.txt','caller.txt'}
 def allowed(name):
     p=pathlib.PurePosixPath(name)
     return name in ROOT_FILES or (len(p.parts)==2 and p.parts[0] in ('original','patched') and p.parts[1] in CASE_FILES and str(p)==name)
@@ -117,6 +117,10 @@ def collect(evidence,private,out):
             p=matches[0];rel=p.relative_to(evidence)
             assert all(not evidence.joinpath(*rel.parts[:i]).is_symlink() for i in range(1,len(rel.parts)+1)),'symlink export'
             assert p.is_file() and p.stat().st_size<=4*1024*1024,'file cap'
+            if name=='transfer-guards.txt':
+                assert p.stat().st_size<=1024,'guard receipt cap'
+                receipt=p.read_bytes()
+                assert re.fullmatch(rb'schema=1\n(?:guard=(?:context-identity|parent-nonlink|parent-type|incoming-absent|incoming-nonlink|tmp-absent|tmp-nonlink|push|private-copy) rc=(?:0|[1-9][0-9]{0,2})\n){1,9}',receipt),'guard receipt syntax'
             total+=p.stat().st_size;assert total<=MAX_RAW-16384,'raw cap'
             target=out/case/name;target.parent.mkdir(exist_ok=True)
             with p.open('rb') as f:b=f.read(4*1024*1024+1)

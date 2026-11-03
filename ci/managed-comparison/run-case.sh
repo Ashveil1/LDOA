@@ -13,7 +13,7 @@ trap 'rc=$?; printf "caller_exit=%s\n" "$rc" > "$OUT/caller.txt"' EXIT
 # Same APK build reused in two separate fresh AVDs. No -r upgrade/userdata.
 timeout -k 2 60 adb -s "$SERIAL" install -g app/build/outputs/apk/debug/app-debug.apk
 timeout -k 2 60 adb -s "$SERIAL" install -g app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
-DISPOSABLE_TRANSFER_APPROVED=yes timeout -k 5 190 bash ci/managed-comparison/incoming-transfer.sh "$INCOMING" "$PIN" "$SERIAL"
+MANAGED_TRANSFER_CASE="$CASE" DISPOSABLE_TRANSFER_APPROVED=yes timeout -k 5 330 bash ci/managed-comparison/incoming-transfer.sh "$INCOMING" "$PIN" "$SERIAL"
 # am instrument return0 isn't test success: exact XML/receipt verifier below.
 set +e
 timeout -k 10 2400 adb -s "$SERIAL" shell am instrument -w -e class dev.phonelinux.proto.MobileDesktopEntryTest#mobileEntryManagedDesktopComparison -e listener dev.phonelinux.proto.ManagedXmlListener -e ldoa_ci_emulator true -e ldoa_managed_desktop true -e ldoa_managed_case "$CASE" -e ldoa_managed_manifest "$PIN" dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner > "$OUT/instrumentation.txt" 2>&1

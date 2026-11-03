@@ -9,6 +9,7 @@ class Evidence(unittest.TestCase):
   for case in ('original','patched'):
    d=self.e/case;d.mkdir(parents=True)
    for n in t.CASE_FILES:(d/n).write_text('SYNTHETIC not pixels')
+   (d/'transfer-guards.txt').write_text('schema=1\n'+''.join('guard='+l+' rc=0\n' for l in ['context-identity','parent-nonlink','parent-type','incoming-absent','incoming-nonlink','tmp-absent','tmp-nonlink','push','private-copy']))
    (d/'managed-junit.xml').write_text('<testsuite tests="1" failures="0" skipped="0"><testcase classname="dev.phonelinux.proto.MobileDesktopEntryTest" name="mobileEntryManagedDesktopComparison"/></testsuite>')
    (d/'managed-comparison.txt').write_text('case='+case+' manifest='+'a'*64+'\n'+''.join('case='+case+' transition='+str(i)+' requested=800x1800 anchored=123/456 fit=true\n' for i in range(5))+'CASE geometry observations complete')
    (d/'managed-provenance.txt').write_text('case='+case+' manifest='+'a'*64+' inventory='+'b'*64+'\n')
@@ -73,6 +74,18 @@ class Evidence(unittest.TestCase):
  def test_host_symlink_refused(self):
   f=self.e/'host-phase.txt';f.unlink();f.symlink_to(self.private/'binary')
   with self.assertRaises(AssertionError):t.collect(self.e,self.private,self.out)
+ def test_guard_arbitrary_refused(self):
+  (self.e/'original/transfer-guards.txt').write_text('private content')
+  with self.assertRaises(AssertionError):t.collect(self.e,self.private,self.out)
+ def test_guard_oversize_refused(self):
+  (self.e/'original/transfer-guards.txt').write_text('x'*1025)
+  with self.assertRaises(AssertionError):t.collect(self.e,self.private,self.out)
+ def test_guard_case_missing_refuses(self):
+  (self.e/'original/transfer-guards.txt').unlink()
+  with self.assertRaises(ValueError):c.check(self.e/'original','original','a'*64)
+ def test_guard_case_failed_refuses(self):
+  f=self.e/'original/transfer-guards.txt';f.write_text(f.read_text().replace('private-copy rc=0','private-copy rc=76'))
+  with self.assertRaises(ValueError):c.check(self.e/'original','original','a'*64)
  def test_source_route(self):
   p=pathlib.Path(__file__).parent
   w=(p/'workflow-proposal.yml' if (p/'workflow-proposal.yml').exists() else p.parents[1]/'.github/workflows/managed-comparison.yml').read_text()
