@@ -124,6 +124,13 @@ def wait(proc,uid,adb,old,deadline,emit,interval=1.0):
   time.sleep(interval)
  raise Refused('bounded absence not established')
 
+def sdk_assert(sdk):
+ text=read(sdk/'emulator/source.properties',4096).decode('ascii','strict')
+ rows=re.findall(r'^(Pkg\.(?:Revision|BuildId))=(.*)$',text,re.M)
+ if len(rows)!=2 or dict(rows)!={'Pkg.Revision':'37.2.13','Pkg.BuildId':'16740729'}:
+  raise Refused('SDK drift/missing/duplicate version properties')
+ return dict(rows)
+
 def main():
  ap=argparse.ArgumentParser();ap.add_argument('mode',choices=['anchor','wait']);ap.add_argument('--anchor',required=True);a=ap.parse_args()
  start=time.monotonic();deadline=start+(5.0 if a.mode=='anchor' else BUDGET)
@@ -131,6 +138,7 @@ def main():
  try:
   proc=pathlib.Path('/proc');uid=os.getuid();sdk=pathlib.Path(os.environ['ANDROID_HOME']);path=pathlib.Path(a.anchor)
   if a.mode=='anchor':
+   emit({'event':'SDK','properties':sdk_assert(sdk)})
    obj=anchor(proc,uid,sdk,deadline)
    with path.open('x') as f:json.dump(obj,f,sort_keys=True)
    emit({'event':'anchor','anchor':obj})

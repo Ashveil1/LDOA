@@ -32,16 +32,7 @@ jobs:
           emulator-port: 5554
           force-avd-creation: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -wipe-data -noaudio -no-boot-anim
-          script: |
-            python3 - <<'PY'
-            import pathlib,re
-            p=pathlib.Path(__import__('os').environ['ANDROID_HOME'])/'emulator/source.properties'
-            text=p.read_text()
-            allowed=dict(re.findall(r'^(Pkg\.(?:Revision|BuildId))=(.*)$',text,re.M))
-            print('QUALIFICATION SDK',allowed,flush=True)
-            assert allowed=={'Pkg.Revision':'37.2.13','Pkg.BuildId':'16740729'},'SDK drift: do not generalize'
-            PY
-            timeout -k 2 8 python3 ci/managed-comparison/intercase_absence.py anchor --anchor "$RUNNER_TEMP/original-emulator-identity.json"
+          script: timeout -k 2 8 python3 ci/managed-comparison/intercase_absence.py anchor --anchor "$RUNNER_TEMP/original-emulator-identity.json"
       - name: Read-only exit qualification after normal action cleanup
         timeout-minutes: 1
         run: timeout -k 2 45 python3 ci/managed-comparison/intercase_absence.py wait --anchor "$RUNNER_TEMP/original-emulator-identity.json"
