@@ -923,7 +923,8 @@ class MobileDesktopEntryTest {
     /** Run one command inside the Ubuntu rootfs against the SAME X display
      *  (:0 socket bind identical to the session launch). Evidence collection
      *  only: no --kill-on-exit; cleanup is VERIFIED per call. */
-    private fun guestExec(rootfs: File, timeoutMs: Long, vararg args: String): GuestOut {
+    private fun guestExec(rootfs: File, timeoutMs: Long, vararg args: String,
+        byteCapture: XdiagByteCapture? = null): GuestOut {
         val nd = ctx.applicationInfo.nativeLibraryDir
         val pb = ProcessBuilder(mutableListOf(
             File(nd, "libproot.so").absolutePath,
@@ -982,13 +983,33 @@ class MobileDesktopEntryTest {
             }
         }
         val out = StringBuilder()
-        val drain = kotlin.concurrent.thread {
+        val drain = if (byteCapture == null) kotlin.concurrent.thread {
             try { p.inputStream.bufferedReader().forEachLine { out.append(it).append('\n') } } catch (_: Throwable) {}
+        } else XdiagCaptureWorker.start(byteCapture, { byteCapture.drain(p.inputStream) }, cleanup = {
+            guestAborted = true
+            p.destroy()
+            if (!p.waitFor(2_000, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                p.destroyForcibly(); p.waitFor(2_000, java.util.concurrent.TimeUnit.MILLISECONDS)
+            }
+        })
+        var captureRc: Int? = null
+        try {
+        // Only opted-in inventory capture polls transport failure. Default
+        // callers keep their original single wait and drain behavior.
+        fun waitForGuest(): Boolean {
+            if (byteCapture == null) return p.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+            val until = System.nanoTime() + timeoutMs * 1_000_000L
+            while (true) {
+                if (byteCapture.failed()) return false
+                val left = (until - System.nanoTime()) / 1_000_000L
+                if (left <= 0) return false
+                if (p.waitFor(minOf(25L, left), java.util.concurrent.TimeUnit.MILLISECONDS)) return true
+            }
         }
         val code: Int
         if (completedEarlyCode != null) {
             code = completedEarlyCode
-        } else if (!p.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+        } else if (!waitForGuest()) {
             p.destroy()
             if (!p.waitFor(2_000, java.util.concurrent.TimeUnit.MILLISECONDS)) {
                 p.destroyForcibly(); p.waitFor(2_000, java.util.concurrent.TimeUnit.MILLISECONDS)
@@ -997,6 +1018,7 @@ class MobileDesktopEntryTest {
             guestAborted = true
         } else code = p.exitValue()
         drain.join(2_000)
+        captureRc = code
         // waitFor only proves the DIRECT child exited; the helper subtree
         // (proot root + tracee descendants) must be GONE. Every check is
         // errno-aware: ENOENT = gone; any other read error = UNKNOWN, which
@@ -1042,6 +1064,40 @@ class MobileDesktopEntryTest {
         }
         if (unknown) guestAborted = true
         return GuestOut(code, out.toString(), leftover)
+        } catch (t: Throwable) {
+            byteCapture?.wrapperFailure(t)
+            if (byteCapture != null) {
+                guestAborted = true
+                // Same bounded owned-process destroy/reap ladder on wrapper
+                // failure; no guest-wide kill or unverifiable identity guess.
+                try {
+                    p.destroy()
+                    if (!p.waitFor(2_000, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                        p.destroyForcibly(); p.waitFor(2_000, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    }
+                } catch (cleanup: Throwable) {
+                    if (cleanup !== t) t.addSuppressed(cleanup)
+                }
+            }
+            throw t
+        } finally {
+            if (byteCapture != null) {
+                val liveAtJoin = drain.isAlive
+                // Freeze data/state before close or any late read. One read
+                // may already be in flight; no late result/error is accepted.
+                byteCapture.joined(captureRc, liveAtJoin)
+                if (liveAtJoin) {
+                    guestAborted = true
+                    val cleanupState = XdiagCaptureWorker.cleanupAndClose(stop = {
+                        p.destroy()
+                        if (!p.waitFor(2_000, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                            p.destroyForcibly(); p.waitFor(2_000, java.util.concurrent.TimeUnit.MILLISECONDS)
+                        }
+                    }, close = { p.inputStream.close() })
+                    Log.e(TAG, "xdiag: frozen inventory UNKNOWN; " + cleanupState)
+                }
+            }
+        }
     }
 
     private fun requireGuest(out: GuestOut, what: String): String {
@@ -2322,12 +2378,13 @@ class MobileDesktopEntryTest {
      *  hard failure, and the effective timeout is min(command cap,
      *  remaining overall budget) - a command that cannot fit fails as
      *  budget-exhausted UNKNOWN instead of running under-budgeted. */
-    private fun xdiagGuest(rootfs: File, deadlineNs: Long, what: String, vararg args: String): String {
+    private fun xdiagGuest(rootfs: File, deadlineNs: Long, what: String, vararg args: String,
+        byteCapture: XdiagByteCapture? = null): String {
         if (guestAborted) throw AssertionError("xdiag: " + what +
             " refused - an earlier guest timeout/unclean exec latched the abort")
         val remMs = (deadlineNs - System.nanoTime()) / 1_000_000L
         if (remMs <= 0L) throw AssertionError("xdiag: overall budget EXHAUSTED before " + what + " - UNKNOWN")
-        val out = guestExec(rootfs, minOf(XdiagPolicy.COMMAND_BUDGET_MS, remMs), *args)
+        val out = guestExec(rootfs, minOf(XdiagPolicy.COMMAND_BUDGET_MS, remMs), *args, byteCapture = byteCapture)
         if (out.leftover.isNotEmpty() || guestAborted) {
             guestAborted = true
             throw AssertionError("xdiag: " + what + " exec UNCLEAN (leftover=" + out.leftover +
@@ -2336,6 +2393,11 @@ class MobileDesktopEntryTest {
         if (out.code != 0) {
             throw AssertionError("xdiag: " + what + " failed rc=" + out.code +
                 " out=" + out.text.take(400))
+        }
+        if (byteCapture != null) {
+            try { byteCapture.requireComplete() }
+            catch (t: Throwable) { guestAborted = true; throw t }
+            return byteCapture.decode()
         }
         return out.text
     }
@@ -2443,10 +2505,24 @@ class MobileDesktopEntryTest {
     }
 
     private fun xdiagVersions(rootfs: File, deadlineNs: Long, diagDir: File) {
-        val text = xdiagGuest(rootfs, deadlineNs, "guest dpkg versions",
-            "dpkg-query", "-W", "jwm", "pcmanfm", "libgtk-3-0", "libfm-gtk4", "libfm4", "librandr2", "libx11-6")
-        File(diagDir, "guest-dpkg-versions.txt").writeText(text)
-        Log.i(TAG, "xdiag: guest dpkg versions captured (rc checked)")
+        // No named queries: missing optional inventory must not mask genuine
+        // dpkg/transport failures. xdiagGuest's rc/abort/ownership gates stay intact.
+        val capture = XdiagByteCapture(minOf(deadlineNs,
+            System.nanoTime() + XdiagPolicy.COMMAND_BUDGET_MS * 1_000_000L))
+        var raw: String? = null
+        var primary: Throwable? = null
+        try {
+            raw = xdiagGuest(rootfs, deadlineNs, "guest dpkg inventory",
+                *XdiagPackageInventory.queryArgs(), byteCapture = capture)
+        } catch (t: Throwable) { primary = t }
+        val snapshot = capture.snapshot()
+        XdiagInventoryEvidence.finish(primary,
+            { File(diagDir, "guest-dpkg-inventory-raw.txt").writeBytes(snapshot.bytes) },
+            { File(diagDir, "guest-dpkg-capture.txt").writeText(snapshot.metadata) })
+        val report = XdiagPackageInventory.report(requireNotNull(raw))
+        File(diagDir, "guest-dpkg-versions.txt").writeText(report)
+        XdiagPackageInventory.requireInstalled(report)
+        Log.i(TAG, "xdiag: guest dpkg inventory captured (rc/status checked; optional absence recorded)")
     }
 
     private fun xdiagProxyAlive(px: XdiagProxy): Boolean =
