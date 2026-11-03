@@ -10,7 +10,7 @@ CHUNK=3072
 MAX_CHUNKS=8500
 MAX_LINE=4608
 PREFIX='MCMP1 '
-ROOT_FILES={'coverage.json'}
+ROOT_FILES={'coverage.json','host-phase.txt'}
 CASE_FILES={'managed-setup-raw.txt','managed-setup-capture.txt','managed-abi-raw.txt','managed-abi-capture.txt','managed-closure-raw.txt','managed-closure-capture.txt','managed-comparison.txt','managed-abi.txt','managed-provenance.txt','managed-teardown.txt','managed-junit.xml','managed-input.png','managed-0.png','managed-1.png','managed-2.png','managed-3.png','managed-4.png','instrumentation.txt','phase.txt','caller.txt'}
 def allowed(name):
     p=pathlib.PurePosixPath(name)
@@ -102,6 +102,13 @@ def collect(evidence,private,out):
     evidence=evidence.resolve();private=private.resolve()
     assert evidence!=private and private not in evidence.parents and evidence not in private.parents,'private/output overlap'
     out.mkdir();issues=[];seen=set();total=0
+    host=evidence/'host-phase.txt'
+    if host.exists():
+        assert not host.is_symlink() and host.is_file() and host.stat().st_size<=1024,'host receipt cap/type'
+        raw=host.read_bytes()
+        assert re.fullmatch(rb'schema=1\nphase=(host-check|source-fetch|extract|configure|build|stage|elf-inspect|resource-equality|source-inventory|recipe-copy|complete) case=(none|original|patched|both) rc=(0|[1-9][0-9]{0,2})\n',raw),'host receipt syntax'
+        (out/'host-phase.txt').write_bytes(raw);seen.add('host-phase.txt');total+=len(raw)
+    else:issues.append('host-phase.txt: count 0')
     for case in ['original','patched']:
         source=evidence/case
         for name in sorted(CASE_FILES):

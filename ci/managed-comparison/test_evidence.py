@@ -5,6 +5,7 @@ class Evidence(unittest.TestCase):
  def setUp(self):
   self.tmp=tempfile.TemporaryDirectory();self.p=pathlib.Path(self.tmp.name);self.e=self.p/'evidence';self.private=self.p/'private';self.private.mkdir();(self.private/'binary').write_bytes(b'NEVER EXPORTED')
   self.out=self.p/'selected';self.dec=self.p/'decoded'
+  self.e.mkdir();(self.e/'host-phase.txt').write_text('schema=1\nphase=complete case=both rc=0\n')
   for case in ('original','patched'):
    d=self.e/case;d.mkdir(parents=True)
    for n in t.CASE_FILES:(d/n).write_text('SYNTHETIC not pixels')
@@ -58,6 +59,20 @@ class Evidence(unittest.TestCase):
  def test_prior_failure_retained(self):
   p=self.e/'original/managed-junit.xml';p.write_text(p.read_text().replace('/>','><failure message="prior"/></testcase>'))
   with self.assertRaises(ValueError):c.check(self.e/'original','original','a'*64)
+ def test_host_roundtrip(self):
+  self.assertTrue(t.collect(self.e,self.private,self.out));t.decode(t.frame(self.out),self.dec)
+  self.assertEqual((self.dec/'host-phase.txt').read_bytes(),(self.e/'host-phase.txt').read_bytes())
+ def test_host_missing(self):
+  (self.e/'host-phase.txt').unlink();self.assertFalse(t.collect(self.e,self.private,self.out))
+ def test_host_private_text_refused(self):
+  (self.e/'host-phase.txt').write_text('source/binary secret arbitrary log tail')
+  with self.assertRaises(AssertionError):t.collect(self.e,self.private,self.out)
+ def test_host_oversized_refused(self):
+  (self.e/'host-phase.txt').write_text('x'*1025)
+  with self.assertRaises(AssertionError):t.collect(self.e,self.private,self.out)
+ def test_host_symlink_refused(self):
+  f=self.e/'host-phase.txt';f.unlink();f.symlink_to(self.private/'binary')
+  with self.assertRaises(AssertionError):t.collect(self.e,self.private,self.out)
  def test_source_route(self):
   p=pathlib.Path(__file__).parent
   w=(p/'workflow-proposal.yml' if (p/'workflow-proposal.yml').exists() else p.parents[1]/'.github/workflows/managed-comparison.yml').read_text()

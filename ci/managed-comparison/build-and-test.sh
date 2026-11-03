@@ -2,20 +2,29 @@
 # LOCAL UNEXECUTED recipe proposal. Build only, no binary publication/install.
 # Caller must authorize compilation separately. Outputs stay disposable runner-local.
 set -euo pipefail
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SCRIPT=$(realpath -e "$0")
+ROOT=$(cd "$(dirname "$SCRIPT")/../.." && pwd)
 : "${FLOOR_EVIDENCE:?existing output directory}"
 : "${FIXED_PREFIX_REVIEWED_BUILD:?set explicitly only after separate build approval}"
 [[ $FIXED_PREFIX_REVIEWED_BUILD == yes ]]
 E=$(realpath -e "$FLOOR_EVIDENCE")
+# Explicit nonbinary receipt outside private E; never export private log tails.
+RECEIPT_DIR="$ROOT/comparison-evidence"
+mkdir -p "$RECEIPT_DIR"
+RECEIPT="$RECEIPT_DIR/host-phase.txt"
+[[ ! -e "$RECEIPT" && ! -L "$RECEIPT" ]]
+printf 'schema=1\n' > "$RECEIPT"
+PHASE=host-check;CASE=none
+trap 'rc=$?; printf "phase=%s case=%s rc=%s\n" "$PHASE" "$CASE" "$rc" >> "$RECEIPT"' EXIT
 exec > >(tee "$E/experiment.log") 2>&1
 . /etc/os-release
 [[ $ID == ubuntu && $VERSION_ID == 24.04 && $(uname -m) == x86_64 ]]
 W=$(mktemp -d)
-trap 'rm -rf "$W"' EXIT
+trap 'rc=$?; printf "phase=%s case=%s rc=%s\n" "$PHASE" "$CASE" "$rc" >> "$RECEIPT"; rm -rf "$W"' EXIT
 # Output holds runner-local source/stages, NOT artifact/log publication.
 LOCAL=$(mktemp -d "$E/runner-local.XXXXXX")
 chmod 0700 "$LOCAL"
-cp "$0" "$E/build-recipe.sh"
+cp "$SCRIPT" "$E/build-recipe.sh"
 cp "$ROOT/ci/managed-comparison/default-size.patch" "$E/default-size.patch"
 cp /etc/os-release "$E/os-release"
 { gcc --version; ld --version; make --version; pkg-config --version; } > "$E/toolchain.txt"
@@ -24,6 +33,7 @@ printf '%s\n' 'CC=gcc CFLAGS=-O2 -g0 CPPFLAGS= LDFLAGS= LC_ALL=C SOURCE_DATE_EPO
 export CC=gcc CFLAGS='-O2 -g0' CPPFLAGS= LDFLAGS= LC_ALL=C SOURCE_DATE_EPOCH=1714082400
 cd "$W"
 fetch() { curl --retry 0 --connect-timeout 10 --max-time 45 -fsSL "$1" -o "$2"; }
+PHASE=source-fetch
 fetch https://archive.ubuntu.com/ubuntu/dists/noble/InRelease InRelease
 gpgv --keyring /usr/share/keyrings/ubuntu-archive-keyring.gpg InRelease 2> "$E/archive-signature.txt"
 fetch https://archive.ubuntu.com/ubuntu/dists/noble/universe/source/Sources.xz Sources.xz
@@ -51,6 +61,7 @@ cp orig.tar.xz debian.tar.xz source-record.txt InRelease "$LOCAL/"
 cp "$E/default-size.patch" "$LOCAL/"
 printf '%s\n' 'Upstream1.3.2 with Debian1.3.2-4build2 metadata EXTRACTED only; Debian quilt patches NOT applied. Not official Ubuntu binary.' > "$LOCAL/SOURCE-LABEL.txt"
 for case in original patched; do
+ CASE=$case;PHASE=extract
  mkdir "$W/$case"
  tar -xf orig.tar.xz -C "$W/$case"
  cd "$W/$case/pcmanfm-1.3.2"
@@ -59,14 +70,19 @@ for case in original patched; do
  if [[ $case == patched ]]; then patch -p1 < "$E/default-size.patch"; fi
  cp src/desktop.c "$E/desktop-$case.c"
  printf '%s\n' "./configure --with-gtk=3 --prefix=$PREFIX" 'make -j2' "make DESTDIR=$W/$case/stage install" > "$E/commands-$case.txt"
+ PHASE=configure
  ./configure --with-gtk=3 --prefix="$PREFIX" > "$E/configure-$case.log" 2>&1
+ PHASE=build
  make -j2 > "$E/build-$case.log" 2>&1
+ PHASE=stage
  make DESTDIR="$W/$case/stage" install > "$E/stage-$case.log" 2>&1
+ PHASE=elf-inspect
  file "$W/$case/stage$PREFIX/bin/pcmanfm" > "$E/file-$case.txt"
  readelf -h -l -d --version-info "$W/$case/stage$PREFIX/bin/pcmanfm" > "$E/abi-$case.txt"
  sha256sum "$W/$case/stage$PREFIX/bin/pcmanfm" > "$E/binary-$case.sha256"
  cd "$W"
 done
+PHASE=resource-equality;CASE=both
 python3 - "$W" "$PREFIX" <<'PY'
 import pathlib,hashlib,sys,json
 w,p=sys.argv[1:];man=[];dirs=[]
@@ -80,6 +96,7 @@ pathlib.Path(w,'resource-manifest.json').write_text(json.dumps(man[0],indent=2))
 PY
 cp "$W/resource-manifest.json" "$E/"
 for case in original patched; do
+ CASE=$case;PHASE=source-inventory
  # Fixedprefix remains absent on HOST. Stage remains separate case dir;
  # do NOT install to /usr or symlink host /opt. Neither binary executed.
  staged="$W/$case/stage$PREFIX"
@@ -95,6 +112,8 @@ for case in original patched; do
  (cd "$staged"; find . -type d -print | LC_ALL=C sort) > "$E/directories-$case.txt"
  [[ -d "$staged/lib/pcmanfm" && -f "$staged/share/pcmanfm/ui/desktop-pref.ui" ]]
 done
-cp "$0" "$LOCAL/build-recipe.sh"
+PHASE=recipe-copy;CASE=both
+cp "$SCRIPT" "$LOCAL/build-recipe.sh"
 printf '%s\n' "$LOCAL" > "$E/runner-local-location.txt"
+PHASE=complete
 echo 'BUILD ONLY; staged source/binaries runner-local, no guest install/execution/publication. Separate reviewed guest ABI/staging gate required.'
