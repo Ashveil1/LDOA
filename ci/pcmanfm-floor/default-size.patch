@@ -1,0 +1,10 @@
+--- a/src/desktop.c
++++ b/src/desktop.c
+@@ -2635,6 +2635,7 @@
+         return;
+     }
+     gdk_screen_get_monitor_geometry(screen, desktop->monitor, &geom);
++    gtk_window_set_default_size((GtkWindow*)desktop, geom.width, geom.height);
+     gtk_window_resize((GtkWindow*)desktop, geom.width, geom.height);
+     /* bug #3614780: if monitor was moved desktop should be moved too */
+     gtk_window_move((GtkWindow*)desktop, geom.x, geom.y);
