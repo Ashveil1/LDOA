@@ -11,7 +11,7 @@ MAX_CHUNKS=8500
 MAX_LINE=4608
 PREFIX='FLOOR1 '
 ROOT_FILES={'archive-signature.txt','InRelease','source-record.txt','default-size.patch','resource-manifest.json','build-packages.txt','toolchain.txt','explicit-build-environment.txt','os-release','commands-original.txt','commands-patched.txt','file-original.txt','file-patched.txt','abi-original.txt','abi-patched.txt','binary-original.sha256','binary-patched.sha256','desktop-original.c','desktop-patched.c','build-recipe.sh','geometry.py','diagnostic-tails.json'}
-CASE_FILES={'geometry.json','images.json','result.json','overall.json','cleanup.json','failure.txt','initial-capture-bracket.json'}
+CASE_FILES={'logging.json','geometry.json','images.json','result.json','overall.json','cleanup.json','failure.txt','initial-capture-bracket.json'}
 
 def allowed(name):
     path=pathlib.PurePosixPath(name)

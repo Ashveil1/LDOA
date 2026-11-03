@@ -2,7 +2,7 @@
 """Public-repository experiment evidence. Local X servers, NOT Android/FPS.
 Root/PID/PGID identity checks are best effort, not escaped-descendant proof.
 """
-import argparse,json,os,pathlib,re,resource,signal,subprocess,time
+import argparse,json,os,pathlib,re,select,signal,subprocess,threading,time
 
 MAX_OBSERVATIONS=96
 MAX_IMAGES=8
@@ -52,22 +52,81 @@ def qualifies(case,desktop,root,monitor,hints):
     if case=='original':return root==(0,0,1080,1949) and desktop==(0,0,1280,1949) and hints==[(1280,1949)]*2
     return desktop==root and hints==[root[2:]]*2
 
-def filesize_limit(limit):
-    def apply():
-        resource.setrlimit(resource.RLIMIT_FSIZE,(limit,limit))
-        resource.setrlimit(resource.RLIMIT_CORE,(0,0))
-    return apply
+
+class BoundedLog:
+    """Bound only redirected output, never X server internal backing files.
+    Drain after overflow (discard excess) so pipe pressure cannot hide exit.
+    A daemon worker avoids interpreter hang; alive worker is UNKNOWN, not OK.
+    """
+    def __init__(self,pipe,sink,limit,deadline):
+        self.pipe=pipe;self.sink=sink;self.limit=limit;self.deadline=deadline
+        self.stop=threading.Event();self.eof=False;self.overflow=False
+        self.timed_out=False;self.error=None;self.seen=0;self.kept=0
+        self.worker=threading.Thread(target=self.drain,daemon=True)
+        try:self.worker.start()
+        except BaseException:
+            self.pipe.close()
+            raise
+    def drain(self):
+        try:
+            fd=self.pipe.fileno();os.set_blocking(fd,False)
+            while not self.stop.is_set():
+                remaining=self.deadline-time.monotonic()
+                if remaining<=0:self.timed_out=True;break
+                if not select.select([fd],[],[],min(.05,remaining))[0]:continue
+                try:b=os.read(fd,65536)
+                except BlockingIOError:continue
+                if not b:self.eof=True;break
+                self.seen+=len(b);room=max(0,self.limit-self.kept)
+                if len(b)>room:self.overflow=True
+                if room:
+                    part=b[:room];written=self.sink.write(part)
+                    if written!=len(part):raise OSError('short log write')
+                    self.kept+=written
+            self.sink.flush()
+            self.sink.close()
+        except BaseException as t:self.error=repr(t)
+        finally:
+            try:self.pipe.close()
+            except BaseException as t:self.error=self.error or repr(t)
+    def finish(self):
+        self.worker.join(timeout=1)
+        if self.worker.is_alive():self.stop.set();self.worker.join(timeout=1)
+        return {'eof':self.eof,'overflow':self.overflow,'deadline':self.timed_out,
+                'error':self.error,'worker_alive':self.worker.is_alive(),
+                'seen_bytes':self.seen,'retained_bytes':self.kept,'limit_bytes':self.limit,
+                'counts_final':not self.worker.is_alive(),
+                'snapshot_semantics':'joined final; if alive counts are provisional and one write/flush/close may remain',
+                'inflight_write_possible':self.worker.is_alive(),
+                'stop_requested':self.stop.is_set()}
+
+def log_receipt_ok(r):
+    return r['eof'] and not any(r[k] for k in ['overflow','deadline','error','worker_alive'])
+
 
 def launch(args,registry,known,*,persistent=False,limit=1024*1024,**kw):
     # Register the child handle before reading /proc. Even if identity lookup
     # fails, cleanup still owns a Popen handle. Unknown group lineage is fatal.
-    p=subprocess.Popen(args,start_new_session=True,preexec_fn=filesize_limit(limit),**kw)
+    sink=kw.get('stdout') if persistent else None
+    if persistent:
+        kw['stdout']=subprocess.PIPE;kw['stderr']=subprocess.STDOUT
+    # External exec wrapper sets limits after exec, never Python preexec_fn
+    # in this now-multithreaded parent. prlimit is supplied by util-linux.
+    wrapper=['prlimit','--core=0:0']
+    if not persistent:wrapper+=['--fsize='+str(limit)+':'+str(limit)]
+    p=subprocess.Popen(wrapper+['--']+args,start_new_session=True,**kw)
     s={'pid':p.pid,'pgid':p.pid,'start':None,'persistent':persistent}
     registry.append((p,s))
-    try:s.update(stat(p.pid));known[p.pid]=s
+    try:
+        if persistent:
+            s['unregistered_pipe']=p.stdout
+            s['log_drain']=BoundedLog(p.stdout,sink,limit,time.monotonic()+180)
+            del s['unregistered_pipe']
+        s.update(stat(p.pid));known[p.pid]=s
     except BaseException:
         try:
             p.kill();p.wait(timeout=1)
+            if 'unregistered_pipe' in s:s['unregistered_pipe'].close()
         except BaseException:pass
         raise
     return p,s
@@ -126,7 +185,7 @@ def main():
     processes=[];logs=[];records=[];known={};images=[];seq=0;primary=None
     def persist(name,text):
         # Per-case retained occupancy gate (post-write), NOT whole-artifact cap.
-        # Each child also has in-flight 1MiB RLIMIT_FSIZE per-file.
+        # One-shot commands have per-file FSIZE; persistent roots use capped pipe logs.
         assert len(text.encode())<=2*1024*1024,'text artifact cap exceeded'
         (out/name).write_text(text)
     def budget():
@@ -171,7 +230,7 @@ def main():
             if s.get('persistent'):assert p.poll() is None and identity(p.pid)==s['start'],'owned root died/reused'
         remember()
     def spawn(args,ev=env,pass_fds=()):
-        log=(out/('process-%d.log'%len(processes))).open('wb');logs.append(log)
+        log=(out/('process-%d.log'%len(processes))).open('wb',buffering=0);logs.append(log)
         p,s=launch(args,processes,known,persistent=True,limit=1024*1024,env=ev,stdout=log,stderr=log,pass_fds=pass_fds)
         return p
     def display(server,args,ev):
@@ -283,7 +342,19 @@ def main():
             remaining=scan_groups({s['pgid'] for _,s in processes})
             if remaining:failures.append('survivors/unknown '+repr(remaining))
         except BaseException as t:failures.append('scan UNKNOWN '+repr(t))
-        for log in logs:log.close()
+        receipts=[]
+        for _,owned in processes:
+            drain=owned.get('log_drain')
+            if drain:
+                receipt=drain.finish();receipts.append(dict(pid=owned['pid'],**receipt))
+                if not log_receipt_ok(receipt):failures.append('logger UNKNOWN '+repr(receipt))
+        try:persist('logging.json',json.dumps(receipts,indent=2))
+        except BaseException as t:
+            if primary:note(primary,'logging evidence failure '+repr(t))
+            else:failures.append('logging evidence failure '+repr(t))
+        # Sink flush/close runs only inside worker and is covered by join
+        # truth. Main never calls a possibly blocking/masking close here.
+        # Failed worker-start leaves an idle sink; process exit reclaims it.
         try:persist('cleanup.json',json.dumps({'failures':failures,'escaped_descendants':'not proven absent'},indent=2))
         except BaseException as t:
             if primary:note(primary,'cleanup evidence failure '+repr(t))
