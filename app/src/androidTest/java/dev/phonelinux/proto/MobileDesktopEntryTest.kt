@@ -3528,17 +3528,19 @@ class MobileDesktopEntryTest {
                 if(!fit)mismatches++
                 raw.appendText("case=$case transition=$i requested=${wh.first}x${wh.second} anchored=$pid/$ps fit=$fit\n$rootRaw\n$deskRaw\n")
                 lifecycle.requireUnmapped(i,"PRE_CAPTURE")
-                // Central ACTUAL ROOT band, not requested dimensions or an
-                // offscreen original-floor rectangle. Tray outside this ROI.
-                val rx=r.w/5;val ry=r.h*35/100;val rw=r.w*3/5;val rh=r.h*3/10
-                check(rw>0&&rh>0&&d.mapState=="IsViewable")
-                check(rx>=d.absX&&ry>=d.absY&&rx+rw<=d.absX+d.w&&ry+rh<=d.absY+d.h) { "central root ROI outside desktop" }
+                // Fixed central ROOT band remains unchanged for the negative control.
+                // Coverage/intersections describe X geometry, never a replacement ROI.
+                val geometry=ManagedComparisonGeometry.observe(r.w,r.h,ManagedComparisonGeometry.Rect(d.absX,d.absY,d.w,d.h))
+                val roi=geometry.roi
+                check(d.mapState=="IsViewable")
                 fun clearROI():List<String>{
                     val kids=RenderProbeParse.topLevelChildren(guest("xwininfo","-root","-children")) ?: error("root children parse")
-                    return kids.filter { it.id!=candidates.single() }.mapNotNull { kid->
+                    val windows=kids.filter { it.id!=candidates.single() }.map { kid->
                         val st=RenderProbeParse.winStats(guest("xwininfo","-id",kid.id.toString())) ?: error("unknown top-level stats")
-                        if(st.mapState=="IsViewable"&&st.overlaps(rx,ry,rw,rh))kid.id.toString() else null
+                        check(st.mapState in setOf("IsViewable","IsUnMapped","IsUnviewable")) { "unknown top-level map state" }
+                        ManagedComparisonGeometry.Window(kid.id,st.mapState=="IsViewable",ManagedComparisonGeometry.Rect(st.absX,st.absY,st.w,st.h))
                     }
+                    return ManagedComparisonGeometry.occluders(roi,candidates.single(),windows)
                 }
                 check(clearROI().isEmpty()) { "desktop ROI occluded" }
                 val before=key
@@ -3561,14 +3563,17 @@ class MobileDesktopEntryTest {
                     .put("complete",v.complete).put("valid",v.valid())
                     .put("start_ns",v.startNs).put("end_ns",v.endNs)
                     .put("numbers",org.json.JSONArray(v.numbers))
-                val bracket=org.json.JSONObject().put("schema",2).put("case",case).put("manifest",pin).put("transition",i)
+                val bracket=org.json.JSONObject().put("schema",3).put("case",case).put("manifest",pin).put("transition",i)
                     .put("scope","x-geometry-and-manual-fullscreen").put("presentation_binding","UNVERIFIED")
                     .put("manual_review","PENDING").put("source_pin","29d4460b26e69b39af023d255a255e2778251952")
                     .put("capture_start_ns",captureStart).put("capture_end_ns",captureEnd).put("legacy_renderQualification","NOT_EXECUTED_MANUAL_SCOPE")
                     .put("desktop_pid",pid).put("desktop_start",ps).put("desktop_xid",candidates.single())
                     .put("before",org.json.JSONArray(before)).put("after",org.json.JSONArray(after))
                     .put("xterm_unmapped",unmapped).put("occluders",org.json.JSONArray(occluders))
-                    .put("roi_root",org.json.JSONArray(listOf(rx,ry,rw,rh))).put("x_occlusion_scope","central-root-only")
+                    .put("roi_root",org.json.JSONArray(roi.numbers())).put("x_occlusion_scope","central-root-only")
+                    .put("root_desktop_intersection",geometry.rootIntersection?.let { org.json.JSONArray(it.numbers()) } ?: org.json.JSONObject.NULL)
+                    .put("roi_desktop_intersection",geometry.roiIntersection?.let { org.json.JSONArray(it.numbers()) } ?: org.json.JSONObject.NULL)
+                    .put("root_roi_contained",geometry.contained).put("roi_coverage",geometry.coverage)
                     .put("bitmap",org.json.JSONArray(bitmapSize)).put("pre",snapshotJson(snapBefore)).put("post",snapshotJson(snapAfter))
                     .put("java_state",if(snapBefore.numbers==snapAfter.numbers)"UNCHANGED" else "CHANGED")
                     .put("query_calls",guestCalls).put("query_complete",guestComplete).put("query_zero_cleanup",guestZero)
@@ -3576,7 +3581,7 @@ class MobileDesktopEntryTest {
                 check(after==before&&occluders.isEmpty()&&unmapped)
                 check(snapBefore.valid()&&snapAfter.valid()&&snapBefore.endNs<=snapAfter.startNs)
                 check(guestCalls==guestComplete&&guestCalls==guestZero)
-                if(case=="patched")check(fit) { "patched desktop does not match actual root" }
+                if(case=="patched")check(fit&&geometry.fit&&geometry.contained&&geometry.coverage=="FULL") { "patched desktop does not match actual root" }
             }
             check(observed.any { it.first>it.second }&&observed.any { it.second>it.first }) { "actual portrait/landscape not observed" }
             lifecycle.restore { restoreXterm() }

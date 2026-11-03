@@ -35,10 +35,25 @@ def check(root,case,pin,*,inflight=False):
   ints=lambda v,n:isinstance(v,list) and len(v)==n and all(type(x) is int for x in v)
   geom=b.get('before');roi=b.get('roi_root')
   if not ints(geom,6) or any(x<=0 for x in geom[:4]) or not ints(roi,4) or min(roi[2:])<=0 or min(roi[:2])<0:raise ValueError('geometry')
-  if roi[0]+roi[2]>geom[0] or roi[1]+roi[3]>geom[1] or roi[0]<geom[4] or roi[1]<geom[5] or roi[0]+roi[2]>geom[4]+geom[2] or roi[1]+roi[3]>geom[5]+geom[3]:raise ValueError('ROI outside root/desktop')
+  if any(abs(x)>1000000 for x in geom):raise ValueError('geometry cap')
+  expected_roi=[geom[0]//5,geom[1]*35//100,geom[0]*3//5,geom[1]*3//10]
+  if roi!=expected_roi:raise ValueError('fixed root ROI formula')
+  def intersection(a,d):
+   x=max(a[0],d[0]);y=max(a[1],d[1]);w=min(a[0]+a[2],d[0]+d[2])-x;h=min(a[1]+a[3],d[1]+d[3])-y
+   return [x,y,w,h] if w>0 and h>0 else None
+  desktop=[geom[4],geom[5],geom[2],geom[3]]
+  ri=intersection([0,0,geom[0],geom[1]],desktop);bi=intersection(roi,desktop)
+  contained=bi==roi;coverage='FULL' if contained else 'NONE' if bi is None else 'PARTIAL'
+  for key,want in [('root_desktop_intersection',ri),('roi_desktop_intersection',bi)]:
+   got=b.get(key)
+   if key not in b or (got is not None and not ints(got,4)) or got!=want:raise ValueError('intersection')
+  if type(b.get('root_roi_contained')) is not bool or b['root_roi_contained']!=contained or b.get('roi_coverage')!=coverage:raise ValueError('ROI coverage')
+  fit=geom[0]==geom[2] and geom[1]==geom[3] and geom[4:]==[0,0]
+  if (rows[i][2]=='true')!=fit:raise ValueError('raw fit disagreement')
+  if case=='patched' and (not fit or not contained or coverage!='FULL'):raise ValueError('patched exact fit/coverage')
   if type(b.get('desktop_pid')) is not int or b['desktop_pid']<=0 or not re.fullmatch(r'[1-9][0-9]*',str(b.get('desktop_start',''))) or type(b.get('desktop_xid')) is not int or b['desktop_xid']<=0:raise ValueError('desktop identity')
   if (str(b['desktop_pid']),str(b['desktop_start']))!=re.search(r'anchored=(\d+)/(\d+)',text).groups():raise ValueError('desktop identity drift')
-  fixed={'source_pin':'29d4460b26e69b39af023d255a255e2778251952','schema':2,'scope':'x-geometry-and-manual-fullscreen','presentation_binding':'UNVERIFIED','manual_review':'PENDING','legacy_renderQualification':'NOT_EXECUTED_MANUAL_SCOPE','x_occlusion_scope':'central-root-only'}
+  fixed={'source_pin':'29d4460b26e69b39af023d255a255e2778251952','schema':3,'scope':'x-geometry-and-manual-fullscreen','presentation_binding':'UNVERIFIED','manual_review':'PENDING','legacy_renderQualification':'NOT_EXECUTED_MANUAL_SCOPE','x_occlusion_scope':'central-root-only'}
   if any(b.get(k)!=v for k,v in fixed.items()) or any(k in b for k in ['roi_bitmap','manual_pixels']):raise ValueError('manual scope/certification')
   if b.get('case')!=case or b.get('manifest')!=pin or b.get('transition')!=i or b.get('xterm_unmapped') is not True or b.get('occluders')!=[] or geom!=b.get('after'):raise ValueError('bracket binding/state')
   for phase in ['pre','post']:

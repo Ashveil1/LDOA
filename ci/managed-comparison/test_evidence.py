@@ -19,7 +19,11 @@ class Evidence(unittest.TestCase):
     nums=[800,1800,800,1800,0,0,0,0,800,1800,0,0,800,1800,0,0,800,1800,0,0,800,1800,0,0,800,1800,1,0,0,0,1,0,0,0,1,1,1,1,1,0,1,0,0,0,0,0,0,0,0,0,0,0,1]
     snap=lambda st:{'complete':True,'valid':True,'start_ns':st,'end_ns':st+1,'numbers':nums}
     (d/f'managed-{i}.png').write_bytes(b'\x89PNG\r\n\x1a\n'+struct.pack('>I',13)+b'IHDR'+struct.pack('>II',800,1800)+b'fixture-not-real-image')
-    (d/f'managed-{i}-capture-bracket.json').write_text(json.dumps({'source_pin':'29d4460b26e69b39af023d255a255e2778251952','capture_start_ns':2,'capture_end_ns':3,'schema':2,'case':case,'manifest':'a'*64,'transition':i,'desktop_pid':123,'desktop_start':'456','desktop_xid':100,'before':[800,1800,800,1800,0,0],'after':[800,1800,800,1800,0,0],'roi_root':[160,630,480,540],'xterm_unmapped':True,'occluders':[],'scope':'x-geometry-and-manual-fullscreen','presentation_binding':'UNVERIFIED','manual_review':'PENDING','legacy_renderQualification':'NOT_EXECUTED_MANUAL_SCOPE','x_occlusion_scope':'central-root-only','bitmap':[800,1800],'pre':snap(1),'post':snap(3),'java_state':'UNCHANGED','query_calls':1,'query_complete':1,'query_zero_cleanup':1}))
+    (d/f'managed-{i}-capture-bracket.json').write_text(json.dumps({'source_pin':'29d4460b26e69b39af023d255a255e2778251952','capture_start_ns':2,'capture_end_ns':3,'schema':3,'case':case,'manifest':'a'*64,'transition':i,'desktop_pid':123,'desktop_start':'456','desktop_xid':100,'before':[800,1800,800,1800,0,0],'after':[800,1800,800,1800,0,0],'roi_root':[160,630,480,540],'root_desktop_intersection':[0,0,800,1800],'roi_desktop_intersection':[160,630,480,540],'root_roi_contained':True,'roi_coverage':'FULL','xterm_unmapped':True,'occluders':[],'scope':'x-geometry-and-manual-fullscreen','presentation_binding':'UNVERIFIED','manual_review':'PENDING','legacy_renderQualification':'NOT_EXECUTED_MANUAL_SCOPE','x_occlusion_scope':'central-root-only','bitmap':[800,1800],'pre':snap(1),'post':snap(3),'java_state':'UNCHANGED','query_calls':1,'query_complete':1,'query_zero_cleanup':1}))
+
+   if case=='original':
+    for i in range(5):
+     f=d/f'managed-{i}-capture-bracket.json';b=json.loads(f.read_text());b['before'][2]=1280;b['after'][2]=1280;f.write_text(json.dumps(b))
 
  def tearDown(self):self.tmp.cleanup()
  def test_roundtrip_excludes_private(self):
