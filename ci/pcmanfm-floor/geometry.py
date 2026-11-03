@@ -47,6 +47,19 @@ def parse_hints(text):
         values.append(tuple(map(int,m.groups())))
     return values
 
+def command_ok(rc,stdout,stderr,empty=False):
+    return rc==0 or (empty and rc==1 and not stdout and not stderr)
+
+def parse_observation(record,persist):
+    # Durable unparsed facts survive parser/assertion failures.
+    persist(record)
+    raw=record['raw']
+    geom=parse_geometry(raw['desktop']);root=parse_geometry(raw['root'])
+    monitor=parse_monitors(raw['monitors_stdout']);hints=parse_hints(raw['properties'])
+    record.update(desktop=geom,root=root,monitor=monitor,hints=hints,parsed=True)
+    persist(record)
+    return geom,root,monitor,hints
+
 def qualifies(case,desktop,root,monitor,hints):
     if root!=monitor or root[:2]!=(0,0) or desktop[:2]!=(0,0):return False
     if case=='original':return root==(0,0,1080,1949) and desktop==(0,0,1280,1949) and hints==[(1280,1949)]*2
@@ -196,18 +209,19 @@ def main():
         # Bound output in files, not an unbounded capture_output allocation.
         nonlocal seq
         seq+=1;dest=out/('command-%03d.txt'%seq)
-        with dest.open('wb') as f:
-            p,ident=launch(args,processes,known,limit=file_limit,env=ev,stdout=f,stderr=subprocess.STDOUT)
+        errdest=out/('command-%03d.stderr.txt'%seq)
+        with dest.open('wb') as f,errdest.open('wb') as ef:
+            p,ident=launch(args,processes,known,limit=file_limit,env=ev,stdout=f,stderr=ef)
             try:wait_command(p,end)
             except subprocess.TimeoutExpired:
                 if p.poll() is None and identity(p.pid)==ident['start']:p.kill()
                 p.wait(timeout=1);raise AssertionError('command phase timeout '+str(args))
         assert time.monotonic()<=end,'shared phase deadline exceeded'
-        assert dest.stat().st_size<=1024*1024,'command output cap exceeded'
+        assert max(dest.stat().st_size,errdest.stat().st_size)<=1024*1024,'command output cap exceeded'
         text=dest.read_text()
-        persist('command-%03d.json'%seq,json.dumps({'argv':args,'rc':p.returncode,'output':dest.name}))
+        persist('command-%03d.json'%seq,json.dumps({'argv':args,'rc':p.returncode,'output':dest.name,'stderr':errdest.name}))
         budget()
-        if p.returncode and not(empty and p.returncode==1 and not text):raise AssertionError('command failed '+str(args))
+        if not command_ok(p.returncode,text,errdest.read_text(),empty):raise AssertionError('command failed '+str(args))
         return text
     def remember():
         groups={s['pgid'] for _,s in processes}
@@ -264,7 +278,7 @@ def main():
         outerenv=dict(env,DISPLAY=outer)
         inner=display('Xephyr',['-screen','1280x1024','-resizeable','-nolisten','tcp','-ac'],outerenv);env['DISPLAY']=inner
         nested=run(['xdotool','search','--class','Xephyr'],time.monotonic()+5,outerenv).split();assert len(nested)==1,'ambiguous nested host window';host=nested[0]
-        cfg=out/'jwmrc';cfg.write_text('<JWM><RootMenu/><Tray x="0" y="0" height="48"><Clock/></Tray></JWM>')
+        cfg=out/'jwmrc';cfg.write_text('<JWM><RootMenu/></JWM>')
         spawn(['jwm','-f',str(cfg)]);desktop_root=spawn(['dbus-run-session','--',a.binary,'--desktop'])
         end=time.monotonic()+12;window=None;pid=None;start=None
         while time.monotonic()<end:
@@ -284,12 +298,17 @@ def main():
         def sample(tag,end):
             assert len(records)<MAX_OBSERVATIONS,'observation count cap exceeded: bounded evidence unavailable, NOT mechanism disproved'
             live();assert identity(pid)==start,'desktop PID reuse'
-            prop=run(['xprop','-id',window,'_NET_WM_PID','WM_NORMAL_HINTS','_NET_WM_WINDOW_TYPE'],end)
+            # Persist every complete raw observation BEFORE parsing/assertions.
+            prop=run(['xprop','-id',window,'_NET_WM_PID','WM_NORMAL_HINTS','_NET_WM_WINDOW_TYPE','_NET_WM_STRUT','_NET_WM_STRUT_PARTIAL'],end)
+            desktop_raw=run(['xwininfo','-id',window],end)
+            root_raw=run(['xwininfo','-root'],end)
+            monitor_raw=run(['xrandr','--listmonitors'],end)
+            workarea_raw=run(['xprop','-root','_NET_WORKAREA','_NET_CLIENT_LIST','_NET_CURRENT_DESKTOP'],end)
+            record={'observation_id':len(records),'tag':tag,'monotonic_ns':time.monotonic_ns(),'pid':pid,'starttime':start,'window':window,'raw':{'properties':prop,'desktop':desktop_raw,'root':root_raw,'monitors_stdout':monitor_raw,'root_properties':workarea_raw},'parsed':False}
+            records.append(record);persist('geometry.json',json.dumps(records,indent=2))
             assert re.search(r'_NET_WM_PID\(CARDINAL\) = '+str(pid)+r'\b',prop)
             assert '= _NET_WM_WINDOW_TYPE_DESKTOP' in prop
-            geom=parse_geometry(run(['xwininfo','-id',window],end));root=parse_geometry(run(['xwininfo','-root'],end));monitor=parse_monitors(run(['xrandr','--listmonitors'],end));hints=parse_hints(prop)
-            record={'observation_id':len(records),'tag':tag,'monotonic_ns':time.monotonic_ns(),'pid':pid,'starttime':start,'window':window,'desktop':geom,'root':root,'monitor':monitor,'hints':hints}
-            records.append(record);persist('geometry.json',json.dumps(records,indent=2));return geom,root,monitor,hints
+            return parse_observation(record,lambda record:persist('geometry.json',json.dumps(records,indent=2)))
         # Stable startup requires three equal complete samples over >=500ms.
         end=time.monotonic()+10;stable=[]
         while time.monotonic()<end:
@@ -313,7 +332,7 @@ def main():
                 time.sleep(.1)
             assert ok,('EXACT ORIGINAL REPRODUCTION UNAVAILABLE in this theme/widget environment; NOT mechanism disproved' if a.case=='original' else 'PATCH CRITERIA NOT OBSERVED; inspect raw geometry')
             settled_capture('settled-%d'%i,values)
-        persist('result.json',json.dumps({'case':a.case,'geometry_criteria_passed':True,'pixel_review':'REQUIRED; geometry brackets do not qualify rendered pixels','tray_geometry':'NOT asserted','nonzero_origin':'NOT covered','android_render_or_fps_proof':False}))
+        persist('result.json',json.dumps({'case':a.case,'geometry_criteria_passed':True,'pixel_review':'REQUIRED; geometry brackets do not qualify rendered pixels','tray_geometry':'NOT covered; identical tray-free JWM config isolates desktop geometry','nonzero_origin':'NOT covered','android_render_or_fps_proof':False}))
     except BaseException as t:
         primary=t
         preserve_primary(t,lambda:persist('failure.txt',repr(t)))

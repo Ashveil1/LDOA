@@ -11,14 +11,14 @@ MAX_CHUNKS=8500
 MAX_LINE=4608
 PREFIX='FLOOR1 '
 ROOT_FILES={'archive-signature.txt','InRelease','source-record.txt','default-size.patch','resource-manifest.json','build-packages.txt','toolchain.txt','explicit-build-environment.txt','os-release','commands-original.txt','commands-patched.txt','file-original.txt','file-patched.txt','abi-original.txt','abi-patched.txt','binary-original.sha256','binary-patched.sha256','desktop-original.c','desktop-patched.c','build-recipe.sh','geometry.py','diagnostic-tails.json'}
-CASE_FILES={'logging.json','geometry.json','images.json','result.json','overall.json','cleanup.json','failure.txt','initial-capture-bracket.json'}
+CASE_FILES={'jwmrc','logging.json','geometry.json','images.json','result.json','overall.json','cleanup.json','failure.txt','initial-capture-bracket.json'}
 
 def allowed(name):
     path=pathlib.PurePosixPath(name)
     if not name or str(path)!=name or path.is_absolute() or '..' in path.parts:return False
     if len(path.parts)==1:return name in ROOT_FILES
     if len(path.parts)!=2 or path.parts[0] not in ('original','patched'):return False
-    return path.name in CASE_FILES or bool(re.fullmatch(r'(?:\d\d-(?:initial|settled-\d|failure)\.png|settled-\d-capture-bracket\.json|command-\d{3}\.(?:json|txt)|process-\d+\.log)',path.name))
+    return path.name in CASE_FILES or bool(re.fullmatch(r'(?:\d\d-(?:initial|settled-\d|failure)\.png|settled-\d-capture-bracket\.json|command-\d{3}\.(?:json|txt|stderr\.txt)|process-\d+\.log)',path.name))
 
 def selected(root):
     # Direct named root files and flat case entries only. Never walk HOME,
