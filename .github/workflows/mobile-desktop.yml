@@ -8,6 +8,10 @@ name: mobile-desktop
 on:
   workflow_dispatch:
     inputs:
+      pcmanfm_peer_no_payload:
+        description: "Opt-in owned distro pcmanfm peer/path diagnostic only, ZERO protocol bytes; exact method and non-skipped evidence required"
+        type: boolean
+        default: false
       xdiag_capture:
         description: "Run the dispatch-gated xdiag proxied-capture diagnostic (MobileDesktopEntryTest#mobileEntryXdiagCapture) instead of the render lifecycle test; diagnostic artifacts only, no render gate"
         type: boolean
@@ -19,6 +23,12 @@ jobs:
     continue-on-error: true
     timeout-minutes: 150
     steps:
+      - name: Reject conflicting diagnostic selection before checkout/build
+        env:
+          PEER_ONLY: ${{ inputs.pcmanfm_peer_no_payload }}
+          XDIAG_ONLY: ${{ inputs.xdiag_capture }}
+        run: |
+          if [ "$PEER_ONLY" = "true" ] && [ "$XDIAG_ONLY" = "true" ]; then echo "conflicting diagnostic selection"; exit 1; fi
       - uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -27,6 +37,8 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-disabled: ${{ inputs.pcmanfm_peer_no_payload }}
       - name: Install NDK + bison for vendored :lorie X server
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq bison
@@ -99,8 +111,9 @@ jobs:
             # Bounded caller wait (run 41571335711): 1500s = test-internal
             # overall deadline 1180s + install/UTP margin, KILL escalation,
             # explicit rc via pipefail (tee masks 124 in a plain pipe).
-            bash -o pipefail -c "timeout -k 30 1500 ./gradlew connectedDebugAndroidTest \"-Pandroid.testInstrumentationRunnerArguments.class=dev.phonelinux.proto.MobileDesktopEntryTest${{ inputs.xdiag_capture && '#mobileEntryXdiagCapture' || '' }}\" -Pandroid.testInstrumentationRunnerArguments.ldoa_ci_emulator=true ${{ inputs.xdiag_capture && '-Pandroid.testInstrumentationRunnerArguments.ldoa_xdiag=true' || '' }} --info 2>&1 | tee /tmp/instr.log"; rc=$?; echo "phase: instrumentation-done rc=$rc $(date -u +%FT%TZ)" >> phase.txt; [ $rc -eq 0 ] || touch /tmp/PHONELINUX_TESTS_FAILED
+            bash -o pipefail -c "timeout -k 30 1500 ./gradlew connectedDebugAndroidTest \"-Pandroid.testInstrumentationRunnerArguments.class=dev.phonelinux.proto.MobileDesktopEntryTest${{ inputs.pcmanfm_peer_no_payload && '#mobileEntryPcmanfmPeerNoPayload' || '' }}${{ inputs.xdiag_capture && '#mobileEntryXdiagCapture' || '' }}\" -Pandroid.testInstrumentationRunnerArguments.ldoa_ci_emulator=true ${{ inputs.pcmanfm_peer_no_payload && '-Pandroid.testInstrumentationRunnerArguments.ldoa_pcmanfm_peer_nopayload=true' || '' }} ${{ inputs.xdiag_capture && '-Pandroid.testInstrumentationRunnerArguments.ldoa_xdiag=true' || '' }} --info 2>&1 | tee /tmp/instr.log"; rc=$?; echo "phase: instrumentation-done rc=$rc $(date -u +%FT%TZ)" >> phase.txt; [ $rc -eq 0 ] || touch /tmp/PHONELINUX_TESTS_FAILED
             grep -q "BUILD SUCCESSFUL" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
+            if [ "${{ inputs.pcmanfm_peer_no_payload }}" = "true" ]; then timeout -k 2 15 python3 ci/check_pcmanfm_peer_result.py app/build/outputs/androidTest-results app/build/outputs/connected_android_test_additional_output > peer-selection-result.txt 2>&1 || touch /tmp/PHONELINUX_TESTS_FAILED; cat peer-selection-result.txt; fi
             # NO post-task run-as guest-log pulls (run 41457173978): they
             # execute after connectedAndroidTest has uninstalled both APKs
             # and archive error text ("run-as: unknown package", cat/adb
@@ -121,14 +134,19 @@ jobs:
             timeout -k 5 60 python3 .github/scripts/extract_shots.py /tmp/instr.log screenshots || true
             find screenshots -type f | sort || true
             if [ -f /tmp/PHONELINUX_TESTS_FAILED ]; then exit 1; fi
+      - name: Peer diagnostic ordinary-log evidence only, no paid artifact/cache storage
+        if: ${{ always() && inputs.pcmanfm_peer_no_payload }}
+        timeout-minutes: 2
+        run: timeout -k 2 90 python3 ci/pcmanfm-peer-log/transport.py emit --workspace "$GITHUB_WORKSPACE"
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: ${{ always() && !inputs.pcmanfm_peer_no_payload }}
         with:
           name: mobile-desktop-evidence
           path: |
             screenshots/
             pull-status.txt
             phase.txt
+            peer-selection-result.txt
             app/build/outputs/connected_android_test_additional_output/**
             app/build/outputs/androidTest-results/**
             /tmp/shotlog.txt

@@ -94,6 +94,10 @@ class MobileDesktopEntryTest {
                 "xdiag capture is dispatch-gated (ldoa_xdiag=true) - skipped in normal runs",
                 InstrumentationRegistry.getArguments().getString("ldoa_xdiag") == "true")
         }
+        if (testName.methodName == "mobileEntryPcmanfmPeerNoPayload") {
+            org.junit.Assume.assumeTrue("peer diagnostic is explicitly gated, no payload",
+                InstrumentationRegistry.getArguments().getString("ldoa_pcmanfm_peer_nopayload") == "true")
+        }
         val instr = InstrumentationRegistry.getInstrumentation()
         device = UiDevice.getInstance(instr)
         ctx = instr.targetContext
@@ -3091,6 +3095,189 @@ class MobileDesktopEntryTest {
     }
 
 
+    /** LOCAL preparation only. No output stream, protocol bytes, helper binary,
+     * managed runtime, or product API. Existing launch/teardown reused. */
+    @Test
+    fun mobileEntryPcmanfmPeerNoPayload() = mobileEntryLifecycle()
+
+    private fun pcmanfmPeerNoPayload(rootPid: Int, rootStart: String, owner: Process) {
+        val rootfs = DistroInstaller(ctx).rootfsDir(Distros.UBUNTU)
+        val raw = StringBuffer("NO PAYLOAD: no output stream acquired\n")
+        val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
+        val socket = java.util.concurrent.atomic.AtomicReference<android.net.LocalSocket?>()
+        val helper = java.util.concurrent.atomic.AtomicReference<Process?>()
+        val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+        val end = System.nanoTime() + 20_000_000_000L
+        fun remaining(): Long {
+            check(!cancelled.get() && end - System.nanoTime() > 0) { "UNKNOWN cancelled/deadline" }
+            return maxOf(1L, (end - System.nanoTime()) / 1_000_000L)
+        }
+        fun boundedRead(f: File, cap: Int = 16384): String {
+            remaining()
+            val b = f.inputStream().use { it.readNBytes(cap + 1) }
+            check(b.size <= cap) { "UNKNOWN read cap: $f" }
+            remaining()
+            return String(b, Charsets.ISO_8859_1)
+        }
+        // Test reflection only: no new production snapshot interface. Capture
+        // short synchronized state, never perform filesystem/socket I/O here.
+        val klass = XServer::class.java
+        fun field(name: String) = klass.getDeclaredField(name).apply { isAccessible = true }
+        val lock = field("ownershipLock").get(XServer) ?: error("UNKNOWN ownership lock")
+        val generation = field("ownershipGeneration")
+        val stop = field("stopInFlight")
+        check(generation.type==java.lang.Long.TYPE && stop.type==java.lang.Boolean.TYPE &&
+            field("ownershipLock").type==Any::class.java) { "UNKNOWN reflected field contract" }
+        raw.append("XServer source sha256=015ece2cb998ef876b7947005b4c5bed3f36f5e19e1e403a5fc1443d499c69d2; reflection ownershipLock:Object ownershipGeneration:long stopInFlight:boolean\n")
+        val gen = synchronized(lock) {
+            check(!stop.getBoolean(XServer) && XServer.sessionProcess === owner && owner.isAlive)
+            generation.getLong(XServer)
+        }
+        fun current() {
+            remaining()
+            synchronized(lock) {
+                check(!stop.getBoolean(XServer) && generation.getLong(XServer) == gen &&
+                    XServer.sessionProcess === owner && owner.isAlive) { "UNKNOWN stop/reentry/generation" }
+            }
+            check(parseStartTime(boundedRead(File("/proc/$rootPid/stat"))) == rootStart) { "UNKNOWN root changed" }
+        }
+        fun stat(pid: Int): Pair<Int,String> {
+            val text = boundedRead(File("/proc/$pid/stat"))
+            val rest = text.substring(text.lastIndexOf(')') + 1).trim().split(Regex("\\s+"))
+            check(rest.size > 19) { "UNKNOWN short stat" }
+            return rest[1].toInt() to rest[19]
+        }
+        fun command(script: String): String {
+            current()
+            val nd = ctx.applicationInfo.nativeLibraryDir
+            val pb = ProcessBuilder(File(nd,"libproot.so").absolutePath,"--link2symlink","--kill-on-exit","-0",
+                "-r",rootfs.absolutePath,"-b","/dev","-b","/proc","-b","/sys",
+                "-b",XServer.socketDir(ctx).absolutePath+":/tmp/.X11-unix","-w","/root","/bin/sh","-c","ulimit -f 16 || exit 70; " + script)
+            pb.environment().putAll(mapOf("PROOT_LOADER" to File(nd,"libproot_loader.so").absolutePath,
+                "PROOT_LOADER_32" to File(nd,"libproot_loader32.so").absolutePath,"LD_LIBRARY_PATH" to nd,
+                "PROOT_TMP_DIR" to Proot.prootTmpDir(ctx).absolutePath,"HOME" to "/root","DISPLAY" to ":0",
+                "PATH" to "/usr/bin:/bin","TMPDIR" to "/tmp"))
+            val output = File(ctx.cacheDir,"peer-nopayload-guest.txt")
+            pb.redirectErrorStream(true); pb.redirectOutput(output)
+            // start() itself may block. Outer caller has an independent bound;
+            // a late returned Process is destroyed before it can be accepted.
+            val p = pb.start(); helper.set(p)
+            try {
+                if(cancelled.get()) { p.destroyForcibly(); error("UNKNOWN late spawn") }
+                check(p.waitFor(minOf(3000L,remaining()),java.util.concurrent.TimeUnit.MILLISECONDS)) { "UNKNOWN guest timeout" }
+                val result = boundedRead(output,32768)
+                raw.append("guest rc=").append(p.exitValue()).append('\n').append(result).append('\n')
+                check(p.exitValue()==0) { "UNKNOWN guest command" }; current(); return result
+            } finally {
+                if(p.isAlive) p.destroyForcibly()
+                p.waitFor(500,java.util.concurrent.TimeUnit.MILLISECONDS)
+                if(!p.isAlive) helper.compareAndSet(p,null)
+            }
+        }
+        val worker = kotlin.concurrent.thread(start=false,isDaemon=true,name="pcmanfm-no-payload") {
+            try {
+                current()
+                val dirs=File("/proc").listFiles { f -> f.name.matches(Regex("[0-9]+")) }
+                    ?: error("UNKNOWN proc listing")
+                check(dirs.size<=4096) { "UNKNOWN proc entry cap" }
+                val all=mutableMapOf<Int,Pair<Int,String>>()
+                for(d in dirs) {
+                    remaining()
+                    try { all[d.name.toInt()]=stat(d.name.toInt()) }
+                    catch(e:java.io.FileNotFoundException) {
+                        // Cannot distinguish gone from denied via this API.
+                        error("UNKNOWN proc vanished/unreadable ${d.name}: $e")
+                    }
+                }
+                val tree=mutableMapOf(rootPid to rootStart)
+                var changed=true
+                while(changed) {
+                    changed=false
+                    for((p,ps) in all) if(ps.first in tree && p !in tree) {
+                        tree[p]=ps.second;changed=true
+                        check(tree.size<=256) { "UNKNOWN tree cap" }
+                    }
+                    remaining()
+                }
+                check(all[rootPid]?.second==rootStart) { "UNKNOWN root snapshot" }
+                val pc = tree.filter { (pid,st) ->
+                    check(stat(pid).second==st)
+                    boundedRead(File("/proc/$pid/cmdline")).replace(0.toChar(),' ').trim()=="pcmanfm --desktop"
+                }
+                check(pc.size==1) { "UNKNOWN desktop count ${pc.size}" }
+                val pid=pc.keys.single(); val start=pc.values.single()
+                fun identity(): String {
+                    current();check(stat(pid).second==start)
+                    check(android.system.Os.stat("/proc/$pid").st_uid==android.os.Process.myUid())
+                    var cur=pid;val seen=mutableSetOf<Int>()
+                    while(cur!=rootPid) {
+                        check(seen.add(cur)&&seen.size<=64); val st=stat(cur)
+                        check(tree[cur]==st.second) { "UNKNOWN ancestry changed" };cur=st.first
+                    }
+                    val exe=android.system.Os.readlink("/proc/$pid/exe")
+                    check(exe.isNotEmpty()&&!exe.endsWith(" (deleted)")) { "UNKNOWN exe unavailable" }
+                    val cmd=boundedRead(File("/proc/$pid/cmdline"))
+                    check(stat(pid).second==start);current()
+                    return "$pid/$start uid=${android.os.Process.myUid()} exe=$exe cmd=$cmd"
+                }
+                val before=identity();raw.append("anchor generation=$gen ").append(before.replace(0.toChar(),' ')).append('\n')
+                val env=boundedRead(File("/proc/$pid/environ"));check(stat(pid).second==start)
+                val runtime=env.split(0.toChar()).single { it.startsWith("XDG_RUNTIME_DIR=") }.substringAfter('=')
+                check(runtime=="/tmp/xdg") { "UNKNOWN unexpected runtime" }
+                // Exact current distro socket. Guest+host device/inode/type must
+                // agree; rootfs concatenation alone is never sufficient.
+                val guestPath="$runtime/pcmanfm-socket--0"
+                val observed=command("stat -Lc '%d:%i:%f' /tmp/xdg/pcmanfm-socket--0") .trim()
+                check(observed.matches(Regex("[0-9]+:[0-9]+:[0-9a-fA-F]+")))
+                val host=File(rootfs,guestPath.removePrefix("/"))
+                val hs=android.system.Os.lstat(host.absolutePath)
+                check(android.system.OsConstants.S_ISSOCK(hs.st_mode)) { "UNKNOWN host not socket" }
+                val cols=observed.split(':')
+                check(hs.st_dev.toString()==cols[0]&&hs.st_ino.toString()==cols[1]) { "UNKNOWN guest/host mapping" }
+                check(host.absolutePath.toByteArray(Charsets.UTF_8).size<108) { "UNKNOWN Unix path too long" }
+                raw.append("guest=$guestPath host=${host.absolutePath} stat=$observed\n")
+                val windowsBefore=command("xprop -root _NET_CLIENT_LIST")
+                check(windowsBefore.contains("_NET_CLIENT_LIST(WINDOW)")) { "UNKNOWN window list unavailable" }
+                current();check(identity()==before)
+                val local=android.net.LocalSocket();socket.set(local)
+                try {
+                    if(cancelled.get()) error("UNKNOWN cancelled before connect")
+                    // API34 timeout overload is UNIMPLEMENTED. Working one-arg
+                    // connect relies on independent outer watchdog/cancel;
+                    // no claim that kernel connect has a 1s timeout.
+                    local.connect(android.net.LocalSocketAddress(host.absolutePath,android.net.LocalSocketAddress.Namespace.FILESYSTEM))
+                    val peer=local.peerCredentials
+                    raw.append("peer pid=${peer.pid} uid=${peer.uid} gid=${peer.gid} bytes_sent=0\n")
+                    check(peer.pid==pid&&peer.uid==android.os.Process.myUid()) { "UNKNOWN foreign/unmapped peer" }
+                    check(identity()==before); current()
+                    // NO getOutputStream, send, shutdownOutput, or payload.
+                } finally { local.close();socket.compareAndSet(local,null) }
+                Thread.sleep(minOf(250L,remaining()))
+                val windowsAfter=command("xprop -root _NET_CLIENT_LIST")
+                check(windowsAfter.contains("_NET_CLIENT_LIST(WINDOW)")) { "UNKNOWN after window list unavailable" }
+                raw.append("windowlist_before=").append(windowsBefore).append("windowlist_after=").append(windowsAfter)
+                raw.append("client_list_changed=").append(windowsAfter!=windowsBefore).append("; zero-byte EOF may open cwd window; disposable owned-session teardown required\n")
+                check(identity()==before);current()
+                raw.append("PASS transport peer/path only; zero bytes; EOF may open cwd window; no Files/parser/FPS/no-side-effect claim\n")
+            } catch(t:Throwable) { failure.set(t) }
+        }
+        worker.start()
+        worker.join(20_000)
+        cancelled.set(true)
+        // Close from a bounded daemon: even close() isn't assumed infallible.
+        val cleanup=kotlin.concurrent.thread(isDaemon=true,name="peer-cancel") {
+            try { socket.get()?.close() } catch(_:Throwable) {}
+            try { helper.get()?.destroyForcibly() } catch(_:Throwable) {}
+        }
+        cleanup.join(500);worker.join(500)
+        raw.append("worker_alive=${worker.isAlive} cleanup_alive=${cleanup.isAlive} helper_alive=${helper.get()?.isAlive} failure=${failure.get()}\n")
+        val out=ctx.externalMediaDirs.firstOrNull()?.let { File(it,"additional_test_output") }
+            ?: throw AssertionError("UNKNOWN evidence directory unavailable")
+        check(out.isDirectory||out.mkdirs());File(out,"pcmanfm-peer-no-payload.txt").writeText(raw.toString().replace(0.toChar(),' '))
+        check(!worker.isAlive&&!cleanup.isAlive&&helper.get()?.isAlive!=true) { "UNKNOWN deadline/cleanup; no further probe" }
+        failure.get()?.let { throw AssertionError("UNKNOWN no-payload peer diagnostic",it) }
+    }
+
     @Test
     fun mobileEntryLifecycle() {
         val prefs = ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
@@ -3229,6 +3416,11 @@ class MobileDesktopEntryTest {
             assertTrue("guest session log exists", log.isNotEmpty())
             assertFalse("guest session log has no FAIL CLOSED marker", log.contains("FAIL CLOSED"))
             Shot.save("m1-evidence-post-start-screen")
+
+            if (testName.methodName == "mobileEntryPcmanfmPeerNoPayload") {
+                pcmanfmPeerNoPayload(rootPid, launchRootStart!!, proc!!)
+                return@use
+            }
 
             // Render qualification (production-pair run): generated profile
             // on disk, identity-anchored process args/environment, and the

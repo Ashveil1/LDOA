@@ -483,6 +483,8 @@ def render_script(script, xdiag):
     for ln in script:
         def sub(m):
             return m.group(1) if xdiag else ""
+        ln = re.sub(r"\$\{\{\s*inputs\.pcmanfm_peer_no_payload\s*&&\s*'([^']*)'\s*\|\|\s*''\s*\}\}", "", ln)
+        ln = ln.replace("${{ inputs.pcmanfm_peer_no_payload }}", "false")
         out.append(re.sub(r"\$\{\{\s*inputs\.xdiag_capture\s*&&\s*'([^']*)'\s*\|\|\s*''\s*\}\}",
                           sub, ln))
     return out
