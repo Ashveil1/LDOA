@@ -11,9 +11,9 @@ jobs:
     if: ${{ inputs.execution_approved }}
     runs-on: ubuntu-24.04
     timeout-minutes: 210
-    env:
-      FLOOR_EVIDENCE: ${{ runner.temp }}/managed-private
     steps:
+      - name: Set fixed runner-private comparison path
+        run: printf 'FLOOR_EVIDENCE=%s/managed-private\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           submodules: recursive
