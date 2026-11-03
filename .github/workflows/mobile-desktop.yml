@@ -1,5 +1,5 @@
-# LOCAL UNREGISTERED PROPOSAL ONLY, not authorized to commit/dispatch.
-name: managed-desktop-comparison-proposal
+# LOCAL proposal only; not registered or dispatched. Separate smoke outcome.
+name: managed-emulator-exit-qualification
 on:
   workflow_dispatch:
     inputs:
@@ -7,48 +7,21 @@ on:
         type: boolean
         default: false
 jobs:
-  comparison:
+  anchor-exit:
     if: ${{ inputs.execution_approved }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 210
+    timeout-minutes: 20
     steps:
-      - name: Set fixed runner-private comparison path
-        run: printf 'FLOOR_EVIDENCE=%s/managed-private\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          cache-disabled: true
-      - name: Existing controlled host build dependencies, no retries
-        timeout-minutes: 10
-        run: |
-          mkdir -m700 "$FLOOR_EVIDENCE"
-          timeout -k 5 120 sudo apt-get -o Acquire::Retries=0 update
-          timeout -k 10 300 sudo apt-get -o Acquire::Retries=0 install -y --no-install-recommends build-essential intltool pkg-config libfm-gtk3-dev libgtk-3-dev bison
-      - name: Matched fixedprefix original and patch, runner-local only
-        timeout-minutes: 12
-        run: |
-          FIXED_PREFIX_REVIEWED_BUILD=yes timeout -k 10 600 bash ci/managed-comparison/build-and-test.sh
-          LOCAL=$(cat "$FLOOR_EVIDENCE/runner-local-location.txt")
-          python3 ci/managed-comparison/prepare_incoming.py --local "$LOCAL" --case original --out "$FLOOR_EVIDENCE/incoming-original" > "$FLOOR_EVIDENCE/pin-original"
-          python3 ci/managed-comparison/prepare_incoming.py --local "$LOCAL" --case patched --out "$FLOOR_EVIDENCE/incoming-patched" > "$FLOOR_EVIDENCE/pin-patched"
-      - name: One debug APK build for two fresh disposable cases, no delivery
-        timeout-minutes: 35
-        run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'ndk;29.0.14206865' 'platforms;android-35' >/dev/null
-          timeout -k 30 1800 ./gradlew assembleDebug assembleDebugAndroidTest
+          submodules: false
       - name: KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
-      - name: Original case fresh emulator, exact port5554
-        timeout-minutes: 65
+      - name: One empty fresh API34 fixture, no application or source payload
         uses: reactivecircus/android-emulator-runner@v2
+        timeout-minutes: 15
         with:
           api-level: 34
           target: default
@@ -59,25 +32,18 @@ jobs:
           emulator-port: 5554
           force-avd-creation: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -wipe-data -noaudio -no-boot-anim
-          script: MANAGED_CASE_EXEC_APPROVED=yes bash ci/managed-comparison/run-case.sh original "$FLOOR_EVIDENCE/incoming-original" "$(cat "$FLOOR_EVIDENCE/pin-original")"
-      - name: Verify first emulator exited before second case
-        run: timeout -k 2 15 bash -c '! adb devices | grep -q "emulator-5554[[:space:]]"'
-      - name: Patched case fresh emulator same exact port5554
-        timeout-minutes: 65
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
-          target: default
-          arch: x86_64
-          profile: pixel_6
-          cores: 4
-          avd-name: managed-patched
-          emulator-port: 5554
-          force-avd-creation: true
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -wipe-data -noaudio -no-boot-anim
-          script: MANAGED_CASE_EXEC_APPROVED=yes bash ci/managed-comparison/run-case.sh patched "$FLOOR_EVIDENCE/incoming-patched" "$(cat "$FLOOR_EVIDENCE/pin-patched")"
-      - name: Exact bounded ordinary log evidence, source/stage never published
-        if: always()
-        timeout-minutes: 2
-        run: timeout -k 2 90 python3 ci/managed-comparison/transport.py emit --evidence "$GITHUB_WORKSPACE/comparison-evidence" --private "$FLOOR_EVIDENCE"
-# NO upload-artifact/cache actions. No binary/package/source publication.
+          script: |
+            python3 - <<'PY'
+            import pathlib,re
+            p=pathlib.Path(__import__('os').environ['ANDROID_HOME'])/'emulator/source.properties'
+            text=p.read_text()
+            allowed=dict(re.findall(r'^(Pkg\.(?:Revision|BuildId))=(.*)$',text,re.M))
+            print('QUALIFICATION SDK',allowed,flush=True)
+            assert allowed=={'Pkg.Revision':'37.2.13','Pkg.BuildId':'16740729'},'SDK drift: do not generalize'
+            PY
+            timeout -k 2 8 python3 ci/managed-comparison/intercase_absence.py anchor --anchor "$RUNNER_TEMP/original-emulator-identity.json"
+      - name: Read-only exit qualification after normal action cleanup
+        timeout-minutes: 1
+        run: timeout -k 2 45 python3 ci/managed-comparison/intercase_absence.py wait --anchor "$RUNNER_TEMP/original-emulator-identity.json"
+# No setup-gradle, APK/build/source/archive, cache/artifact actions,
+# secondary emulator, explicit kill, kill-server or force cleanup.
