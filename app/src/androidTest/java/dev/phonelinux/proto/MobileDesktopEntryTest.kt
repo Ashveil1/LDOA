@@ -54,6 +54,7 @@ class MobileDesktopEntryTest {
      *  precise site. Runs AFTER tearDown (JUnit rule ordering), so its
      *  screen state is post-teardown - the tap-site captures remain the
      *  failure-instant record; this hook never replaces them. */
+    @get:org.junit.Rule val testName = org.junit.rules.TestName()
     @get:org.junit.Rule
     val failureEvidenceHook = object : org.junit.rules.TestWatcher() {
         override fun failed(e: Throwable?, description: org.junit.runner.Description?) {
@@ -70,11 +71,29 @@ class MobileDesktopEntryTest {
     companion object {
         private const val TAG = "MobileDesktopEntryTest"
         private const val START_BUDGET_MS = 15 * 60_000L
+        // xdiag diagnostic: asset pins + drain tail cap; all BUDGET and
+        // truncation arithmetic lives in XdiagPolicy (testShared, unit-
+        // tested off-device). The method early-skips in setUp unless
+        // dispatch-gated, so normal runs pay no runtime beyond the
+        // assume check itself.
+        private const val XDIAG_TAIL_CAP = 64 * 1024
+        private const val XDIAG_PROTO_COUNT = 28
+        private const val XDIAG_XTRACE_SHA256 =
+            "2117568790d9ebd9983d61cc58de8374b3759f442e08148ce287a3411ddaf489"
         private const val UI_WAIT_MS = 10_000L
     }
 
     @Before
     fun setUp() {
+        // xdiag diagnostic methods are dispatch-gated: skip BEFORE any
+        // device mutation (pm grant) or rootfs bootstrap, so a normal
+        // run pays only this assume check for them (JUnit4 treats an
+        // assumption failure in @Before as a skipped test).
+        if (testName.methodName.startsWith("mobileEntryXdiag")) {
+            org.junit.Assume.assumeTrue(
+                "xdiag capture is dispatch-gated (ldoa_xdiag=true) - skipped in normal runs",
+                InstrumentationRegistry.getArguments().getString("ldoa_xdiag") == "true")
+        }
         val instr = InstrumentationRegistry.getInstrumentation()
         device = UiDevice.getInstance(instr)
         ctx = instr.targetContext
@@ -132,6 +151,11 @@ class MobileDesktopEntryTest {
 
     @After
     fun tearDown() {
+        // JUnit4 runs @After in a finally around @Before (RunAfters wraps
+        // RunBefores): an assumption skip in setUp STILL lands here with
+        // ctx/device UNINITIALIZED. Guard first - never touch lateinit
+        // state after an early skip.
+        if (!::ctx.isInitialized || !::device.isInitialized) return
         exportGuestLogs("pre-stop")
         try { XServer.stopDesktopMode(ctx) } catch (t: Throwable) { }
         exportGuestLogs("post-stop")
@@ -1602,6 +1626,997 @@ class MobileDesktopEntryTest {
         }
         return seen.size
     }
+
+    // ---------------- xdiag proxied-capture diagnostic ----------------
+    // Dispatch-gated (instrumentation arg ldoa_xdiag=true) DIAGNOSTIC
+    // session capture, never a render gate: the X server listens on :10
+    // (XServer token-bound display reservation: debug + disposable-
+    // emulator gated, fresh-world only, single-consumption with token
+    // attribution) while a test-owned in-guest xtrace proxy FAKES :0 and
+    // forwards to :10, so the owner session script, its ready-gate and
+    // every guest client keep their hardcoded DISPLAY=:0 untouched and
+    // all guest client requests/replies/events are logged from BEFORE
+    // the first ready-gate probe. Wire chronology only: NO settle
+    // assertions, NO render-PASS claim, NO window pokes/resizes.
+    //   * BOUNDED-PHASE contract (not an absolute deadline): startup,
+    //     observe, smoke, snapshots and versions each run inside an
+    //     explicit monotonic cap; the observation window refuses to
+    //     start below a minimum remainder and is durably marked
+    //     INCOMPLETE (observation-metadata.txt) when shortened. The
+    //     in-guest proxy lifetime covers the phase budget + cleanup
+    //     margin only (asserted), so no silent long helper run.
+    //   * The OWNED TREE (proot root -> in-guest timeout -> xtrace) is
+    //     captured with pid+starttime at anchor time; teardown signals
+    //     only the identity-verified anchor, ladders the root, then every
+    //     captured tree pid must be confirmed gone (changed/absent
+    //     starttime) plus a whole-table argv backstop - any survivor or
+    //     unreadable OWN-UID entry is UNKNOWN, never a clean sweep, and
+    //     nothing unidentified is ever killed. Foreign-UID entries are
+    //     invisible to us by construction and skipped explicitly.
+    //   * The trace file is capped AT SOURCE (in-guest ulimit -f, dash
+    //     512-byte blocks) and the export has a hard byte cap with
+    //     streamed head/marker/tail truncation; the drain keeps only a
+    //     capped tail. Export runs even when stop fails.
+    // Assets: androidTest/assets/xdiag (MANIFEST.txt = signed-metadata
+    // provenance chain, hashes, license, bundled corresponding source,
+    // patch spec; regenerate+verify with ci/fetch-xdiag-tools.sh).
+    private data class XdiagProxy(
+        val root: Process,
+        val rootPid: Int,
+        val anchorPid: Int,
+        val anchorStart: String,
+        val tree: Map<Int, String>,
+        val diagDir: File,
+        val drain: Thread,
+        val tail: StringBuilder,
+        val drainError: java.util.concurrent.atomic.AtomicReference<Throwable?>,
+        val gotCount: java.util.concurrent.atomic.AtomicLong)
+
+    private fun xdiagSha256(f: File): String {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        f.inputStream().use { inp ->
+            val buf = ByteArray(64 * 1024)
+            while (true) { val n = inp.read(buf); if (n < 0) break; md.update(buf, 0, n) }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun xdiagStage(): File {
+        // Source assets live in the TEST APK (androidTest source set):
+        // they MUST come from the instrumentation context, NOT the target
+        // app context (ctx.assets would not carry them). Staging target
+        // is the target app's filesDir (reachable by the proot bind).
+        val testAssets = InstrumentationRegistry.getInstrumentation().context.assets
+        val names = testAssets.list("xdiag")
+            ?: throw AssertionError("xdiag: assets/xdiag UNREADABLE in the test APK - cannot stage")
+        check(names.isNotEmpty()) { "xdiag: assets/xdiag missing from the test APK" }
+        // Exclusive create; a collision is refused, never reused.
+        val dir = File(ctx.filesDir, "xdiag-" + System.currentTimeMillis() + "-" +
+            java.lang.Long.toHexString(System.nanoTime()))
+        if (!dir.mkdir()) throw AssertionError("xdiag: staging dir refused/collision: " + dir.absolutePath)
+        for (name in names) {
+            if (name == "source") continue // GPL corresponding source: redistribution copy, not needed in-guest
+            if (name == "proto") {
+                val pd = File(dir, "proto"); check(pd.mkdir()) { "xdiag: proto dir create failed" }
+                val protos = testAssets.list("xdiag/proto")
+                    ?: throw AssertionError("xdiag: assets/xdiag/proto UNREADABLE in the test APK")
+                for (pr in protos) {
+                    testAssets.open("xdiag/proto/" + pr).use { inp ->
+                        File(pd, pr).outputStream().use { inp.copyTo(it) } }
+                }
+            } else {
+                testAssets.open("xdiag/" + name).use { inp ->
+                    File(dir, name).outputStream().use { inp.copyTo(it) } }
+            }
+        }
+        check(File(dir, "xtrace").setExecutable(true)) { "xdiag: chmod +x failed" }
+        // Runtime verification BEFORE any exec: staged binary hash,
+        // protocol decoder count, license presence. Fail closed.
+        val hash = xdiagSha256(File(dir, "xtrace"))
+        if (hash != XDIAG_XTRACE_SHA256) {
+            throw AssertionError("xdiag: staged xtrace sha256 " + hash +
+                " != pinned " + XDIAG_XTRACE_SHA256 + " - refusing to exec an unverified binary")
+        }
+        val protoFiles = File(dir, "proto").listFiles()
+            ?: throw AssertionError("xdiag: staged proto dir UNREADABLE")
+        val badProto = protoFiles.firstOrNull { !it.isFile || it.length() == 0L }
+        if (protoFiles.size != XDIAG_PROTO_COUNT || badProto != null) {
+            throw AssertionError("xdiag: proto decoder set incomplete (count=" + protoFiles.size +
+                " expected=" + XDIAG_PROTO_COUNT + ", empty=" + (badProto?.name ?: "none") + ")")
+        }
+        val cop = File(dir, "COPYRIGHT")
+        if (!cop.isFile || cop.length() == 0L) throw AssertionError("xdiag: COPYRIGHT missing/empty - redistribution obligation unmet")
+        return dir
+    }
+
+    /** Three-state pid resolution: GONE only on ENOENT/vanished dir,
+     *  ALIVE with starttime, UNKNOWN for anything unreadable-while-
+     *  existing. Never collapse UNKNOWN into absent. */
+    private enum class XdiagPidState { GONE, ALIVE, UNKNOWN }
+
+    private fun xdiagPidState(pid: Int): Pair<XdiagPidState, String?> {
+        val dir = File("/proc", pid.toString())
+        val (content, errno) = readProcStat(pid)
+        if (content == null) {
+            if (errno == android.system.OsConstants.ENOENT || !dir.exists()) return XdiagPidState.GONE to null
+            return XdiagPidState.UNKNOWN to null
+        }
+        val close = content.lastIndexOf(')')
+        val rest = if (close >= 0) content.substring(close + 1).trim().split(Regex("\\s+")) else emptyList()
+        if (rest.size <= 20) return XdiagPidState.UNKNOWN to null
+        return XdiagPidState.ALIVE to rest[19]
+    }
+
+    /** Own-UID check for a /proc entry: proot and its tracees run as OUR
+     *  uid, so anything foreign-UID cannot be ours and is skipped
+     *  explicitly; an entry we cannot stat while it still exists is
+     *  UNKNOWN (fail), never skipped. */
+    private fun xdiagOwnPidDir(f: File): Boolean {
+        val st = try { android.system.Os.stat(f.absolutePath) }
+        catch (t: Throwable) {
+            if (!f.exists()) return false // vanished mid-scan: not an entry at all
+            throw AssertionError("xdiag: cannot stat " + f.absolutePath + " - UNKNOWN", t)
+        }
+        return st.st_uid.toLong() == android.system.Os.getuid().toLong()
+    }
+
+    /** Host /proc scan for OUR-uid processes whose argv[0] is exactly the
+     *  given guest path; pid -> starttime. FAIL CLOSED per XdiagPolicy
+     *  .scanDecision: foreign-UID skipped, vanished = gone, unreadable
+     *  own-UID = UNKNOWN thrown. argv[0] matching excludes wrappers
+     *  carrying the path as an ARGUMENT (the in-guest timeout
+     *  supervisor). */
+    private fun xdiagProcScan(argv0: String): Map<Int, String> {
+        val dirs = File("/proc").listFiles { f -> f.name.matches(Regex("[0-9]+")) }
+            ?: throw AssertionError("xdiag: /proc listing UNREADABLE - no scan result can be trusted")
+        val out = mutableMapOf<Int, String>()
+        for (f in dirs) {
+            if (!xdiagOwnPidDir(f)) continue // foreign-UID or vanished: cannot be our tracee
+            val pid = f.name.toInt()
+            val argv = try { File(f, "cmdline").readBytes() } catch (t: Throwable) { null }
+            when (XdiagPolicy.scanDecision(isOwnUid = true, readable = argv != null, stillExists = f.exists())) {
+                XdiagPolicy.ScanDecision.GONE -> continue
+                XdiagPolicy.ScanDecision.UNKNOWN ->
+                    throw AssertionError("xdiag: /proc/" + pid + "/cmdline UNREADABLE on OWN pid - UNKNOWN")
+                else -> {}
+            }
+            val first = argv!!.takeWhile { it != 0.toByte() }.toByteArray().toString(Charsets.UTF_8)
+            if (first == argv0) {
+                val (state, st) = xdiagPidState(pid)
+                when (state) {
+                    XdiagPidState.GONE -> {}
+                    XdiagPidState.UNKNOWN ->
+                        throw AssertionError("xdiag: /proc/" + pid + "/stat UNREADABLE on OWN pid - UNKNOWN")
+                    XdiagPidState.ALIVE -> out[pid] = st!!
+                }
+            }
+        }
+        return out
+    }
+
+    /** Full own-UID process tree rooted at [rootPid]: pid -> starttime.
+     *  Built from a whole-table ppid map (covers every descendant, not
+     *  just direct children); any unreadable own-UID stat is UNKNOWN. */
+    private fun xdiagDescendants(rootPid: Int): Map<Int, String> {
+        val dirs = File("/proc").listFiles { f -> f.name.matches(Regex("[0-9]+")) }
+            ?: throw AssertionError("xdiag: /proc listing UNREADABLE - tree capture impossible")
+        val ppidOf = HashMap<Int, Int>()
+        val startOf = HashMap<Int, String>()
+        for (f in dirs) {
+            if (!xdiagOwnPidDir(f)) continue
+            val pid = f.name.toInt()
+            val (content, errno) = readProcStat(pid)
+            if (content == null) {
+                if (errno == android.system.OsConstants.ENOENT || !f.exists()) continue
+                throw AssertionError("xdiag: /proc/" + pid + "/stat UNREADABLE (errno=" + errno + ") on OWN pid - UNKNOWN")
+            }
+            val close = content.lastIndexOf(')')
+            val rest = if (close >= 0) content.substring(close + 1).trim().split(Regex("\\s+")) else emptyList()
+            val pp = (if (rest.size > 20) rest[1].toIntOrNull() else null)
+                ?: throw AssertionError("xdiag: /proc/" + pid + "/stat unparsable - UNKNOWN")
+            ppidOf[pid] = pp; startOf[pid] = rest[19]
+        }
+        val out = mutableMapOf<Int, String>()
+        val rootStart = startOf[rootPid]
+            ?: throw AssertionError("xdiag: spawned proot root " + rootPid + " not in own-UID table - UNKNOWN")
+        out[rootPid] = rootStart
+        var frontier = listOf(rootPid)
+        while (frontier.isNotEmpty()) {
+            val next = ppidOf.filter { it.value in frontier && it.key !in out }.keys.toList()
+            for (d in next) out[d] = startOf[d]!!
+            frontier = next
+        }
+        return out
+    }
+
+    /** Bounded-ladder teardown of a just-spawned helper on start-error
+     *  paths: asserts the process is actually DEAD and the drain thread
+     *  actually JOINED - a ladder that did not finish is UNKNOWN, not a
+     *  quiet best-effort. */
+    private fun xdiagReapSpawned(p: Process, drain: Thread?) {
+        p.destroy()
+        if (!p.waitFor(2_000, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+            p.destroyForcibly(); p.waitFor(2_000, java.util.concurrent.TimeUnit.MILLISECONDS)
+        }
+        drain?.join(2_000)
+        if (p.isAlive || drain?.isAlive == true) {
+            guestAborted = true
+            throw AssertionError("xdiag: spawned helper did not die/join within the bounded ladder - UNKNOWN")
+        }
+        // A reaped spawn is only clean when NOTHING xtrace-like survives.
+        val left = xdiagProcScan("/xdiag/xtrace")
+        if (left.isNotEmpty()) {
+            guestAborted = true
+            throw AssertionError("xdiag: xtrace-like survivor(s) after reaped spawn: " + left.keys +
+                " - FAIL UNKNOWN, nothing killed")
+        }
+    }
+
+    private fun xdiagProxyStart(rootfs: File, diagDir: File, lifetimeSec: Int, deadlineNs: Long): XdiagProxy {
+        // Collision pre-baseline: any pre-existing xtrace-anchored process
+        // is a FOREIGN match we must never touch - abort, kill nothing.
+        val baseline = xdiagProcScan("/xdiag/xtrace")
+        if (baseline.isNotEmpty()) {
+            throw AssertionError("xdiag: pre-existing /xdiag/xtrace process(es) " + baseline.keys +
+                " before start - collision refused, nothing killed")
+        }
+        val nd = ctx.applicationInfo.nativeLibraryDir
+        val pb = ProcessBuilder(mutableListOf(
+            File(nd, "libproot.so").absolutePath,
+            "--link2symlink", "-0", "-r", rootfs.absolutePath,
+            "-b", "/dev", "-b", "/proc", "-b", "/sys",
+            "-b", XServer.socketDir(ctx).absolutePath + ":/tmp/.X11-unix",
+            "-b", diagDir.absolutePath + ":/xdiag",
+            "-w", "/root",
+            // Trace file capped AT SOURCE: ulimit -f in dash 512-byte
+            // blocks (empirically verified) - the writer gets SIGXFSZ at
+            // the cap instead of filling the disk.
+            "/bin/sh", "-c",
+            "ulimit -f " + XdiagPolicy.traceCapBlocks512() + "; exec " +
+            "/usr/bin/timeout -s KILL " + lifetimeSec +
+            " /xdiag/xtrace -d :10 -D :0 -k -n -o /xdiag/xtrace.log"))
+        pb.environment().putAll(mapOf(
+            "PROOT_LOADER" to File(nd, "libproot_loader.so").absolutePath,
+            "PROOT_LOADER_32" to File(nd, "libproot_loader32.so").absolutePath,
+            "LD_LIBRARY_PATH" to nd,
+            "HOME" to "/root",
+            "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "PROOT_TMP_DIR" to Proot.prootTmpDir(ctx).absolutePath,
+            "TMPDIR" to "/tmp"))
+        pb.redirectErrorStream(true)
+        // Same fail-closed spawn discipline as guestExec.
+        val preKids = selfChildren()
+            ?: throw AssertionError("xdiag: pre-spawn child capture UNREADABLE - refusing to launch an untrackable proxy")
+        val p = pb.start()
+        val postKids = selfChildren()
+        if (postKids == null) {
+            xdiagReapSpawned(p, null)
+            guestAborted = true
+            throw AssertionError("xdiag: post-spawn child capture UNREADABLE - proxy stopped/reaped, capture aborted")
+        }
+        val spawnedKids = postKids - preKids.keys
+        if (spawnedKids.size != 1) {
+            xdiagReapSpawned(p, null)
+            guestAborted = true
+            throw AssertionError("xdiag: spawned proot root not uniquely identifiable (diff=" +
+                spawnedKids.size + ") - reaped, capture aborted")
+        }
+        val rootPid = spawnedKids.keys.first()
+        val tail = StringBuilder()
+        val drainError = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+        // Monotonic connection counter - the capped tail can trim and a
+        // recount can stay flat or DECREASE, so evidence never comes from
+        // tail size; this counter only ever increases.
+        val gotCount = java.util.concurrent.atomic.AtomicLong(0)
+        // Bounded reader: NO unbounded forEachLine - a single line is
+        // capped at 4KB (truncated + marked), the tail stays capped, and
+        // a read error is RECORDED (surfaced at stop), never swallowed.
+        val drain = kotlin.concurrent.thread {
+            try {
+                val r = p.inputStream.bufferedReader()
+                val line = StringBuilder()
+                val cb = CharArray(4096)
+                fun flushLine() {
+                    if (line.isEmpty()) return
+                    var l = line.toString(); line.setLength(0)
+                    if (l.length > 4096) l = l.substring(0, 4096) + " [...LINE TRUNCATED]"
+                    if (l.contains("Got connection from")) gotCount.incrementAndGet()
+                    synchronized(tail) {
+                        tail.append(l).append('\n')
+                        if (tail.length > XDIAG_TAIL_CAP) tail.delete(0, tail.length - XDIAG_TAIL_CAP / 2)
+                    }
+                }
+                while (true) {
+                    val n = r.read(cb)
+                    if (n < 0) break
+                    for (i in 0 until n) {
+                        if (cb[i] == '\n') flushLine() else {
+                            line.append(cb[i])
+                            if (line.length > 8192) flushLine()
+                        }
+                    }
+                }
+                flushLine()
+            } catch (t: Throwable) { drainError.set(t) }
+        }
+        // Anchor: exactly one guest xtrace process, pid+starttime, proven
+        // descendant of our proot root, within a bounded wait. Then the
+        // OWNED TREE is captured whole so teardown can prove every member
+        // gone. Every failure path reaps first.
+        var proxy: XdiagProxy? = null
+        val anchorDeadlineNs = System.nanoTime() +
+            minOf(10_000_000_000L, deadlineNs - System.nanoTime())
+        while (System.nanoTime() < anchorDeadlineNs) {
+            try {
+                val scan = xdiagProcScan("/xdiag/xtrace")
+                if (scan.size == 1) {
+                    val pid = scan.keys.first()
+                    if (!xdiagIsDescendantOf(pid, rootPid)) {
+                        throw AssertionError("xdiag: sole xtrace pid " + pid +
+                            " is NOT a descendant of our proot root " + rootPid +
+                            " - refusing to anchor a foreign process")
+                    }
+                    proxy = XdiagProxy(p, rootPid, pid, scan[pid]!!,
+                        xdiagDescendants(rootPid), diagDir, drain, tail, drainError, gotCount)
+                    break
+                }
+                if (scan.size > 1) {
+                    throw AssertionError("xdiag: multiple xtrace-like processes " + scan.keys +
+                        " - anchor ambiguous (never kill what we cannot identify)")
+                }
+            } catch (t: AssertionError) {
+                xdiagReapSpawned(p, drain); guestAborted = true; throw t
+            }
+            Thread.sleep(250)
+        }
+        if (proxy == null) {
+            xdiagReapSpawned(p, drain)
+            guestAborted = true
+            throw AssertionError("xdiag: proxy anchor did not appear within 10s - spawn reaped, capture aborted")
+        }
+        Log.i(TAG, "xdiag: proxy up pid=" + proxy.anchorPid + " starttime=" + proxy.anchorStart +
+            " tree=" + proxy.tree.keys + " lifetime=" + lifetimeSec + "s (in-guest timeout-enforced)")
+        return proxy
+    }
+
+    /** Fail-closed descendant check: walk the ppid chain of [pid] up to
+     *  [rootPid] via /proc stat; unreadable-while-alive link = UNKNOWN. */
+    private fun xdiagIsDescendantOf(pid: Int, rootPid: Int): Boolean {
+        var cur = pid
+        repeat(64) {
+            if (cur == rootPid) return true
+            if (cur <= 1) return false
+            val (content, errno) = readProcStat(cur)
+            if (content == null) {
+                if (errno == android.system.OsConstants.ENOENT) return false
+                throw AssertionError("xdiag: /proc/" + cur + "/stat UNREADABLE (errno=" + errno +
+                    ") during ancestry walk - UNKNOWN")
+            }
+            val close = content.lastIndexOf(')')
+            val rest = if (close >= 0) content.substring(close + 1).trim().split(Regex("\\s+")) else emptyList()
+            cur = (if (rest.size > 1) rest[1].toIntOrNull() else null)
+                ?: throw AssertionError("xdiag: /proc/" + cur + "/stat unparsable - UNKNOWN")
+        }
+        return false
+    }
+
+    /** Stop: union the anchor-time tree with a FRESH descendant capture
+     *  (covers descendants spawned after anchor); signal ONLY the
+     *  identity-verified anchor; bounded ladder on the proot root; drain
+     *  join + drain-error surfacing; then every owned pid must be
+     *  confirmed GONE via the three-state pid check (ALIVE with the
+     *  captured starttime = survivor, UNREADABLE-while-existing =
+     *  UNKNOWN, never collapsed into gone) plus an argv backstop. The
+     *  in-guest timeout supervisor is lifetime-bound to xtrace (it exits
+     *  when its only child exits) and is covered by the tree union.
+     *  A stale :0 socket is removed only while OUR token still owns the
+     *  live attempt (attempt-sequence attribution); otherwise UNKNOWN.
+     *  Nothing unidentified is ever killed. */
+    private fun xdiagProxyStop(px: XdiagProxy, token: Long) {
+        // Fresh descendant capture: an ABSENT root (pid confirmed GONE)
+        // simply has no fresh tree. An UNREADABLE own-UID /proc table is a
+        // different fact and must propagate as UNKNOWN - never swallowed
+        // into a false "clean". Root reuse by a foreign UID makes
+        // xdiagDescendants fail closed ("not in own-UID table").
+        // Root identity is checked BEFORE any traversal: ALIVE with a
+        // mismatched starttime is a REUSED root - UNKNOWN immediately,
+        // never capture a foreign tree first. GONE (confirmed absent) is
+        // the only no-tree case. After traversal the root is re-verified:
+        // if it changed mid-capture the captured tree is discarded as
+        // UNKNOWN, never treated as clean.
+        val capturedRootStart = px.tree[px.rootPid]
+        val (rootState, rootNow) = xdiagPidState(px.rootPid)
+        val treeNow = when {
+            rootState == XdiagPidState.GONE -> emptyMap()
+            rootState == XdiagPidState.UNKNOWN -> {
+                guestAborted = true
+                throw AssertionError("xdiag: proot root " + px.rootPid + " unreadable at stop - UNKNOWN")
+            }
+            rootNow != capturedRootStart -> {
+                guestAborted = true
+                throw AssertionError("xdiag: proot root " + px.rootPid + " REUSED before tree capture" +
+                    " (start " + capturedRootStart + " -> " + rootNow + ") - UNKNOWN, no tree attached")
+            }
+            else -> {
+                val t = xdiagDescendants(px.rootPid)
+                val (s2, n2) = xdiagPidState(px.rootPid)
+                if (s2 != XdiagPidState.ALIVE || n2 != capturedRootStart) {
+                    guestAborted = true
+                    throw AssertionError("xdiag: proot root changed DURING tree capture (" +
+                        s2 + ", start " + capturedRootStart + " -> " + n2 + ") - UNKNOWN, tree discarded")
+                }
+                t
+            }
+        }
+        // Identity conflict = PID REUSE between the anchor-time tree and
+        // now. Preserve BOTH observations; a reused ROOT means the fresh
+        // tree belongs to a foreign process and must NOT be attached.
+        val foreign = mutableMapOf<Int, Pair<String, String>>()
+        for (pid in px.tree.keys.intersect(treeNow.keys)) {
+            if (px.tree[pid] != treeNow[pid]) foreign[pid] = Pair(px.tree[pid]!!, treeNow[pid]!!)
+        }
+        if (px.rootPid in foreign) {
+            guestAborted = true
+            throw AssertionError("xdiag: proot root pid " + px.rootPid + " REUSED (start " +
+                foreign[px.rootPid]!!.first + " -> " + foreign[px.rootPid]!!.second +
+                ") - refusing to attach a foreign tree - UNKNOWN")
+        }
+        if (foreign.isNotEmpty()) {
+            Log.w(TAG, "xdiag: pid reuse between anchor and stop (old/new start preserved): " + foreign)
+        }
+        // Reused non-root pids: the old owner is gone and the current
+        // process is not ours - exclude BOTH from the owned sweep.
+        val ownedTree = (px.tree - foreign.keys) + (treeNow - foreign.keys)
+        // Identity equality BEFORE any signal: ALIVE with a DIFFERENT
+        // starttime means the pid was reused by a process we do not own -
+        // never signal it.
+        val (anchorState, anchorNow) = xdiagPidState(px.anchorPid)
+        when {
+            anchorState == XdiagPidState.UNKNOWN -> {
+                guestAborted = true
+                throw AssertionError("xdiag: anchor pid " + px.anchorPid + " unreadable at stop - UNKNOWN")
+            }
+            anchorState == XdiagPidState.ALIVE && anchorNow == px.anchorStart ->
+                android.os.Process.killProcess(px.anchorPid)
+            anchorState == XdiagPidState.ALIVE ->
+                Log.i(TAG, "xdiag: anchor pid " + px.anchorPid + " reused (start " +
+                    px.anchorStart + " -> " + anchorNow + ") - NOT ours, no signal sent")
+            else -> {} // GONE: anchor already dead
+        }
+        px.root.destroy()
+        if (!px.root.waitFor(3_000, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+            px.root.destroyForcibly(); px.root.waitFor(3_000, java.util.concurrent.TimeUnit.MILLISECONDS)
+        }
+        px.drain.join(2_000)
+        if (px.root.isAlive || px.drain.isAlive) {
+            guestAborted = true
+            throw AssertionError("xdiag: proxy root/drain did not finish within the bounded ladder - UNKNOWN")
+        }
+        px.drainError.get()?.let {
+            // No proof the read error is a benign shutdown race: a broken
+            // drain means capture output may be incomplete - UNKNOWN.
+            guestAborted = true
+            throw AssertionError("xdiag: proxy drain read failed (" + it.javaClass.simpleName +
+                ": " + (it.message ?: "").take(120) + ") - capture possibly incomplete - UNKNOWN")
+        }
+        val survivors = mutableListOf<Int>()
+        for ((pid, st) in ownedTree) {
+            val (state, now) = xdiagPidState(pid)
+            when (state) {
+                XdiagPidState.GONE -> {}
+                XdiagPidState.ALIVE -> if (now == st) survivors.add(pid)
+                XdiagPidState.UNKNOWN -> {
+                    guestAborted = true
+                    throw AssertionError("xdiag: owned pid " + pid + " unreadable at survivor sweep - UNKNOWN")
+                }
+            }
+        }
+        if (survivors.isNotEmpty()) {
+            guestAborted = true
+            throw AssertionError("xdiag: owned-tree survivor(s) after anchored stop: " + survivors +
+                " - FAIL UNKNOWN, nothing further killed")
+        }
+        val escaped = xdiagProcScan("/xdiag/xtrace")
+        if (escaped.isNotEmpty()) {
+            guestAborted = true
+            throw AssertionError("xdiag: xtrace-like process(es) outside the owned tree: " + escaped.keys +
+                " - FAIL UNKNOWN, nothing killed")
+        }
+        val sock = File(XServer.socketDir(ctx), "X0")
+        if (sock.exists()) {
+            // ATOMIC guard+delete under the seam lock: ownership is
+            // re-verified and the file removed inside one lock hold, so no
+            // start can interleave between check and delete. A stale
+            // socket we do not verifiably own stays UNKNOWN and is never
+            // deleted unidentified.
+            if (!XServer.deleteOwnedTestSocketForTest(token, sock)) {
+                guestAborted = true
+                throw AssertionError("xdiag: stale :0 socket present but the live attempt is not ours" +
+                    " (or delete refused/failed) - UNKNOWN, socket left in place")
+            }
+        }
+        File(px.diagDir, "xtrace.log").let {
+            Log.i(TAG, "xdiag: proxy stopped clean; trace " + (if (it.isFile) it.length().toString() + " bytes" else "ABSENT"))
+        }
+    }
+
+    /** Abort-guarded, code-checked guest command bounded by the ONE
+     *  overall deadline: no shell pipelines, the timeout latch is honored
+     *  BEFORE spawning, unclean exec latches the abort, non-zero rc is a
+     *  hard failure, and the effective timeout is min(command cap,
+     *  remaining overall budget) - a command that cannot fit fails as
+     *  budget-exhausted UNKNOWN instead of running under-budgeted. */
+    private fun xdiagGuest(rootfs: File, deadlineNs: Long, what: String, vararg args: String): String {
+        if (guestAborted) throw AssertionError("xdiag: " + what +
+            " refused - an earlier guest timeout/unclean exec latched the abort")
+        val remMs = (deadlineNs - System.nanoTime()) / 1_000_000L
+        if (remMs <= 0L) throw AssertionError("xdiag: overall budget EXHAUSTED before " + what + " - UNKNOWN")
+        val out = guestExec(rootfs, minOf(XdiagPolicy.COMMAND_BUDGET_MS, remMs), *args)
+        if (out.leftover.isNotEmpty() || guestAborted) {
+            guestAborted = true
+            throw AssertionError("xdiag: " + what + " exec UNCLEAN (leftover=" + out.leftover +
+                ") - UNKNOWN, aborting capture")
+        }
+        if (out.code != 0) {
+            throw AssertionError("xdiag: " + what + " failed rc=" + out.code +
+                " out=" + out.text.take(400))
+        }
+        return out.text
+    }
+
+    /** FIRST-SNAPSHOT pcmanfm identity: exactly one live pcmanfm pid,
+     *  anchored with its HOST starttime (guest /proc is the bound host
+     *  /proc). LIMITATION, kept explicit: this anchors the process found
+     *  at ready/first-snapshot time - it is NOT proof of the original
+     *  launch identity (a pre-ready restart would be invisible). Every
+     *  later snapshot re-verifies pid+starttime, so a restart AFTER the
+     *  anchor is UNKNOWN, never silently re-anchored. */
+    private fun xdiagPcmanAnchor(rootfs: File, deadlineNs: Long): Pair<Int, String> {
+        val pids = xdiagGuest(rootfs, deadlineNs, "pcmanfm pid",
+            "pgrep", "-x", "pcmanfm").trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (pids.size != 1) throw AssertionError("xdiag: pcmanfm pid not unique (count=" + pids.size + ") - UNKNOWN")
+        val pid = pids[0].toIntOrNull() ?: throw AssertionError("xdiag: pcmanfm pid unparsable: " + pids[0])
+        val st = procStartTime(pid) ?: throw AssertionError("xdiag: pcmanfm pid " + pid + " starttime unreadable - UNKNOWN")
+        return pid to st
+    }
+
+    /** Identity-chained snapshot: desktop = exactly one window of the
+     *  anchored first-snapshot pcmanfm that parses (strict anchored
+     *  parsers via XdiagPolicy, no contains-matching) as WM_CLASS
+     *  pcmanfm + type DESKTOP + IsViewable + _NET_WM_PID == anchor.
+     *  Raw evidence is PERSISTED INCREMENTALLY as collected (flushed per
+     *  step) - a failure mid-snapshot leaves the partial raw file, never
+     *  an in-memory-only loss. */
+    private fun xdiagSnapshot(rootfs: File, deadlineNs: Long, diagDir: File, tag: String,
+                              pcman: Pair<Int, String>) {
+        val out = File(diagDir, "snapshot-" + tag + ".txt")
+        out.writer().use { w ->
+            fun emit(line: String) { w.write(line); w.flush() }
+            val cur = xdiagPcmanAnchor(rootfs, deadlineNs)
+            if (cur != pcman) {
+                emit("FAIL: pcmanfm identity changed " + pcman + " -> " + cur + "\n")
+                throw AssertionError("xdiag: pcmanfm identity changed " + pcman +
+                    " -> " + cur + " (post-anchor restart) - UNKNOWN")
+            }
+            emit("pcmanfm-anchor (first-snapshot identity, NOT launch-proof): pid=" +
+                pcman.first + " starttime=" + pcman.second + "\n")
+            val candRaw = xdiagGuest(rootfs, deadlineNs, "window search",
+                "xdotool", "search", "--class", "pcmanfm")
+            emit("-- raw candidate list --\n" + candRaw)
+            val candidates = candRaw.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+            var desktop: String? = null
+            val typeRx = Regex("(?m)^_NET_WM_WINDOW_TYPE\\(ATOM\\) = _NET_WM_WINDOW_TYPE_DESKTOP$")
+            val pidRx = Regex("(?m)^_NET_WM_PID\\(CARDINAL\\) = (\\d+)$")
+            val candidateFailures = mutableListOf<String>()
+            val desktops = mutableListOf<String>()
+            for (c in candidates) {
+                // Persist each candidate's raw evidence IMMEDIATELY as
+                // fetched; a failure on a later candidate or command can
+                // never take an earlier candidate's raw data with it.
+                val typePidClass = try {
+                    xdiagGuest(rootfs, deadlineNs, "window type/pid/class",
+                        "xprop", "-id", c, "_NET_WM_WINDOW_TYPE", "_NET_WM_PID", "WM_CLASS")
+                } catch (t: Throwable) {
+                    candidateFailures.add(c + " xprop: " + (t.message ?: "failed").take(200))
+                    emit("-- candidate " + c + " xprop FAILED --\n" + (t.message ?: "").take(300) + "\n")
+                    continue
+                }
+                emit("-- candidate " + c + " xprop --\n" + typePidClass)
+                val info = try {
+                    xdiagGuest(rootfs, deadlineNs, "window map state", "xwininfo", "-id", c)
+                } catch (t: Throwable) {
+                    candidateFailures.add(c + " xwininfo: " + (t.message ?: "failed").take(200))
+                    emit("-- candidate " + c + " xwininfo FAILED --\n" + (t.message ?: "").take(300) + "\n")
+                    continue
+                }
+                emit("-- candidate " + c + " xwininfo --\n" + info)
+                val matches = typeRx.containsMatchIn(typePidClass) &&
+                    pidRx.find(typePidClass)?.groupValues?.get(1) == pcman.first.toString() &&
+                    XdiagPolicy.wmClassIsPcmanfm(typePidClass) &&
+                    info.lineSequence().any { it.trim() == "Map State: IsViewable" }
+                if (matches) desktops.add(c)
+            }
+            // Qualify only AFTER every candidate's raw evidence (or its
+            // failure outcome) is persisted.
+            if (candidateFailures.isNotEmpty()) {
+                emit("FAIL: candidate collection incomplete: " + candidateFailures + "\n")
+                throw AssertionError("xdiag: window candidate collection incomplete " +
+                    candidateFailures + " - UNKNOWN (raw evidence preserved)")
+            }
+            if (desktops.size > 1) {
+                emit("FAIL: multiple DESKTOP windows of anchored pcmanfm: " + desktops + "\n")
+                throw AssertionError("xdiag: multiple DESKTOP windows of anchored pcmanfm " +
+                    pcman.first + " - UNKNOWN")
+            }
+            val d = desktops.firstOrNull() ?: run {
+                emit("FAIL: no unique DESKTOP window of anchored pcmanfm\n")
+                throw AssertionError("xdiag: no unique DESKTOP window of anchored pcmanfm " +
+                    pcman.first + " - UNKNOWN")
+            }
+            emit("desktop-window: " + d + "\n")
+            emit("-- WM_NORMAL_HINTS --\n" +
+                xdiagGuest(rootfs, deadlineNs, "desktop hints", "xprop", "-id", d, "WM_NORMAL_HINTS"))
+            val geo = xdiagGuest(rootfs, deadlineNs, "desktop geometry", "xwininfo", "-id", d)
+            emit("-- geometry --\n" + geo.lineSequence()
+                .filter { it.contains("Absolute") || it.contains("Width:") || it.contains("Height:") }
+                .joinToString("\n") + "\n")
+            emit("-- monitors --\n" +
+                xdiagGuest(rootfs, deadlineNs, "monitor list", "xrandr", "--listmonitors"))
+        }
+        Log.i(TAG, "xdiag: snapshot-" + tag + " captured (anchored, raw persisted incrementally)")
+    }
+
+    private fun xdiagVersions(rootfs: File, deadlineNs: Long, diagDir: File) {
+        val text = xdiagGuest(rootfs, deadlineNs, "guest dpkg versions",
+            "dpkg-query", "-W", "jwm", "pcmanfm", "libgtk-3-0", "libfm-gtk4", "libfm4", "librandr2", "libx11-6")
+        File(diagDir, "guest-dpkg-versions.txt").writeText(text)
+        Log.i(TAG, "xdiag: guest dpkg versions captured (rc checked)")
+    }
+
+    private fun xdiagProxyAlive(px: XdiagProxy): Boolean =
+        procStartTime(px.anchorPid) == px.anchorStart
+
+    /** Bounded trace read: text of the trace past byte offset [base],
+     *  capped at TRACE_READ_CAP bytes per call (RandomAccessFile seek,
+     *  never a whole-file read). A window larger than the cap is a hard
+     *  failure - the caller's assertion domain must stay bounded. */
+    private fun xdiagTraceWindow(trace: File, base: Long): String {
+        if (!trace.isFile) return ""
+        java.io.RandomAccessFile(trace, "r").use { raf ->
+            val len = raf.length()
+            if (len <= base) return ""
+            val n = len - base
+            if (n > XdiagPolicy.TRACE_READ_CAP) throw AssertionError(
+                "xdiag: trace window " + n + " bytes exceeds read cap - UNKNOWN (refusing unbounded read)")
+            val buf = ByteArray(n.toInt())
+            raf.seek(base); raf.readFully(buf)
+            return String(buf, Charsets.UTF_8)
+        }
+    }
+
+    /** Identified, non-mutating, CONNECTION-CORRELATED proxy smoke: our
+     *  own `xrandr -display :0 --listmonitors` opens a NEW client
+     *  connection through the proxy. The offset-anchored trace window
+     *  must show ONE connection id carrying the setup handshake, the
+     *  Success reply AND our GetMonitors request decode (same id), and
+     *  the proxy's stderr tail must gain a "Got connection from" line.
+     *  Connection discrimination (verified scope): the ready-gate's
+     *  `xset q` polls are NEW short-lived connections per poll
+     *  (reviewer-confirmed from xset source), so "gate polls are
+     *  long-lived earlier connections" is NOT assumed anywhere. xset q
+     *  issues no RANDR GetMonitors, so the same-id
+     *  setup+Success+GetMonitors correlation excludes those polls.
+     *  Remaining assumption, stated not hidden: no OTHER client issues
+     *  GetMonitors inside the smoke window; if one did, the correlation
+     *  still proves the fresh-client capture path but not WHICH client.
+     *  Line shapes grounded in the actual local xtrace logs (the
+     *  --timestamps flag was REMOVED after source review showed it
+     *  prepends epoch.ms before the connection id), not invented. */
+    private fun xdiagSmoke(rootfs: File, deadlineNs: Long, px: XdiagProxy) {
+        val trace = File(px.diagDir, "xtrace.log")
+        val base = if (trace.isFile) trace.length() else 0L
+        val tailBefore = px.gotCount.get() // monotonic drain counter, not a tail recount
+        val monitors = xdiagGuest(rootfs, deadlineNs, "smoke probe",
+            "xrandr", "-display", ":0", "--listmonitors")
+        if (!monitors.contains("Monitors:")) {
+            throw AssertionError("xdiag: smoke probe output unparsable - UNKNOWN\n" + monitors.take(400))
+        }
+        while (System.nanoTime() < deadlineNs) {
+            val window = xdiagTraceWindow(trace, base)
+            val correlated = XdiagPolicy.correlatedGetMonitorsConnections(window)
+            val tailAfter = px.gotCount.get()
+            if (correlated.isNotEmpty() && tailAfter > tailBefore) {
+                // Honest attribution: a FRESH GetMonitors-carrying
+                // connection appeared in our probe window with the probe
+                // round-trip verified. If the ready-gate opens fresh
+                // GetMonitors connections of its own, this proves the
+                // capture path for fresh client traffic, not which
+                // client - that is the intended proof strength.
+                Log.i(TAG, "xdiag: smoke PASSED - fresh connection " + correlated +
+                    " carries setup+reply+GetMonitors decode in the probe window" +
+                    " (fresh-client capture proof); tail connections " + tailBefore + "->" + tailAfter)
+                return
+            }
+            if (!xdiagProxyAlive(px)) throw AssertionError("xdiag: proxy died during smoke - UNKNOWN")
+            Thread.sleep(500)
+        }
+        throw AssertionError("xdiag: smoke FAILED - probe not correlated in the trace within budget" +
+            " (no single connection with setup+reply+GetMonitors); capture path unproven -" +
+            " existing artifacts are still exported best-effort and the diagnostic marked unusable")
+    }
+
+    /** Streaming trace census (bounded line scan, whole file is capped at
+     *  source by ulimit): records what the session ACTUALLY sent. Absence
+     *  is recorded as diagnostic data, NEVER treated as coverage. */
+    private fun xdiagTraceAnalysis(diagDir: File) {
+        val trace = File(diagDir, "xtrace.log")
+        var getMonitors = 0; var configure = 0; var conns = mutableSetOf<String>()
+        if (trace.isFile) {
+            trace.bufferedReader().use { r ->
+                r.forEachLine { line ->
+                    if (line.contains("GetMonitors")) getMonitors++
+                    if (line.contains("ConfigureWindow")) configure++
+                    val m = Regex("^([0-9]+):").find(line) // %03d is MINIMUM width
+                    if (m != null) conns.add(m.groupValues[1])
+                }
+            }
+        }
+        File(diagDir, "trace-analysis.txt").writeText(
+            "trace bytes: " + (if (trace.isFile) trace.length() else -1) + "\n" +
+            "GetMonitors requests+replies: " + getMonitors + "\n" +
+            "ConfigureWindow requests: " + configure + "\n" +
+            "distinct connection ids: " + conns.size + "\n" +
+            "NOTE: absence of an expected request is a FINDING about the session,\n" +
+            "not proof the capture covered it; only the smoke probe is a coverage proof.\n")
+    }
+
+    private fun xdiagCountGot(haystack: String): Int =
+        Regex("Got connection from").findAll(haystack).count()
+
+    /** Export with a HARD total byte cap, streamed (no whole-file
+     *  reads), planned by XdiagPolicy.exportPlan. FAILURE IS LOUD: a
+     *  missing dir, a copy error, a size mismatch, or an omitted file
+     *  throws - the caller treats any export failure as diagnostic
+     *  UNUSABLE (never "capture complete"). */
+    private fun xdiagExport(diagDir: File) {
+        val out = ctx.getExternalMediaDirs().firstOrNull()?.let { File(it, "additional_test_output") }
+            ?: throw AssertionError("xdiag: export FAILED - no external media dir; diagnostic unusable")
+        val dest = File(out, "xdiag")
+        if (!dest.isDirectory && !dest.mkdirs())
+            throw AssertionError("xdiag: export FAILED - cannot create " + dest.absolutePath + "; diagnostic unusable")
+        // Export existing evidence FIRST (an early failure must not
+        // suppress the partial trace that explains it); completeness is
+        // judged AFTER, against the required inventory.
+        val present = (diagDir.listFiles() ?: emptyArray()).filter { it.isFile }.map { it.name }.toSet()
+        val files = (diagDir.listFiles() ?: emptyArray()).filter { it.isFile }
+            .sortedBy { if (it.name == "xtrace.log") 1 else 0 }
+        var used = 0L
+        val problems = mutableListOf<String>()
+        for (f in files) {
+            val remaining = XdiagPolicy.EXPORT_CAP_BYTES - used
+            val marker = ("\n[... TRUNCATED by xdiag export cap ...]\n").toByteArray(Charsets.UTF_8)
+            try {
+                val target = File(dest, f.name)
+                val size = f.length()
+                when (val plan = XdiagPolicy.exportPlan(size, remaining, marker.size)) {
+                    is XdiagPolicy.ExportPlan.Full -> {
+                        // Bounded exact-size copy: never reads past the
+                        // size captured at plan time, so a still-growing
+                        // source can never push the write beyond budget;
+                        // growth is detected AFTER via re-stat.
+                        var n = 0L
+                        f.inputStream().use { i -> target.outputStream().use { o ->
+                            val buf = ByteArray(65536)
+                            while (n < size) {
+                                val r = i.read(buf, 0, minOf(buf.size.toLong(), size - n).toInt())
+                                if (r < 0) break
+                                o.write(buf, 0, r); n += r
+                            } } }
+                        if (n != size) throw AssertionError("short copy " + n + " != " + size)
+                        if (target.length() != size)
+                            throw AssertionError("exported size mismatch for " + f.name)
+                        if (f.length() != size)
+                            throw AssertionError("source " + f.name + " GREW during copy (" +
+                                size + " -> " + f.length() + ") - capture still live")
+                        used += size
+                    }
+                    is XdiagPolicy.ExportPlan.Truncated -> {
+                        if (plan.head == 0 && plan.tail == 0) {
+                            target.writeBytes(marker)
+                            used += marker.size
+                        } else {
+                            java.io.RandomAccessFile(f, "r").use { raf ->
+                                target.outputStream().use { o ->
+                                    val buf = ByteArray(plan.head); raf.readFully(buf); o.write(buf)
+                                    o.write(marker)
+                                    raf.seek(size - plan.tail)
+                                    val tb = ByteArray(plan.tail); raf.readFully(tb); o.write(tb)
+                                }
+                            }
+                            used += plan.head + plan.markerLen + plan.tail
+                        }
+                        Log.w(TAG, "xdiag: " + f.name + " truncated to export cap")
+                    }
+                    XdiagPolicy.ExportPlan.Omit ->
+                        throw AssertionError("no budget even for a marker (" + remaining + " bytes left)")
+                }
+            } catch (t: Throwable) {
+                // A partial failed file still OCCUPIED cap budget: count
+                // its written bytes before removing it so later files
+                // cannot overrun the disk total.
+                val target = File(dest, f.name)
+                if (target.isFile) { used += target.length(); target.delete() }
+                problems.add(f.name + ": " + (t.message ?: t.javaClass.simpleName))
+            }
+        }
+        val required = setOf("xtrace.log", "snapshot-ready.txt", "snapshot-settled.txt",
+            "guest-dpkg-versions.txt", "trace-analysis.txt", "observation-metadata.txt")
+        val missing = required - present
+        if (missing.isNotEmpty()) problems.add("required artifact(s) missing: " + missing)
+        if (problems.isNotEmpty()) {
+            throw AssertionError("xdiag: export INCOMPLETE (" + problems.joinToString("; ") +
+                ") - diagnostic UNUSABLE; existing evidence preserved at " + dest.absolutePath)
+        }
+        Log.i(TAG, "xdiag: artifacts exported and verified at additional_test_output/xdiag (" +
+            used + " bytes, cap " + XdiagPolicy.EXPORT_CAP_BYTES + ")")
+    }
+
+    @Test
+    fun mobileEntryXdiagCapture() {
+        // setUp already early-skips when ldoa_xdiag != "true"; this
+        // in-method assume is belt-and-braces for direct method runs.
+        org.junit.Assume.assumeTrue(
+            "xdiag capture is dispatch-gated (ldoa_xdiag=true) - skipped in normal runs",
+            InstrumentationRegistry.getArguments().getString("ldoa_xdiag") == "true")
+        // Bounded-phase contract: a monotonic overall budget, with each
+        // phase capped by an explicit cap or the remaining budget; the
+        // observation phase can never silently become zero (UNKNOWN) or
+        // unlabelled-short (durable INCOMPLETE metadata). The in-guest
+        // proxy lifetime covers the budget plus the fixed cleanup margin
+        // - asserted, so no silent longer helper run.
+        val totalMs = XdiagPolicy.totalBudgetMs(START_BUDGET_MS)
+        val lifetimeSec = XdiagPolicy.proxyLifetimeSec(totalMs)
+        check(lifetimeSec * 1000L <= totalMs + XdiagPolicy.CLEANUP_MARGIN_MS + 1000L) {
+            "xdiag: proxy lifetime exceeds budget+cleanup margin - incoherent budgets" }
+        val deadlineNs = System.nanoTime() + totalMs * 1_000_000L
+        // Collision pre-flight: no leftover X sockets from any earlier
+        // attempt (socket/lock names grounded in E1PresentationBridgeTest's
+        // socketDir scan); then arm the token-bound display reservation.
+        val sockDir = XServer.socketDir(ctx)
+        for (n in listOf("X0", "X0-lock", "X10", "X10-lock")) {
+            check(!File(sockDir, n).exists()) { "xdiag: stale socket " + n + " present before start - refusing" }
+        }
+        check(XServer.displaySeamReservationForTest() == null) {
+            "xdiag: display seam already reserved - refusing a concurrent diagnostic attempt" }
+        var token = 0L
+        val prefs = ctx.getSharedPreferences("plinux_desktop", Context.MODE_PRIVATE)
+        val rootfs = DistroInstaller(ctx).rootfsDir(Distros.UBUNTU)
+        var diagDir: File? = null
+        var proxy: XdiagProxy? = null
+        var primary: Throwable? = null
+        try {
+            if (deadlineNs - System.nanoTime() <= 0L) throw AssertionError(
+                "xdiag: overall budget EXHAUSTED before staging - UNKNOWN")
+            val staged = xdiagStage(); diagDir = staged
+            proxy = xdiagProxyStart(rootfs, staged, lifetimeSec, deadlineNs)
+            val px = proxy!!
+            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+                device.removeWatcher("phonelinux-anr")
+                // EXCLUSIVE diagnostic launch: the reservation is armed and
+                // OUR identified start initiated in one atomic lock hold;
+                // any other caller is refused while armed, and the consumer
+                // must present OUR token. No UI picker/consent path - those
+                // are normal callers and would (correctly) be refused.
+                scenario.onActivity { a ->
+                    token = XServer.startDiagnosticSessionForTest(":10", a, Distros.UBUNTU,
+                        mode = XServer.DesktopMode.MOBILE)
+                }
+                var live = false
+                while (System.nanoTime() < deadlineNs) {
+                    if (!xdiagProxyAlive(px)) throw AssertionError(
+                        "xdiag: proxy died during session startup - UNKNOWN (dead capture path)")
+                    val proc = XServer.sessionProcess
+                    if (proc != null && proc.isAlive && prefs.getBoolean("mobile_desktop_active", false)) { live = true; break }
+                    Thread.sleep(500)
+                }
+                if (!live) {
+                    captureFailureEvidence("xdiag-liveness")
+                    org.junit.Assert.fail("xdiag: session did not reach liveness within budget - capture aborted (diagnostic, no render claim)")
+                }
+                // Seam attribution: OUR token must be the one start()
+                // consumed - otherwise the server is NOT provably on :10.
+                // Live ownership, not token equality alone: the seam must
+                // be attributed to OUR still-current start attempt with a
+                // live server - an unintended earlier consumer or an
+                // intervening start makes this false.
+                if (!XServer.displaySeamOwnedByForTest(token)) {
+                    org.junit.Assert.fail("xdiag: display seam not owned by our live attempt" +
+                        " (token attribution failed) - server display unproven, capture aborted")
+                }
+                // Identified, connection-correlated, non-mutating probe
+                // through the proxy BEFORE any artifact is trusted.
+                xdiagSmoke(rootfs, deadlineNs, px)
+                val pcman = xdiagPcmanAnchor(rootfs, deadlineNs)
+                xdiagSnapshot(rootfs, deadlineNs, staged, "ready", pcman)
+                // Bounded observation window over the resize cascade (CI
+                // evidence: clients then first resize ~8s, cascade < 2s) -
+                // MONOTONIC end time, chunked to catch proxy death.
+                // Clamped to the overall deadline minus the post-observe
+                // reserve (settled snapshot + versions + analysis, each
+                // command-budgeted) - observe can never starve teardown.
+                // Bounded-phase contract (NOT an absolute deadline
+                // claim): each phase has an explicit cap; if the reserve
+                // was already consumed, the observation must NOT silently
+                // become zero - that is UNKNOWN. A shortened window is
+                // labeled INCOMPLETE in the log, never passed as full.
+                val postReserveNs = (4 * XdiagPolicy.COMMAND_BUDGET_MS + 30_000L) * 1_000_000L
+                val observeEndNs = minOf(System.nanoTime() + XdiagPolicy.OBSERVE_MS * 1_000_000L,
+                    deadlineNs - postReserveNs)
+                val observeLeftMs = (observeEndNs - System.nanoTime()) / 1_000_000L
+                if (observeLeftMs < 5_000L) throw AssertionError(
+                    "xdiag: no observation budget left (" + observeLeftMs + "ms < 5000ms)" +
+                    " after the post-reserve - UNKNOWN, refusing a zero-length observation")
+                val observeStartNs = System.nanoTime()
+                while (System.nanoTime() < observeEndNs) {
+                    if (!xdiagProxyAlive(px)) throw AssertionError(
+                        "xdiag: proxy died during the observe window - UNKNOWN (dead capture path)")
+                    Thread.sleep(1_000)
+                }
+                // Durable observation metadata (not log-only): intended
+                // window, the budget actually available at loop start,
+                // the actual elapsed, and a completeness verdict with a
+                // clear 2s scheduling tolerance. A shortened-but-honest
+                // window is COMPLETE against its budget; anything short
+                // of the budget beyond the tolerance is INCOMPLETE.
+                val actualMs = (System.nanoTime() - observeStartNs) / 1_000_000L
+                // Two DISTINCT facts: did we complete the budgeted
+                // interval, and did we achieve the full intended window.
+                val budgetComplete = actualMs + 2_000L >= observeLeftMs
+                val intendedComplete = actualMs + 2_000L >= XdiagPolicy.OBSERVE_MS
+                val shortenedReason = if (observeLeftMs < XdiagPolicy.OBSERVE_MS)
+                    "overall-budget reserve" else "none"
+                File(staged, "observation-metadata.txt").writeText(
+                    "intended_window_ms: " + XdiagPolicy.OBSERVE_MS + "\n" +
+                    "budgeted_window_ms: " + observeLeftMs + "\n" +
+                    "actual_elapsed_ms: " + actualMs + "\n" +
+                    "tolerance_ms: 2000\n" +
+                    "budget_complete: " + budgetComplete + "\n" +
+                    "intended_complete: " + intendedComplete + "\n" +
+                    "shortened_reason: " + shortenedReason + "\n")
+                if (!budgetComplete) Log.w(TAG, "xdiag: observation fell short of its BUDGETED window" +
+                    " - actual " + actualMs + "ms vs budgeted " + observeLeftMs + "ms")
+                if (!intendedComplete) Log.w(TAG, "xdiag: observation shortened vs intended " +
+                    XdiagPolicy.OBSERVE_MS + "ms (reason: " + shortenedReason + ")")
+                xdiagSnapshot(rootfs, deadlineNs, staged, "settled", pcman)
+                xdiagVersions(rootfs, deadlineNs, staged)
+                xdiagTraceAnalysis(staged)
+                // Final identity recheck AFTER all captures: the anchored
+                // pcmanfm and the proxy must still be the same processes.
+                if (xdiagPcmanAnchor(rootfs, deadlineNs) != pcman) throw AssertionError(
+                    "xdiag: pcmanfm identity changed before final recheck - UNKNOWN")
+                if (!xdiagProxyAlive(px)) throw AssertionError(
+                    "xdiag: proxy identity changed before final recheck - UNKNOWN")
+            }
+        } catch (t: Throwable) { primary = t }
+        // Cleanup, ALWAYS in order: stop proxy (proves tree gone, removes
+        // its stale socket under our token) -> export (never skipped by a
+        // stop failure) -> release the reservation.
+        var cleanup: Throwable? = null
+        try { proxy?.let { xdiagProxyStop(it, token) } } catch (t: Throwable) { cleanup = t }
+        // Export FAILURE = diagnostic unusable: xdiagExport throws and
+        // the failure lands in cleanup even when stop already failed.
+        try { diagDir?.let { xdiagExport(it) } } catch (t: Throwable) { if (cleanup == null) cleanup = t }
+        try { XServer.releaseServerDisplayForTest(token) } catch (t: Throwable) { if (cleanup == null) cleanup = t }
+        val p = primary; val c = cleanup
+        when {
+            p != null && c != null -> { p.addSuppressed(c); throw p }
+            p != null -> throw p
+            c != null -> throw AssertionError("xdiag: cleanup failed", c)
+        }
+        Log.i(TAG, "xdiag: capture complete with VERIFIED export - DIAGNOSTIC ONLY:" +
+            " no settle assertions, no render-PASS claim")
+    }
+
 
     @Test
     fun mobileEntryLifecycle() {

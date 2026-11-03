@@ -1,0 +1,1398 @@
+EXTENSION "XInputExtension" XInput
+USE core
+
+TYPE FP1616 FIXED
+TYPE FP3232 FIXED3232
+
+#define ra(a) { #a , parameterXInput ## a , NULL,NULL,NULL}
+#define rb(a) { #a , parameterXInput ## a , returnXInput ## a ,NULL,NULL}
+REQUESTS
+UNKNOWN /* 0 */
+GetExtensionVersion RESPONDS /* 1 */
+ListInputDevices RESPONDS /* 2 */
+OpenDevice RESPONDS /* 3 */
+CloseDevice /* 4 */
+SetDeviceMode RESPONDS /* 5 */
+SelectExtensionEvent /* 6 */
+GetSelectedExtensionEvents RESPONDS /* 7 */
+ChangeDeviceDontPropagateList /* 8 */
+GetDeviceDontPropagateList RESPONDS /* 9 */
+GetDeviceMotionEvents RESPONDS /* 10 */
+ChangeKeyboardDevice RESPONDS /* 11 */
+ChangePointerDevice RESPONDS /* 12 */
+GrabDevice RESPONDS /* 13 */
+UngrabDevice /* 14 */
+GrabDeviceKey /* 15 */
+UngrabDeviceKey /* 16 */
+GrabDeviceButton /* 17 */
+UngrabDeviceButton /* 18 */
+AllowDeviceEvents /* 19 */
+GetDeviceFocus RESPONDS /* 20 */
+SetDeviceFocus /* 21 */
+GetFeedbackControl RESPONDS /* 22 */
+ChangeFeedbackControl /* 23 */
+GetDeviceKeyMapping RESPONDS /* 24 */
+ChangeDeviceKeyMapping /* 25 */
+GetDeviceModifierMapping RESPONDS /* 26 */
+SetDeviceModifierMapping RESPONDS /* 27 */
+GetDeviceButtonMapping RESPONDS /* 28 */
+SetDeviceButtonMapping RESPONDS /* 29 */
+QueryDeviceState RESPONDS /* 30 */
+SendExtensionEvent /* 31 */
+DeviceBell /* 32 */
+SetDeviceValuators RESPONDS /* 33 */
+GetDeviceControl RESPONDS /* 34 */
+ChangeDeviceControl RESPONDS /* 35 */
+# XI 1.5
+ListDeviceProperties RESPONDS /* 36 */
+ChangeDeviceProperty /* 37 */
+DeleteDeviceProperty /* 38 */
+GetDeviceProperty RESPONDS /* 39 */
+
+# XI 2
+XIQueryPointer RESPONDS /* 40 */
+XIWarpPointer /* 41 */
+XIChangeCursor /* 42 */
+XIChangeHierarchy /* 43 */
+XISetClientPointer /* 44 */
+XIGetClientPointer RESPONDS /* 45 */
+XISelectEvents /* 46 */
+XIQueryVersion RESPONDS /* 47 */
+XIQueryDevice RESPONDS /* 48 */
+XISetFocus /* 49 */
+XIGetFocus RESPONDS /* 50 */
+XIGrabDevice /* 51 */
+XIUngrabDevice UNSUPPORTED /* 52 */
+XIAllowEvents UNSUPPORTED /* 53 */
+XIPassiveGrabDevice UNSUPPORTED RESPONDS /* 54 */
+XIPassiveUngrabDevice UNSUPPORTED /* 55 */
+XIListProperties RESPONDS /* 56 */
+XIChangeProperty /* 57 */
+XIDeleteProperty /* 58 */
+XIGetProperty RESPONDS /* 59 */
+XIGetSelectedEvents UNSUPPORTED /* 60 */
+END
+
+EVENTS
+DeviceValuator
+DeviceKeyPress
+DeviceKeyRelease
+DeviceButtonPress
+DeviceButtonRelease
+DeviceMotionNotify
+DeviceFocusIn
+DeviceFocusOut
+ProximityIn
+ProximityOut
+DeviceStateNotify
+DeviceMappingNotify
+ChangeDeviceNotify
+DeviceKeystateNotify
+DeviceButtonstateNotify
+DevicePresenceNotify
+DevicePropertyNotify
+END
+
+ERRORS
+BadDevice
+BadEvent
+BadMode
+DeviceBusy
+BadClass
+END
+
+XGEVENTS
+UNKNOWN
+DeviceChanged		/* 1 */ UNSUPPORTED
+KeyPress		/* 2 */
+KeyRelease		/* 3 */
+ButtonPress		/* 4 */
+ButtonRelease		/* 5 */
+Motion			/* 6 */
+Enter			/* 7 */
+Leave			/* 8 */
+FocusIn			/* 9 */
+FocusOut		/* 10 */
+HierarchyChanged	/* 11 */ UNSUPPORTED
+PropertyEvent		/* 12 */ UNSUPPORTED
+RawKeyPress		/* 13 */ UNSUPPORTED
+RawKeyRelease		/* 14 */ UNSUPPORTED
+RawButtonPress		/* 15 */ UNSUPPORTED
+RawButtonRelease	/* 16 */ UNSUPPORTED
+RawMotion		/* 17 */ UNSUPPORTED
+TouchBegin              /* 18 */
+TouchUpdate             /* 19 */
+TouchEnd                /* 20 */
+TouchOwnership          /* 21 */ UNSUPPORTED
+RawTouchBegin           /* 22 */ UNSUPPORTED
+RawTouchUpdate          /* 23 */ UNSUPPORTED
+RawTouchEnd             /* 24 */ UNSUPPORTED
+BarrierHit              /* 25 */ UNSUPPORTED
+BarrierLeave            /* 26 */ UNSUPPORTED
+END
+
+CONSTANTS device_change
+0	Added
+1	Removed
+2	Enabled
+3	Disabled
+4	Unrecoverable
+END
+
+CONSTANTS syncmode
+0	AsyncThisDevice
+1	SyncThisDevice
+2	ReplayThisDevice
+3	AsyncOtherDevice
+4	AsyncAll
+5	SyncAll
+END
+
+CONSTANTS device_use
+0	Pointer
+1	Keyboard
+2	ExtensionDevice
+3	ExtensionKeyboard
+4	ExtensionPointer
+END
+
+CONSTANTS notify_mode
+0	Normal
+1	Grab
+2	Ungrab
+3	WhileGrabbed
+4	PassiveGrab
+5	PassiveUngrab
+END
+
+CONSTANTS notify_detail
+0	Ancestor
+1	Virtual
+2	Inferior
+3	Nonlinear
+4	NonlinearVirtual
+5	Pointer
+6	PointerRoot
+7	DetailNone
+END
+
+CONSTANTS usexkeyboard
+0xFF	UseXKeyboard
+END
+
+CONSTANTS anykey
+0x00	AnyKey
+END
+
+CONSTANTS anybutton
+0x00	AnyButton
+END
+
+# there is only one set of constants in the header files for this,
+# so I assume this are the correct values and what is described for most
+# other status values in the XIproto.ps is just bogus
+CONSTANTS device_status
+0	Success
+1	AlreadyGrabbed
+2	InvalidTime
+3	NotViewable
+4	Frozen
+END
+
+CONSTANTS input_class_id
+0	key
+1	button
+2	valuator
+3	feedback
+4	proximity
+5	focus
+6	other
+END
+
+CONSTANTS device_mode
+0	relative
+1	absolute
+END
+
+CONSTANTS device_mode_and_prox
+0	"relative, in proximity"
+1	"absolute, in proximity"
+2	"relative, out of proximity"
+3	"absolute, out of proximity"
+END
+
+BITMASK classes_reported
+0x01	"reporting keys"
+0x02	"reporting buttons"
+0x04	"reporting valuators"
+0x40	absolute
+0x80	"out of proximity"
+END
+
+CONSTANTS feedback_class
+0	Kbd
+1	Ptr
+2	String
+3	Integer
+4	Led
+5	Bell
+END
+
+CONSTANTS auto_repeat_mode
+0	Off
+1	On
+2	Default
+END
+
+BITMASK dv_pointer
+1<<0	AccelNum
+1<<1	AccelDenom
+1<<2	Threshold
+END
+
+BITMASK dv_keyboardbellled
+1<<0	KeyClickPercent
+1<<1	Percent
+1<<2	Pitch
+1<<3	Duration
+1<<4	Led
+1<<5	LedMode
+1<<6	Key
+1<<7	AutoRepeatMode
+END
+BITMASK dv_string
+1<<0	String
+END
+BITMASK dv_integer
+1<<0	Integer
+END
+
+CONSTANTS devicecontroltype
+0	Resolution?
+1	RESOLUTION
+2	ABS_CALIB
+3	CORE
+4	ENABLE
+5	ABS_AREA
+END
+
+CONSTANTS changereason
+1	SlaveSwitch
+2	DeviceChange
+END
+TYPE CHANGEREASON ENUM8 changereason
+
+REQUEST GetExtensionVersion
+ 4	len	COUNT16
+ 8	name	STRING8
+END
+
+RESPONSE GetExtensionVersion
+ 8	major_version	UINT16
+10	minor_version	UINT16
+12	present	BOOL
+END
+
+REQUEST ListInputDevices ALIASES Empty
+
+LIST AXISINFO length 12
+0	resolution	UINT32
+4	min	UINT32
+8	max	UINT32
+END
+
+# /* that's what xspecs says it would like:
+# LIST INPUTINFO variable length 4
+# //	{	0,	"class id",	ft_ENUM8,	c_class_id},
+# 	{	0,	"\0",	ft_IF8,	(void*)structpartKEYINFO},
+# 	{	0,	"\1",	ft_IF8,	(void*)structpartBUTTONINFO},
+# 	{	0,	"\2",	ft_IF8,	(void*)structpartVALUATORINFO},
+# 1	len	COUNT8
+# 0	unsupported	LISTofCARD8
+# END
+#
+# LIST DEVICEINFO length 8
+# 0	type	CARD32
+# 4	id	CARD8
+# 6	use	ENUM8 device_use
+# 5	"#classes"	COUNT8
+# 8	classes	LISTofINPUTINFO
+# LATER	name	LISTofSTRING8
+# END
+#
+# RESPONSE ListInputDevices
+#  8	#devices	COUNT8
+# 32	devices	LISTofDEVICEINFO
+# END
+#
+# but the implementation in reality it is totally different:
+#
+# first come all the device structs, then all the INPUTINFO structs,
+# then all the names. To know how many INPUTINFO structs there are,
+# one would need to sum the numbers from the devices, which we cannot
+# do yet. So we assume that none will have a name with at most 2 characters:
+
+LIST INPUTINFO variable min-length 4
+IF 0 CARD8 0
+ 2	"min keycode"	CARD8
+ 3	"max keycode"	CARD8
+ 4	"#keys"	UINT16
+ NEXT 8
+ELSEIF 0 CARD8 1
+ 2	"#buttons"	CARD16
+ NEXT 4
+ELSEIF 0 CARD8 2
+ 2	"#axes"	CARD16
+ 3	mode	ENUM8 device_mode
+ 4	"motion buffer size"	UINT32
+ 2	"#axes"	COUNT16
+ 8	axes	LISTofAXISINFO
+ELSE
+# otherwise we assume that it is time for the strings
+0	len	COUNT8
+1	name	STRING8
+END
+
+LIST DEVICEINFO length 8
+0	type	CARD32
+4	id	CARD8
+5	"#classes"	UINT8
+6	use	ENUM8 device_use
+END
+
+RESPONSE ListInputDevices
+ 8	"#devices"	COUNT8
+32	devices	LISTofDEVICEINFO
+RESET_COUNTER
+LATER	infos	LISTofINPUTINFO
+END
+
+# The rest I had no program to test with. Judging from the problems
+# above, that might mean the actual code is totally different, too
+
+templateREQUEST Device
+ 4	device	CARD8
+END
+REQUEST OpenDevice ALIASES Device
+
+LIST INPUTCLASSINFO length 2
+0	class	ENUM8 input_class_id
+1	"event type base"	CARD8
+END
+RESPONSE OpenDevice
+ 8	"#classes"	COUNT8
+32	classes	LISTofINPUTCLASSINFO
+END
+
+REQUEST CloseDevice ALIASES Device
+
+REQUEST SetDeviceMode
+ 4	device	CARD8
+ 5	mode	ENUM8 device_mode
+END
+
+templateRESPONSE Status
+ 8	status	CARD8 constants device_status
+END
+RESPONSE SetDeviceMode ALIASES Status
+
+TYPE LISTofEVENTCLASS LISTofCARD32
+
+REQUEST SelectExtensionEvent
+ 4	window	WINDOW
+ 8	count	UINT16
+12	"desired events"	LISTofEVENTCLASS
+END
+
+REQUEST GetSelectedExtensionEvents
+ 4	window	WINDOW
+END
+RESPONSE GetSelectedExtensionEvents
+ 8	"#this client"	COUNT16
+32	"this client"	LISTofEVENTCLASS
+10	"#all clients"	COUNT16
+LATER	"all clients"	LISTofEVENTCLASS
+END
+
+REQUEST ChangeDeviceDontPropagateList
+ 4	window	WINDOW
+ 8	count	COUNT16
+10	mode	ENUM8 device_mode
+12	"desired events"	LISTofEVENTCLASS
+END
+
+REQUEST GetDeviceDontPropagateList ALIASES GetSelectedExtensionEvents
+
+RESPONSE GetDeviceDontPropagateList
+ 8	count	COUNT16
+32	list	LISTofEVENTCLASS
+END
+
+REQUEST GetDeviceMotionEvents
+ 4	start-time	TIMESTAMP constants curtime
+ 8	stop-time	TIMESTAMP constants curtime
+10	device	CARD8
+END
+
+LIST DEVICETIMECOORD variable min-length 4
+ 0	time	TIMESTAMP
+GET  0
+# TODO huch?
+ 0	valuators	LISTofUINT32
+END
+
+RESPONSE GetDeviceMotionEvents
+ 8	"#events"	UINT32
+12	axes	UINT8
+12	axes	PUSH8
+13	mode	ENUM8 device_mode
+32	events	LISTofDEVICETIMECOORD
+END
+
+REQUEST ChangeKeyboardDevice ALIASES Device
+RESPONSE ChangeKeyboardDevice ALIASES Status
+
+REQUEST ChangePointerDevice
+ 4	xaxis	CARD8
+ 5	yaxis	CARD8
+ 6	device	CARD8
+END
+RESPONSE ChangePointerDevice ALIASES Status
+
+REQUEST GrabDevice
+ 4	window	WINDOW
+ 8	time	TIMESTAMP constants curtime
+12	"#event"	COUNT16
+14	this-device-mode	ENUM8 synmode
+15	other-device-mode	ENUM8 synmode
+16	owner-events	BOOL
+17	device	CARD8
+20	events	LISTofEVENTCLASS
+END
+RESPONSE GrabDevice ALIASES Status
+
+REQUEST UngrabDevice
+ 4	time	TIMESTAMP constants curtime
+ 8	device	CARD8
+END
+
+REQUEST GrabDeviceKey
+ 4	window	WINDOW
+ 8	"#event"	COUNT16
+10	modifiers	SETofKEYMASK
+12	modifier_device	CARD8 constants usexkeyboard
+13	grabbed_device	CARD8
+14	key	CARD8 constants anykey
+15	this-device-mode	ENUM8 synmode
+16	other-device-mode	ENUM8 synmode
+17	owner-events	BOOL
+20	events	LISTofEVENTCLASS
+END
+
+REQUEST UngrabDeviceKey
+ 4	window	WINDOW
+ 8	modifiers	SETofKEYMASK
+10	modifier_device	CARD8 constants usexkeyboard
+11	key	CARD8 constants anykey
+12	grabbed_device	CARD8
+END
+
+
+REQUEST GrabDeviceButton
+ 4	window	WINDOW
+ 8	grabbed_device	CARD8
+ 9	modifier_device	CARD8 constants usexkeyboard
+10	"#event"	COUNT16
+12	modifiers	SETofKEYMASK
+14	this-device-mode	ENUM8 synmode
+15	other-device-mode	ENUM8 synmode
+16	button	UINT8 constants anybutton
+17	owner-events	BOOL
+20	events	LISTofEVENTCLASS
+END
+
+REQUEST UngrabDeviceButton
+ 4	window	WINDOW
+ 8	modifiers	SETofKEYMASK
+10	modifier_device	CARD8 constants usexkeyboard
+11	button	UINT8 constants anybutton
+12	grabbed_device	CARD8
+END
+
+REQUEST AllowDeviceEvents
+ 4	time	TIMESTAMP constants curtime
+ 8	mode	ENUM8 syncmode
+ 9	device	CARD8
+END
+
+REQUEST GetDeviceFocus ALIASES Device
+RESPONSE GetDeviceFocus
+ 8	focus	WINDOW constants revertto
+12	time	TIMESTAMP
+16	revert-to	ENUM8 revertto
+END
+
+REQUEST SetDeviceFocus
+ 4	focus	WINDOW constants revertto
+ 8	time	TIMESTAMP
+12	revert-to	ENUM8 revertto
+13	device	CARD8
+END
+
+LIST FEEDBACKSTATE variable min-length 4
+# XIproto.ps has strange values here, XI.h looks more reasonable:
+ 0	"feedback class"	ENUM8 feedback_class
+ 1	id	CARD8
+IF 0 CARD8 $feedback_class:Kbd
+ 4	pitch	UINT16
+ 6	duration	UINT16
+ 8	led_mask	CARD32
+12	led_values	CARD32
+16	global-auto-repeat	BOOL
+17	click	UINT8
+18	percent	UINT8
+SET_COUNTER 32
+20	auto-repeats	LISTofCARD8
+ELSEIF 0 CARD8 $feedback_class:Ptr
+# PTR
+ 6	acceleration	FRACTION16_16
+10	treshold	UINT16
+NEXT	12
+ELSEIF 0 CARD8 $feedback_class:String
+ 4	"max symbols"	UINT16
+ 6	"#keysyms"	COUNT16
+ 8	keysyms	LISTofKEYSYM
+ELSEIF 0 CARD8 $feedback_class:Integer
+ 4	resolution	UINT32
+ 8	min	INT32
+12	max	INT32
+NEXT 16
+ELSEIF 0 CARD8 $feedback_class:Led
+ 4	mask	CARD32
+ 8	values	CARD32
+NEXT 12
+ELSEIF 0 CARD8 $feedback_class:Bell
+ 4	percent	UINT8
+ 8	pitch	UINT16
+10	duration	UINT16
+NEXT 12
+ELSE
+# fallback in case of unsupported:
+ 2	length	COUNT16
+ 0	unsupported	LISTofCARD8
+END
+
+REQUEST GetFeedbackControl ALIASES Device
+RESPONSE GetFeedbackControl
+ 8	"#feedbacks"	COUNT16
+32	feedbacks	LISTofFEEDBACKSTATE
+END
+
+REQUEST ChangeFeedbackControl
+ 8	device	CARD8
+ 9	"feedback id"	CARD8
+12	"feedback class"	ENUM8 feedback_class
+13	"feedback id"	CARD8
+IF 12 CARD8 $feedback_class:Kbd
+ 4	mask	BITMASK32 dv_keyboardbellled
+16	key	CARD8
+17	auto-repeat	ENUM8 auto_repeat_mode
+18	click-percent	UINT8
+19	bell-percent	UINT8
+20	bell-pitch	UINT16
+22	bell-duration	UINT16
+24	led_mask	CARD32
+28	led_values	CARD32
+ELSEIF 12 CARD8 $feedback_class:Ptr
+ 4	mask	BITMASK32 dv_pointer
+18	acceleration	FRACTION16_16
+22	treshold	UINT16
+ELSEIF 12 CARD8 $feedback_class:String
+ 4	mask	BITMASK32 dv_string
+18	"#keysyms"	COUNT16
+20	keysyms	LISTofCARD32
+ELSEIF 12 CARD8 $feedback_class:Integer
+ 4	mask	BITMASK32 dv_integer
+16	integer	INT32
+ELSEIF 12 CARD8 $feedback_class:Led
+ 4	mask	BITMASK32 dv_keyboardbellled
+16	led_mask	CARD32
+20	led_values	CARD32
+ELSEIF 12 CARD8 $feedback_class:Bell
+ 4	mask	BITMASK32 dv_keyboardbellled
+16	percent	UINT8
+20	pitch	INT16
+22	duration	INT16
+ELSE
+14	length	COUNT16
+12	unsupported	LISTofCARD8
+END
+
+REQUEST GetDeviceKeyMapping
+ 4	device	CARD8
+ 5	firstKeyCode	CARD8
+ 6	count	UINT8
+END
+RESPONSE GetDeviceKeyMapping
+ 8	keysSyms/keyCode	UINT8
+32	keysyms	LISTofCARD32
+END
+
+REQUEST ChangeDeviceKeyMapping
+ 4	device	CARD8
+ 5	firstKeyCode	CARD8
+ 6	"#keycodes"	UINT8
+ 7	"#keySyms/keyCode"	UINT8
+ 8	keysyms	LISTofCARD32
+END
+
+REQUEST GetDeviceModifierMapping ALIASES Device
+RESPONSE GetDeviceModifierMapping
+ 8	keycodes/modifier	UINT8
+32	keycodes	LISTofCARD8
+END
+
+REQUEST SetDeviceModifierMapping
+ 4	device	CARD8
+ 5	keycodes/modifier	UINT8
+ 8	keycodes	LISTofCARD8
+END
+RESPONSE SetDeviceModifierMapping ALIASES Status
+
+REQUEST GetDeviceButtonMapping ALIASES Device
+RESPONSE GetDeviceButtonMapping
+ 8	l(map)	COUNT8
+32	map	LISTofCARD8
+END
+
+REQUEST SetDeviceButtonMapping
+ 4	device	CARD8
+ 5	l(map)	COUNT8
+ 8	map	LISTofCARD8
+END
+RESPONSE SetDeviceButtonMapping ALIASES Status
+
+
+LIST INPUTSTATE variable min-length 2
+ 0	class	ENUM8 input_class_id
+IF 0 CARD8 $input_class_id:key
+ 2	"#keys"	UINT8
+SET_COUNTER	32
+ 4	"key states"	LISTofCARD8
+ELSEIF 0 CARD8 $input_class_id:button
+ 2	"#buttons"	UINT8
+SET_COUNTER	32
+ 4	"button states"	LISTofCARD8
+ELSEIF 0 CARD8 $input_class_id:valuator
+ 2	"#valuators"	COUNT8
+ 3	mode	ENUM8 device_mode_and_prox
+ 4	"valuator states"	LISTofCARD32
+ELSE
+ 1	length	COUNT8
+ 0	unsupported	LISTofCARD8
+END
+
+REQUEST QueryDeviceState ALIASES Device
+RESPONSE QueryDeviceState
+ 8	"#classes"	COUNT8
+32	classes	LISTofINPUTSTATE
+END
+
+LIST XiEVENT length 32
+ 0	event	EVENT
+END
+REQUEST SendExtensionEvent
+ 4	destinatione	WINDOW
+ 8	device	CARD8
+ 9	propagate	BOOL
+12	"#events"	COUNT8
+16	events	LISTofXiEVENT
+10	"#event classes"	COUNT16
+LATER	"desired events"	LISTofEVENTCLASS
+END
+
+REQUEST DeviceBell
+ 4	device	CARD8
+ 5	"feedback id"	CARD8
+ 6	"feedback class"	ENUM8 feedback_class
+ 7	percent	INT8
+END
+
+REQUEST SetDeviceValuators
+ 4	device	CARD8
+ 5	"first valuator"	UINT8
+ 6	"#valuators"	COUNT8
+ 8	valuators	LISTofUINT32
+END
+RESPONSE SetDeviceValuators ALIASES Status
+
+LIST DEVICESTATE variable min-length 4
+# this is supposed to be the length, but at least in
+# lenny the xserver is still buggy and returns bogus values:
+ 2	"length (often faulty)"	UINT16
+# Xspecs says 0, DEVICE_RESOLUTION is 1...
+IF 0 CARD16 0
+# RESOLUTIONSTATE
+ 4	"#valuators"	COUNT32
+ 8	values	LISTofUINT32
+ 4	"#valuators"	COUNT32
+LATER	min_values	LISTofUINT32
+ 4	"#valuators"	COUNT32
+LATER	max_values	LISTofUINT32
+ELSEIF 0 CARD16 1
+# RESOLUTIONSTATE
+ 4	"#valuators"	COUNT32
+ 8	values	LISTofUINT32
+ 4	"#valuators"	COUNT32
+LATER	min_values	LISTofUINT32
+ 4	"#valuators"	COUNT32
+LATER	max_values	LISTofUINT32
+ELSEIF 0 CARD16 2
+# ABSCALIBSTATE
+ 4	min_x	UINT32
+ 8	max_x	UINT32
+12	min_y	UINT32
+16	max_y	UINT32
+20	flip_x	UINT32
+24	flip_y	UINT32
+28	rotation	UINT32
+32	button_threshold	UINT32
+NEXT	36
+ELSEIF 0 CARD16 3
+# CORESTATE
+ 4	status	CARD8
+ 5	iscore	BOOL
+NEXT 8
+ELSEIF 0 CARD16 4
+# ENABLESTATE
+ 4	enable	CARD8
+NEXT 8
+ELSEIF 0 CARD16 5
+# ABSAREASTATE
+ 4	offset_x	UINT32
+ 8	offset_y	UINT32
+12	width	UINT32
+16	height	UINT32
+20	screen	CARD32
+24	following	CARD32
+NEXT	28
+ELSE
+ 2	length	COUNT16
+ 0	unsupported	LISTofCARD8
+END
+REQUEST GetDeviceControl
+ 6	device	CARD8
+ 4	"device control type"	ENUM16 devicecontroltype
+END
+RESPONSE GetDeviceControl
+ 8	status	CARD8 constants device_status
+32	states	LISTofDEVICESTATE
+END
+
+LIST DEVICECONTROL variable min-length 4
+ 2	length	UINT16
+# Xspecs says 0, DEVICE_RESOLUTION is 1...
+IF 0 CARD16 0
+# RESOLUTIONCONTOL
+ 4	"first valuator"	UINT8
+ 5	"#valuators"	COUNT8
+ 8	values	LISTofUINT32
+ELSEIF 0 CARD16 1
+# RESOLUTIONCONTOL
+ 4	"first valuator"	UINT8
+ 5	"#valuators"	COUNT8
+ 8	values	LISTofUINT32
+ELSEIF 0 CARD16 2
+# ABSCALIBCONTOL
+ 4	min_x	UINT32
+ 8	max_x	UINT32
+12	min_y	UINT32
+16	max_y	UINT32
+20	flip_x	UINT32
+24	flip_y	UINT32
+28	rotation	UINT32
+32	button_threshold	UINT32
+NEXT	36
+ELSEIF 0 CARD16 3
+# CORECONTOL
+ 4	status	CARD8
+NEXT	8
+ELSEIF 0 CARD16 4
+# ENABLECONTOL
+ 4	enable	CARD8
+NEXT	8
+ELSEIF 0 CARD16 5
+# ABSAREACONTOL
+ 4	offset_x	UINT32
+ 8	offset_y	UINT32
+12	width	UINT32
+16	height	UINT32
+20	screen	CARD32
+24	following	CARD32
+NEXT	28
+ELSE
+ 2	length	COUNT16
+ 0	unsupported	LISTofCARD8
+END
+
+REQUEST ChangeDeviceControl
+ 6	device	CARD8
+ 4	"device control type"	ENUM16 devicecontroltype
+ 8	data	LISTofDEVICECONTROL
+END
+RESPONSE ChangeDeviceControl ALIASES Status
+
+REQUEST ListDeviceProperties
+ 4	device	UINT8
+END
+RESPONSE ListDeviceProperties
+ 8	nAtoms	COUNT16
+32	Atoms	LISTofATOM
+END
+
+REQUEST ChangeDeviceProperty
+ 4	property	ATOM
+ 8	type	ATOM
+12	device	UINT8
+13	format	FORMAT8
+14	mode	ENUM8 change_mode
+16	nUnits	COUNT32
+IF 8 ATOM "ATOM"
+20	value	LISTofATOM
+ELSEIF 8 ATOM "FLOAT"
+20	value	LISTofFLOAT32
+ELSE
+20	value	LISTofFormat
+END
+
+REQUEST DeleteDeviceProperty
+ 4	property	ATOM
+ 8	device	UINT8
+END
+
+REQUEST GetDeviceProperty
+ 4	property	ATOM
+ 8	type	ATOM
+12	longOffset	UINT32
+16	longLength	UINT32
+20	device	UINT8
+21	delete	BOOL
+END
+RESPONSE GetDeviceProperty
+ 8	type	ATOM
+12	bytesAfter	UINT32
+16	nItems	COUNT32
+20	format	FORMAT8
+21	device	UINT8
+IF 8 ATOM "ATOM"
+32	value	LISTofATOM
+ELSEIF 8 ATOM "FLOAT"
+32	value	LISTofFLOAT32
+ELSE
+32	value	LISTofFormat
+END
+
+STRUCT MODIFIERINFO length 16
+ 0	base_mods	CARD32
+ 4	latched_mods	CARD32
+ 8	locked_mods	CARD32
+12	effective_mods	CARD32
+END
+
+STRUCT GROUPINFO length 4
+0	base_group	CARD8
+1	latched_group	CARD8
+2	locked_group	CARD8
+3	effective_group	CARD8
+END
+
+REQUEST XIQueryPointer
+ 4	window	WINDOW
+ 8	device	UINT16
+END
+RESPONSE XIQueryPointer
+ 8	root	WINDOW
+12	child	WINDOW
+16	root_x	FIXED
+20	root_y	FIXED
+24	win_x	FIXED
+28	win_y	FIXED
+32	same_screen	BOOL
+34	buttons_len	COUNT16
+36	mods	MODIFIERINFO
+52	groups	GROUPINFO
+56	buttons	LISTofCARD8
+END
+
+REQUEST XIWarpPointer
+ 4	src_win	WINDOW
+ 8	dst_win	WINDOW
+12	src_x	FIXED
+16	src_y	FIXED
+20	src_width	UINT16
+22	src_height	UINT16
+24	dst_x	FIXED
+28	dst_y	FIXED
+32	device	CARD16
+END
+
+REQUEST XIChangeCursor
+ 4	win	WINDOW
+ 8	cursor	CURSOR
+12	device	CARD16
+END
+
+CONSTANTS hierarchy_change
+1	AddMaster
+2	RemoveMaster
+3	AttachSlave
+4	DetachSlave
+END
+
+CONSTANTS change_mode
+1	Attach
+2	Float
+END
+
+LIST HIERARCHYCHANGE variable min-length 8
+ 0	type	ENUM16 hierarchy_change
+ 2	length	COUNT16
+IF 0 CARD16 $hierarchy_change:AddMaster
+ 4	name_len	COUNT16
+ 6	send_core	BOOL
+ 7	enable	BOOL
+ 8	name	STRING8
+ELSEIF 0 CARD16 $hierarchy_change:RemoveMaster
+ 4	device	UINT16
+ 6	return_mode	ENUM8 change_mode
+ 8	return_pointer	UINT16
+10	return_keyboard	UINT16
+ NEXT	12
+ELSEIF 0 CARD16 $hierarchy_change:AttachSlave
+ 4	device	UINT16
+ 6	new_master	UINT16
+ NEXT	8
+ELSEIF 0 CARD16 $hierarchy_change:DetachSlave
+ 4	device	UINT16
+ NEXT	8
+ELSE
+ 0	pad	LISTofCARD32
+END
+
+REQUEST XIChangeHierarchy
+ 4	num_changes	COUNT8
+ 8	changes	LISTofHIERARCHYCHANGE
+END
+
+REQUEST XISetClientPointer
+ 4	win	WINDOW
+ 8	device	UINT16
+END
+
+REQUEST XIGetClientPointer
+ 4	win	WINDOW
+END
+RESPONSE XIGetClientPointer
+ 8	set	BOOL
+10	device	UINT16
+END
+
+LIST EVENTMASK variable min-length 4
+0	device	UINT16
+2	mask_len	COUNT16
+4	mask	LISTofCARD32
+END
+
+REQUEST XISelectEvents
+ 4	win	WINDOW
+ 8	num_masks	COUNT16
+12	masks	LISTofEVENTMASK
+END
+
+REQUEST XIQueryVersion
+ 4	major	UINT16
+ 6	minor	UINT16
+END
+RESPONSE XIQueryVersion
+ 8	major	UINT16
+10	minor	UINT16
+END
+
+# TODO: could be > 32bits if the device has more than 2^32 buttons
+TYPE SETofBUTTONMASK CARD32
+
+CONSTANTS class
+0	KeyClass
+1	ButtonClass
+2	ValuatorClass
+3	ScrollClass
+8	TouchClass
+END
+
+CONSTANTS scrolltype
+1 vertical
+2 horizontal
+END
+TYPE ScrollType ENUM32 scrolltype
+BITMASK scrollflag
+1<<0	NoEmulation
+1<<1	Preferred
+END
+TYPE ScrollFlag BITMASK32 scrollflag
+CONSTANTS touchmode
+1 DirectTouch
+2 DependentTouch
+END
+TYPE TouchMode ENUM8 touchmode
+
+LIST CLASS variable min-length 8
+0	type	ENUM16	class
+2	length	COUNT16
+4	sourceid	UINT16
+IF 0 CARD16 $class:KeyClass
+6	num_keys	COUNT16
+8	keys	LISTofCARD32
+ELSEIF 0 CARD16 $class:ButtonClass
+6	num_buttons	COUNT16
+8	state	SETofBUTTONMASK
+12	labels	LISTofATOM
+ELSEIF 0 CARD16 $class:ValuatorClass
+6	number	UINT16
+8	label	ATOM
+12	min	FP3232
+20	max	FP3232
+28	value	FP3232
+36	resolution	UINT32
+40	mode	CARD8
+NEXT	44
+ELSEIF 0 CARD16 $class:ScrollClass
+6	number	UINT16
+8	type	ScrollType
+12	flags	ScrollFlag
+16	increment	FP3232
+NEXT	24
+ELSEIF 0 CARD16 $class:TouchClass
+6	mode	TouchMode
+7	touch_max	UINT8
+NEXT	8
+ELSE
+0	pad	LISTofCARD32
+END
+
+CONSTANTS xi_device_use
+1	MasterPointer
+2	MasterKeyboard
+3	SlavePointer
+4	SlaveKeyboard
+5	FloatingSlave
+END
+
+LIST XIDEVICEINFO variable min-length 12
+ 0	device	UINT16
+ 2	use	ENUM16 xi_device_use
+ 4	attachment	CARD16
+10	enabled	BOOL
+ 8	name_len	COUNT16
+12	name	STRING8
+ROUND
+ 6	num_classes	COUNT16
+LATER	classes	LISTofCLASS
+END
+
+CONSTANTS xidevice
+0	AllDevices
+1	AllMasterDevices
+END
+
+REQUEST XIQueryDevice
+ 4	device	ENUM16 xidevice
+END
+RESPONSE XIQueryDevice
+ 8	num_devices	COUNT16
+32	deviceinfo	LISTofXIDEVICEINFO
+END
+
+REQUEST XISetFocus
+ 4	focus	WINDOW
+ 8	time	TIMESTAMP
+10	device	UINT16
+END
+
+REQUEST XIGetFocus
+ 4	device	UINT16
+END
+RESPONSE XIGetFocus
+ 8	focus	WINDOW
+END
+
+REQUEST XIGrabDevice
+ 4	grab_window	WINDOW
+ 8	time	TIMESTAMP
+12	cursor	CURSOR
+16	device	UINT16
+18	grab_mode	ENUM8	synmode
+19	paired_device_mode	ENUM8	synmode
+20	owner_events	BOOL
+22	mask_len	COUNT16
+24	masks	LISTofCARD32
+END
+
+REQUEST XIListProperties
+ 4	device	UINT16
+END
+RESPONSE XIListProperties
+ 8	"#properties"	COUNT16
+32	properties	LISTofATOM
+END
+
+REQUEST XIChangeProperty
+ 4	device	UINT16
+ 6	mode	ENUM8	device_mode
+ 7	format	FORMAT8
+ 8	property	ATOM
+12	type	ATOM
+16	num_items	COUNT32
+IF 12 ATOM "ATOM"
+20	value	LISTofATOM
+ELSEIF 12 ATOM "FLOAT"
+20	value	LISTofFLOAT32
+ELSE
+20	value	LISTofFormat
+END
+
+REQUEST XIDeleteProperty
+ 4	device	UINT16
+ 8	property	ATOM
+END
+
+REQUEST XIGetProperty
+ 4	device	UINT16
+ 6	delete	BOOL
+ 8	property	ATOM
+12	type	ATOM
+16	offset	UINT32
+20	len	UINT32
+END
+RESPONSE XIGetProperty
+ 8	type	ATOM
+12	bytes_after	UINT32
+16	num_items	COUNT32
+20	format	FORMAT8
+IF 8 ATOM "ATOM"
+32	value	LISTofATOM
+ELSEIF 8 ATOM "FLOAT"
+32	value	LISTofFLOAT32
+ELSE
+32	value	LISTofFormat
+END
+
+# Events
+
+# the top-most bit of the device-id (0x80) always means more events to follow.
+# TODO: how to express that?
+
+EVENT DeviceValuator
+ 1	device	CARD8
+ 4	state	SETofKEYBUTMASK
+ 6	"#valuators"	COUNT8
+ 7	"first axis"	CARD8
+# should be LISTofINT32?
+ 8	valuators	LISTofUINT32
+END
+
+templateEVENT KeyButtonPointer
+# keycode, button, ... depending on actual even
+ 1	detail	CARD8
+ 4	"timestamp"	TIMESTAMP
+ 8	"root window"	WINDOW
+12	"event window"	WINDOW
+16	"child window"	WINDOW constants none
+20	root-x	INT16
+22	root-y	INT16
+24	event-x	INT16
+26	event-y	INT16
+28	state	SETofKEYBUTMASK
+30	same-screen	BOOL
+31	device	CARD8
+END
+EVENT DeviceKeyPress ALIASES KeyButtonPointer
+EVENT DeviceKeyRelease ALIASES KeyButtonPointer
+EVENT DeviceButtonPress ALIASES KeyButtonPointer
+EVENT DeviceButtonRelease ALIASES KeyButtonPointer
+
+EVENT DeviceMotionNotify
+ 1	detail	ENUM8 normalhint
+        4	"timestamp"	TIMESTAMP
+ 8	"root window"	WINDOW
+12	"event window"	WINDOW
+16	"child window"	WINDOW constants none
+20	root-x	INT16
+22	root-y	INT16
+24	event-x	INT16
+26	event-y	INT16
+28	state	SETofKEYBUTMASK
+30	same-screen	BOOL
+31	device	CARD8
+END
+
+templateEVENT Proximity
+        4	"timestamp"	TIMESTAMP
+ 8	"root window"	WINDOW
+12	"event window"	WINDOW
+16	"child window"	WINDOW constants none
+20	root-x	INT16
+22	root-y	INT16
+24	event-x	INT16
+26	event-y	INT16
+28	state	SETofKEYBUTMASK
+30	same-screen	BOOL
+31	device	CARD8
+END
+EVENT ProximityIn ALIASES Proximity
+EVENT ProximityOut ALIASES Proximity
+
+templateEVENT DeviceFocus
+ 1	detail	ENUM8 enterdetail
+        4	"timestamp"	TIMESTAMP
+ 8	"event window"	WINDOW
+12	mode	ENUM8 grabmode
+13	device	CARD8
+END
+EVENT DeviceFocusOut ALIASES DeviceFocus
+EVENT DeviceFocusIn ALIASES DeviceFocus
+
+EVENT DeviceStateNotify
+ 1	device	CARD8
+        4	"timestamp"	TIMESTAMP
+11	reported	BITMASK8 classes_reported
+ 8	"#keys"	COUNT8
+12	keys	LISTofCARD8
+ 9	"#buttons"	COUNT8
+LATER	buttons	LISTofCARD8
+10	"#valuators"	COUNT8
+LATER	valuators	LISTofCARD32
+END
+
+EVENT DeviceKeystateNotify
+ 1	device	CARD8
+ 4	keys	LISTofCARD8
+END
+
+EVENT DeviceButtonstateNotify
+ 1	device	CARD8
+ 4	buttons	LISTofCARD8
+END
+
+EVENT DeviceMappingNotify
+ 1	device	CARD8
+ 4	request	CARD8
+ 5	"first key code"	KEYCODE
+ 6	count	UINT8
+ 8	"timestamp"	TIMESTAMP
+END
+
+EVENT ChangeDeviceNotify
+ 1	device	CARD8
+ 4	"timestamp"	TIMESTAMP
+ 8	request	CARD8
+END
+
+EVENT DevicePresenceNotify
+ 4	timestamp	TIMESTAMP
+ 8	change	ENUM8 device_change
+ 9	device	CARD8
+10	control	CARD16
+END
+
+EVENT DevicePropertyNotify
+ 1	state	ENUM8	newdeleted
+ 4	timestamp	TIMESTAMP
+ 8	atom	ATOM
+31	device	CARD8
+END
+
+STRUCT ModifierInfo length 16
+ 0	base_mods	CARD32
+ 4	latched_mods	CARD32
+ 8	locked_mods	CARD32
+12	effective_mods	CARD32
+END
+
+STRUCT GroupInfo length 4
+0	base_group	CARD8
+1	latched_group	CARD8
+2	locked_group	CARD8
+3	effective_group	CARD8
+END
+
+# This does not work. I do not know if XIDEVICEINFO
+# is broken or if the event encodes it differently...
+# XGEVENT DeviceChanged
+# 10	deviceid	CARD8
+# 12	time		TIMESTAMP
+# 16	"#classes"	COUNT16
+# 18	sourceid	CARD8
+# 20	reason		CHANGEREASON
+# 32	classes		LISTofXIDEVICEINFO
+# END
+
+templateEVENT Device
+10	deviceid	CARD8
+12	time		TIMESTAMP
+16	detail		CARD32
+20	root		WINDOW
+24	event		WINDOW
+28	child		WINDOW
+32	root_x		FP1616
+36	root_y		FP1616
+40	event_x		FP1616
+44	event_y		FP1616
+52	sourceid	CARD16
+# TODO: meaning of flags...
+56	flags		CARD32
+60	mods		ModifierInfo
+76	group		GroupInfo
+48	buttons_len	COUNT16
+80	buttons		LISTofCARD32
+50	valuators_len	COUNT16
+LATER	valuators	LISTofCARD32
+RESET_COUNTER
+LATER	axisvalues	LISTofFIXED3232
+END
+
+XGEVENT KeyPress ALIASES Device
+XGEVENT KeyRelease ALIASES Device
+XGEVENT ButtonPress ALIASES Device
+XGEVENT ButtonRelease ALIASES Device
+XGEVENT Motion ALIASES Device
+XGEVENT TouchBegin ALIASES Device
+XGEVENT TouchUpdate ALIASES Device
+XGEVENT TouchEnd ALIASES Device
+
+templateEVENT Notify
+10	deviceid	CARD8
+12	time		TIMESTAMP
+16	sourceid	CARD8
+18	mode		ENUM8 notify_mode
+19	detail		ENUM8 notify_detail
+20	root		WINDOW
+24	event		WINDOW
+28	child		WINDOW
+32	root_x		FP1616
+36	root_y		FP1616
+40	event_x		FP1616
+44	event_y		FP1616
+48	same_screen	BOOL
+49	focus		BOOL
+52	mods		ModifierInfo
+68	group		GroupInfo
+50	buttons_len	COUNT16
+72	masks		LISTofCARD32
+END
+
+XGEVENT Enter ALIASES Notify
+XGEVENT Leave ALIASES Notify
+XGEVENT FocusIn ALIASES Notify
+XGEVENT FocusOut ALIASES Notify
+
+EOF

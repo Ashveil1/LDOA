@@ -1,0 +1,47 @@
+xdiag test assets - provenance and regeneration
+ regenerated: 2026-11-03T00:46:44Z by ci/fetch-xdiag-tools.sh
+ chain: pinned Ubuntu archive key fpr F6ECB3762474EDA9D21B7022871920D1991BC93C -> gpgv(InRelease noble)
+        -> Packages.gz sha256 ce57756edcce0a5f7993ceb89057e1510148e04e3b85a066d780e4bc00485c8a -> deb pool/universe/x/xtrace/xtrace_1.4.0-1_amd64.deb sha256 8ac2aa4f50af5ce805bee91e10bd744c90c4f061b1bdd5e40403f6b8d287f602
+        -> pristine usr/bin/xtrace sha256 493e500d1c7502dfd00b1385d60cb5881be8d9681252ffee77e10356449fbf03
+ patch: single compiled-in '/usr/share/xtrace' NUL-terminated string replaced
+        by '/xdiag/proto' (NUL-padded, length-preserving) so decoders resolve
+        under the proot bind; patched asset sha256 2117568790d9ebd9983d61cc58de8374b3759f442e08148ce287a3411ddaf489
+ arch: ELF x86-64 (CI emulator arch; NOT runnable on arm64 hosts)
+ license: GPLv2 (COPYRIGHT bundled); corresponding source bundled under
+          source/ per Sources.gz sha256s from the same signed chain
+ no-children (source-verified): fork/exec only in copyauth.c (disabled by -n)
+        and main.c execvp (only with a command operand; we pass none)
+ files:
+fc15a2e6a1854efc34afb8292abe3bbb33a5e24f52e39e1e9f07533d2ee6fb2c  ./COPYRIGHT
+da22db30c16c05ace869391f762b79b91368444819bcc58531abe352598dc55b  ./proto/all.proto
+1868eb8cce964284bc51661f994e53ed5b2707f5c32c7f21fac3422962f7d694  ./proto/bigfont.proto
+ae8191aebcd6ac6efb223f23d016539801152d25966f9379bc94d9e6b3b347e7  ./proto/bigrequest.proto
+bb17d67a1d60e85fbb2d1b9f707823b334af5999e496cd58198cb984241bce5c  ./proto/composite.proto
+cf5c1e25794a49511d84fac79133736f48c251c18f0c2fefb706109ba7a1edaa  ./proto/damage.proto
+365930c8042fd5be5803b15253aae3766c5916d5dd742ec647da6181665d5785  ./proto/dga.proto
+bd6cf1be00cce1d9c4d0ec0d8e721e1d75781430a1c08953bc089ff8a4f0daa0  ./proto/dpms.proto
+e41ef83d84302fcf0649c301b45d5b01b1b7ec0a4f4d1412f2505938f812c83a  ./proto/dri2.proto
+17328ee19c676aa89410ed9eb43627b19de9014c3e65996210f145a00e474432  ./proto/dri3.proto
+a918a6219258db6c8a8b4d84202b26a5631c7b8e7193bb78b716732c15ec4b92  ./proto/errors.proto
+0edf7d4dec2e67e25a3b272772e596a53e181f60a71319cd1f1cebc4533bf2cb  ./proto/events.proto
+ee8ebff24cf3cf4e81a562a5b176f8e350072f07b431371d58e498486a6357ba  ./proto/fixes.proto
+1e970eb71731404b199e7ffd134fe06ecb4463acc87d4e8804241bbd62b33bfe  ./proto/genericevents.proto
+7ba18714ad21db2d032ca39d82369cbf61936c13a9d85fbf3e5ae27bc853fade  ./proto/glx.proto
+84a2bc0294c85c00b7ada73b77ee549e61a9ed0485b3a1510437eab20e1b234b  ./proto/mitshm.proto
+68d32b12f9198d23f3687b4301663962f33ef0280ebd465324437d9966d90dc8  ./proto/present.proto
+2a3698cecd4502448f848f5bc9aa14c52ffe533fa6828d274900d9c24e2cb532  ./proto/randr.proto
+ebde91c279caa11b48d858a4d91cbd495f4d98272d9205495de53100b463d5c1  ./proto/render.proto
+9b5c5da5761cc2ef79feef0d7044497af7e0d75fa14b2adff56fca9bf2346d4b  ./proto/requests.proto
+065cfe31b30b2e3ed1ce7427b2326f8d05ce6f817badab0b8c6abf57c67f9f55  ./proto/saver.proto
+2817d9f96e255c429ff0d81fdc14eb0f23e6699503d07262302fd4d872173217  ./proto/setup.proto
+c0cf63505e407cc7eded77ccbf8549551e7b984d1c37bb60e4a52ebb8e9b13c3  ./proto/shape.proto
+8f48e518faedcc06140ba906ad256efcb8decd4725efb02982cd0f82a828d6ef  ./proto/sync.proto
+29ee535e816ec85bd2fb9db56f96a4c68c93b2085a1821b6ce7bfbc697be9a13  ./proto/vidmode.proto
+7676697559ee499e8dd66f8a194ed70a26679b035cb35f5ba74198b83aaa7494  ./proto/xinerama.proto
+33a82fde73a3b03867de4f4b12312c17264eea21b0432ecb19c2443725c46c95  ./proto/xinput.proto
+fdad4e8320111a510e0b0918591928a464815a0120611f16200c984126c5b0fd  ./proto/xkb.proto
+be2d14892b414e7d889cd9502a490a55b7ea8a4ba15130b618df23a3690cde2b  ./proto/xvideo.proto
+44d02cd284ccd55ee8167ddc89beb390f2d3ecafe3e6d8809075220c9210deeb  ./source/xtrace_1.4.0-1.debian.tar.xz
+600522b4bf2a129d1d96dc50a4b8075be9af6d73e6212e5de2eab95bf0fe3f45  ./source/xtrace_1.4.0-1.dsc
+8aef15eb42fa36c80dd8185d0a940321ba851328a3738ae897b4352e94d6331e  ./source/xtrace_1.4.0.orig.tar.xz
+2117568790d9ebd9983d61cc58de8374b3759f442e08148ce287a3411ddaf489  ./xtrace

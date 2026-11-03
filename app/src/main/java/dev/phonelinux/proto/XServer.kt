@@ -3,6 +3,7 @@ package dev.phonelinux.proto
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -184,6 +185,178 @@ object XServer {
     // (defense in depth: this must never become a general server-flags
     // channel).
     @Volatile internal var extraServerArgsForTest: List<String> = emptyList()
+    // Diagnostic-only listen-display override for the proxied-capture
+    // control arm: when set (debug builds only, canonical ":N" shape with
+    // N in 1..999 - no leading zeros, ":0" itself rejected), the server
+    // listens on this display instead of :0 so a test-owned xtrace proxy
+    // can FAKE :0 and forward to it - guest clients, the owner session
+    // script and its ready-gate keep their hardcoded DISPLAY=:0 untouched,
+    // and the vendored attach knocks on the FIXED TCP port 7892
+    // (lorie.h / activity.cpp requestConnection), not a display-derived
+    // address. The seam is armed BEFORE start() and consumed exactly once
+    // by the first start after arming; there is no "previous value" to
+    // restore - cleanup RELEASES an unconsumed reservation or leaves the
+    // consumed attribution to be reset by the next fresh world.
+    // Production never arms it.
+    // Mutation is attempt-scoped and atomic: both the setter and the
+    // start() read run under ownershipLock, and the setter refuses while
+    // a server process is alive or an attempt is preparing.
+    /** Pure reservation state machine for the test display seam - no
+     *  Android references so unit tests exercise the REAL logic. A
+     *  reservation is token-bound and consumed only by EXACTLY the first
+     *  start after arming (enforced start exclusion; an out-of-sequence
+     *  consume poisons ownership permanently). Ownership further requires
+     *  the consuming attempt to still be the latest start - a later
+     *  start makes stale attribution detectable (attemptSeq moves on). */
+    internal class DisplaySeamState {
+        var reservation: Pair<Long, String>? = null; private set
+        var consumedBy: Long? = null; private set
+        var consumedAttemptSeq: Long? = null; private set
+        /** Attempt sequence at arm time; the consumer must be EXACTLY the
+         *  first start after arming (enforced start exclusion). */
+        var armAttemptSeq: Long? = null; private set
+        /** Set when a consume arrived out of sequence - poisons ownership
+         *  permanently (until reset), never silently re-armed. */
+        var violated: Boolean = false; private set
+        private var seq = 0L
+
+        fun canonicalDisplay(value: String): Boolean =
+            value.matches(Regex(":[1-9][0-9]{0,2}"))
+
+        /** Arms the reservation. Throws on any non-fresh or non-test
+         *  condition; callers pass live state, never cached booleans. */
+        fun reserve(display: String, isDebug: Boolean, looksEmulator: Boolean,
+                    serverAlive: Boolean, attemptInFlight: Boolean, stopBusy: Boolean,
+                    currentAttemptSeq: Long): Long {
+            check(isDebug) { "display seam is a debug-build test seam" }
+            check(canonicalDisplay(display)) {
+                "display seam requires a canonical :N display (N=1..999," +
+                " no leading zeros, never :0); got: " + display }
+            check(looksEmulator) { "display seam requires a disposable-emulator build fingerprint" }
+            check(!serverAlive && !attemptInFlight && !stopBusy) {
+                "display seam can only be armed in a fresh world" }
+            check(reservation == null) { "display seam already reserved" }
+            val token = ++seq
+            reservation = token to display
+            armAttemptSeq = currentAttemptSeq
+            return token
+        }
+
+        /** Single-consumption read at start(); records token AND the
+         *  consuming attempt's sequence for later ownership checks.
+         *  CALLER BINDING: the consumer must be exactly the first start
+         *  after arming (attemptSeq == armAttemptSeq + 1). Any other
+         *  sequence means an unintended start happened first - consume
+         *  fails closed and poisons ownership, so a later "our" start can
+         *  never inherit attribution. Fresh-world arming plus this
+         *  exclusion is the binding; the seam cannot otherwise know which
+         *  start the test intended. */
+        fun consume(attemptSeq: Long, isDebug: Boolean, presentedToken: Long?): String? {
+            val r = reservation ?: return null
+            if (!isDebug || !canonicalDisplay(r.second)) return null
+            // INTENDED-CALL CAPABILITY: the consuming start must present
+            // the reservation token AND be exactly the first start after
+            // arming. A caller without the capability (or out of
+            // sequence) fails closed and poisons ownership - a diagnostic
+            // abort is always preferred over silent misattribution.
+            if (presentedToken != r.first ||
+                armAttemptSeq == null || attemptSeq != armAttemptSeq!! + 1) {
+                violated = true
+                reservation = null
+                return null
+            }
+            reservation = null
+            consumedBy = r.first
+            consumedAttemptSeq = attemptSeq
+            return r.second
+        }
+
+        fun release(token: Long, serverAlive: Boolean) {
+            val r = reservation ?: return // consumed already
+            check(r.first == token) { "display seam release with a foreign token" }
+            check(!serverAlive) {
+                "refusing to release an unconsumed display reservation while a server runs" }
+            reservation = null
+        }
+
+        /** Ownership is live only while the consuming attempt is still
+         *  the latest start - a newer start invalidates attribution. */
+        fun ownedBy(token: Long, currentAttemptSeq: Long, serverAlive: Boolean): Boolean =
+            !violated && consumedBy == token && consumedAttemptSeq != null &&
+                consumedAttemptSeq == currentAttemptSeq && serverAlive
+
+        fun resetForTest() {
+            reservation = null; consumedBy = null; consumedAttemptSeq = null
+            armAttemptSeq = null; violated = false
+        }
+    }
+    private val displaySeam = DisplaySeamState() // guarded by ownershipLock
+
+    internal fun canonicalTestDisplayForTest(value: String): Boolean =
+        displaySeam.canonicalDisplay(value)
+
+    internal fun reserveServerDisplayForTest(display: String): Long =
+        synchronized(ownershipLock) {
+            displaySeam.reserve(display, BuildConfig.DEBUG,
+                XdiagEmulatorGate.looksDisposableEmulator(
+                    Build.FINGERPRINT, Build.MODEL, Build.PRODUCT),
+                process?.isAlive == true, preparing, stopInFlight, lastStartSeq)
+        }
+
+    internal fun releaseServerDisplayForTest(token: Long) {
+        synchronized(ownershipLock) {
+            displaySeam.release(token, process?.isAlive == true)
+        }
+    }
+
+    internal fun displaySeamReservationForTest(): Pair<Long, String>? =
+        synchronized(ownershipLock) { displaySeam.reservation }
+
+    internal fun displaySeamConsumedByForTest(): Long? =
+        synchronized(ownershipLock) { displaySeam.consumedBy }
+
+    /** Exclusive diagnostic launch (test seam only): arms the display
+     *  reservation AND initiates its own identified start inside ONE
+     *  ownershipLock hold, so no other start can interleave between arm
+     *  and consume. While armed, openDesktop/start refuse callers that
+     *  do not present the returned token. Production behavior when the
+     *  seam is inactive (never armed outside debug+emulator tests) is
+     *  unchanged. */
+    internal fun startDiagnosticSessionForTest(display: String, activity: Activity, distro: Distro,
+                                               onStage: (String) -> Unit = {},
+                                               onError: (String) -> Unit = {},
+                                               mode: DesktopMode): Long =
+        synchronized(ownershipLock) {
+            val token = displaySeam.reserve(display, BuildConfig.DEBUG,
+                XdiagEmulatorGate.looksDisposableEmulator(
+                    Build.FINGERPRINT, Build.MODEL, Build.PRODUCT),
+                process?.isAlive == true, preparing, stopInFlight, lastStartSeq)
+            try {
+                openDesktop(activity, distro, onStage, onError, mode, diagnosticToken = token)
+            } catch (t: Throwable) {
+                // The launch failed before/without consuming: release the
+                // reservation we just created so it cannot leak armed
+                // (the caller's token variable never saw it).
+                displaySeam.release(token, process?.isAlive == true)
+                throw t
+            }
+            token
+        }
+
+    internal fun displaySeamOwnedByForTest(token: Long): Boolean =
+        synchronized(ownershipLock) {
+            displaySeam.ownedBy(token, lastStartSeq, process?.isAlive == true)
+        }
+
+    /** Atomic owned-socket delete for the diagnostic cleanup: ownership
+     *  is re-verified and the file deleted inside ONE ownershipLock hold.
+     *  start() bumps lastStartSeq under the same lock, so no start can
+     *  interleave between the check and the delete; a false result means
+     *  the caller must NOT touch the socket. */
+    internal fun deleteOwnedTestSocketForTest(token: Long, sock: java.io.File): Boolean =
+        synchronized(ownershipLock) {
+            displaySeam.ownedBy(token, lastStartSeq, process?.isAlive == true) && sock.delete()
+        }
     @Volatile var preparing = false
         private set
     // In-flight attempt routing: while a start runs, the VISIBLE caller
@@ -848,6 +1021,7 @@ object XServer {
         routingDetached = false
         attemptSeq = 0L
         lastStartSeq = 0L
+        displaySeam.resetForTest()
         stopInFlight = false
         lastOpenedXForTest = null
         beforeOpenHookForTest = null
@@ -954,8 +1128,15 @@ object XServer {
     fun tmpDir(ctx: Context): File = File(ctx.filesDir, "usr/tmp")
     fun socketDir(ctx: Context): File = File(tmpDir(ctx), ".X11-unix")
 
-    fun start(ctx: Context) {
-        synchronized(ownershipLock) { if (process?.isAlive == true) return }
+    fun start(ctx: Context, diagnosticToken: Long? = null) {
+        synchronized(ownershipLock) {
+            if (process?.isAlive == true) return
+            // Same capability check at the server-start entry itself:
+            // direct callers without the token are refused while armed.
+            val res = displaySeam.reservation
+            check(res == null || res.first == diagnosticToken) {
+                "diagnostic display reservation active - refusing X server start" }
+        }
         XkbData.ensure(ctx)
         socketDir(ctx).mkdirs()
         val lib = File(ctx.applicationInfo.nativeLibraryDir, "libXlorie.so")
@@ -968,8 +1149,19 @@ object XServer {
             try { prev.delete(); if (!log.renameTo(prev)) Log.w(TAG, "xserver log rotation rename failed") }
             catch (t: Throwable) { Log.w(TAG, "xserver log rotation failed", t) }
         }
+        val display = synchronized(ownershipLock) {
+            val seamTouched = displaySeam.reservation != null || displaySeam.violated ||
+                displaySeam.consumedBy != null
+            val d = displaySeam.consume(lastStartSeq, BuildConfig.DEBUG, diagnosticToken)
+            // A failed consume while the seam was armed/touched must NEVER
+            // masquerade as a normal :0 bind: that is a diagnostic UNKNOWN.
+            check(d != null || (!seamTouched && diagnosticToken == null)) {
+                "display seam consume failed (violated=" + displaySeam.violated +
+                ", token presented=" + (diagnosticToken != null) + ") - UNKNOWN, refusing silent :0 bind" }
+            d
+        } ?: ":0"
         val serverArgs = mutableListOf("/system/bin/app_process", "/",
-            "com.termux.x11.CmdEntryPoint", ":0")
+            "com.termux.x11.CmdEntryPoint", display)
         if (BuildConfig.DEBUG)
             serverArgs.addAll(extraServerArgsForTest.filter { it == "-check-drawing" })
         val pb = ProcessBuilder(serverArgs)
@@ -1128,7 +1320,8 @@ object XServer {
     fun openDesktop(activity: Activity, distro: Distro,
                     onStage: (String) -> Unit = {},
                     onError: (String) -> Unit = {},
-                    mode: DesktopMode = DesktopMode.GNOME) {
+                    mode: DesktopMode = DesktopMode.GNOME,
+                    diagnosticToken: Long? = null) {
         if (preparing) {
             // Re-attach, never refuse: follow the in-flight attempt so its
             // stage lines and outcome reach the screen the user is actually
@@ -1141,12 +1334,28 @@ object XServer {
             return
         }
         val mySeq = synchronized(ownershipLock) {
-            attemptSeq++
-            lastStartSeq = attemptSeq
-            preparing = true
-            attemptRouting = AttemptRouting(activity, onError, onStage)
-            routingDetached = false
-            attemptSeq
+            // While a diagnostic display reservation is armed AND no
+            // attempt is in flight, a caller WITHOUT the reservation
+            // capability is refused outright - it must never consume the
+            // test display. (The preparing/reattach branch above runs
+            // first BY DESIGN: during OUR in-flight diagnostic start a
+            // tokenless caller follows OUR identified attempt - accepted
+            // disposable-CI scope, not a refusal.)
+            val res = displaySeam.reservation
+            if (res != null && res.first != diagnosticToken) {
+                -1L
+            } else {
+                attemptSeq++
+                lastStartSeq = attemptSeq
+                preparing = true
+                attemptRouting = AttemptRouting(activity, onError, onStage)
+                routingDetached = false
+                attemptSeq
+            }
+        }
+        if (mySeq < 0L) {
+            onError("a diagnostic display reservation is active - normal desktop start refused")
+            return
         }
         thread(name = "xserver-start") {
             val ctx = activity.applicationContext
@@ -1178,7 +1387,7 @@ object XServer {
                     return@thread
                 }
                 stage("Starting X server")
-                start(ctx)
+                start(ctx, diagnosticToken)
                 val installer = DistroInstaller(ctx)
                 if (installer.isInstalled(distro)) {
                     val rootfs = installer.rootfsDir(distro)

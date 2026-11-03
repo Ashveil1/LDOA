@@ -7,6 +7,11 @@ name: mobile-desktop
 # x86_64 emulator - never ARM or device qualification.
 on:
   workflow_dispatch:
+    inputs:
+      xdiag_capture:
+        description: "Run the dispatch-gated xdiag proxied-capture diagnostic (MobileDesktopEntryTest#mobileEntryXdiagCapture) instead of the render lifecycle test; diagnostic artifacts only, no render gate"
+        type: boolean
+        default: false
 
 jobs:
   mobile-shell-spike:
@@ -68,7 +73,7 @@ jobs:
             ./gradlew assembleDebug assembleDebugAndroidTest 2>&1 | tee /tmp/build.log
             grep -q "BUILD SUCCESSFUL" /tmp/build.log || { echo "assemble FAILED before readiness gate + instrumentation"; exit 1; }
             python3 ci/launcher_gate.py post-build || { sh ci/gate_capture.sh post-build; exit 1; }
-            ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=dev.phonelinux.proto.MobileDesktopEntryTest -Pandroid.testInstrumentationRunnerArguments.ldoa_ci_emulator=true --info 2>&1 | tee /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
+            ./gradlew connectedDebugAndroidTest "-Pandroid.testInstrumentationRunnerArguments.class=dev.phonelinux.proto.MobileDesktopEntryTest${{ inputs.xdiag_capture && '#mobileEntryXdiagCapture' || '' }}" -Pandroid.testInstrumentationRunnerArguments.ldoa_ci_emulator=true ${{ inputs.xdiag_capture && '-Pandroid.testInstrumentationRunnerArguments.ldoa_xdiag=true' || '' }} --info 2>&1 | tee /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
             grep -q "BUILD SUCCESSFUL" /tmp/instr.log || touch /tmp/PHONELINUX_TESTS_FAILED
             # NO post-task run-as guest-log pulls (run 41457173978): they
             # execute after connectedAndroidTest has uninstalled both APKs
