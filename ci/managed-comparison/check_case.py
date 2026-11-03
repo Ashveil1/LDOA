@@ -1,9 +1,9 @@
 import pathlib,sys,re,json,xml.etree.ElementTree as E
 
-def check(root,case,pin):
+def check(root,case,pin,*,inflight=False):
  if case not in ('original','patched') or not re.fullmatch('[0-9a-f]{64}',pin):raise ValueError('expected case/pin required')
  root=pathlib.Path(root)
- for name,want in [('caller.txt','caller_exit=0\n'),('phase.txt','instrumentation_caller_rc=0\n')]:
+ for name,want in ([('phase.txt','instrumentation_caller_rc=0\n')] if inflight else [('caller.txt','caller_exit=0\n'),('phase.txt','instrumentation_caller_rc=0\n')]):
   paths=list(root.rglob(name))
   if len(paths)!=1 or paths[0].read_text()!=want:raise ValueError('case caller/phase failure')
  guards=list(root.rglob('transfer-guards.txt'))
@@ -43,5 +43,7 @@ def check(root,case,pin):
  if len(teardown)!=1 or teardown[0].read_text().strip()!='PASS original owned PID/start set absent after Stop':raise ValueError('unverified teardown')
  return 'PASS exact executed case/coverage; manual pixel/input review still REQUIRED'
 if __name__=='__main__':
- try:print(check(sys.argv[1],sys.argv[2],sys.argv[3]))
+ try:
+  if len(sys.argv) not in (4,5) or (len(sys.argv)==5 and sys.argv[4]!='--inflight'):raise ValueError('exact args')
+  print(check(sys.argv[1],sys.argv[2],sys.argv[3],inflight=len(sys.argv)==5))
  except Exception as e:print('REFUSED',e);sys.exit(1)

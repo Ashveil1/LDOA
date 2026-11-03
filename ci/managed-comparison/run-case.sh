@@ -22,6 +22,10 @@ printf 'instrumentation_caller_rc=%s\n' "$rc" > "$OUT/phase.txt"
 # Evidence copied BEFORE emulator termination; no UTP uninstalls in this path.
 timeout -k 2 60 adb -s "$SERIAL" pull /sdcard/Android/media/dev.phonelinux.proto/additional_test_output "$OUT/device" || exit 70
 [[ $rc == 0 ]]
-timeout -k 2 15 python3 ci/managed-comparison/check_case.py "$OUT" "$CASE" "$PIN"
+timeout -k 2 15 python3 ci/managed-comparison/check_case.py "$OUT" "$CASE" "$PIN" --inflight
 # Actual @After Stop is verified by instrumentation identity checks; do not
 # count emulator death alone as owned-process teardown qualification.
+
+# Caller receipt is written ONLY by EXIT trap with actual shell status.
+# Inflight checker validates phase+all actual case gates, not a speculative
+# caller0. External final checker/aggregate still require actual caller0.

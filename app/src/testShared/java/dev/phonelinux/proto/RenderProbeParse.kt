@@ -47,7 +47,7 @@ object RenderProbeParse {
     data class ChildLine(val id: Long, val geomW: Int, val geomH: Int, val absX: Int, val absY: Int)
 
     private val childRe = Regex(
-        "^( +)0x[0-9a-f]+(?: \"[^\"]*\")?: \\([^\\n]*\\)  " +
+        "^( +)0x[0-9a-f]+(?: \"[^\"]*\"| \\(has no name\\))?: \\([^\\n]*\\)  " +
             "([0-9]+)x([0-9]+)\\+(-?[0-9]+)\\+(-?[0-9]+)  \\+(-?[0-9]+)\\+(-?[0-9]+)$")
 
     /** Top-level children of the root, STRICT: the root's declared

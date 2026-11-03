@@ -788,4 +788,45 @@ xwininfo: Window id: 0x7a00007 (the root window) "LDOA"
         assertTrue(!tr.offer(true, state(deskId = 0x600099L)))
         assertTrue(tr.offer(true, state(deskId = 0x600099L)))
     }
+
+    // Actual noble x11-utils7.7+6build2 / xwininfo1.1.6 output from
+    // isolated Xvfb fixed synthetic windows, not failed Android run bytes.
+    private val unnamedSourceFixture = """
+xwininfo: Window id: 0x50d (the root window) (has no name)
+
+  Root window id: 0x50d (the root window) (has no name)
+  Parent window id: 0x0 (none)
+     2 children:
+     0x200002 "fixture": ()  100x100+-1+-1  +-1+-1
+     0x200001 (has no name): ()  100x100+-1+-1  +-1+-1
+""".trimIndent()
+
+    @Test fun actualSourceNamedAndUnnamedMix() {
+        val kids=RenderProbeParse.topLevelChildren(unnamedSourceFixture)!!
+        assertEquals(listOf(0x200002L,0x200001L),kids.map { it.id })
+        assertEquals(listOf(-1,-1),kids.map { it.absX })
+    }
+    @Test fun unnamedSingleAndExistingNoSuffixRemainValid() {
+        val single="     1 child:\n     0x200001 (has no name): ()  100x100+-1+-1  +-1+-1\n"
+        assertEquals(1,RenderProbeParse.topLevelChildren(single)!!.size)
+        assertEquals(1,RenderProbeParse.topLevelChildren(single.replace(" (has no name)",""))!!.size)
+    }
+    @Test fun unnamedTokenIsExactAndMalformedNeverDropped() {
+        for(token in listOf("(has no Name)","(has no name )","(has no name) extra",
+            "(none)","(name in unsupported encoding STRING)","(has no name)(has no name)",
+            "(has no name) ","(has no name)\n     0xdead")) {
+            assertNull("must refuse token $token",RenderProbeParse.topLevelChildren(
+                unnamedSourceFixture.replace("(has no name):",token+":")))
+        }
+        for(replacement in listOf("BOGUS","100x100+0+0","100x100+0+0  +0+0 trailing")) {
+            assertNull(RenderProbeParse.topLevelChildren(unnamedSourceFixture.replace(
+                "100x100+-1+-1  +-1+-1",replacement)))
+        }
+    }
+    @Test fun mixedMalformedHeaderCountAndIndentStillRefuse() {
+        assertNull(RenderProbeParse.topLevelChildren(unnamedSourceFixture.replace("2 children:","3 children:")))
+        assertNull(RenderProbeParse.topLevelChildren(unnamedSourceFixture.replace("2 children:","two children:")))
+        assertNull(RenderProbeParse.topLevelChildren(unnamedSourceFixture.replace("     0x200001","      0x200001")))
+        assertNull(RenderProbeParse.topLevelChildren(unnamedSourceFixture.replace("0x200001","0xzzzz")))
+    }
 }
