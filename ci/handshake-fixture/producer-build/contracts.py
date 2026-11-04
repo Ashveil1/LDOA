@@ -45,21 +45,53 @@ def trace_inputs(text,allowed,object_path):
  if not result:raise Stop('LINK_TRACE_EMPTY')
  return result
 def bind_manifest(sysroot,manifest):
- allowed={};root=pathlib.Path(sysroot).resolve();seen=set()
- for row in manifest['files']:
-  rel=pathlib.PurePosixPath(row['path'])
-  if rel.is_absolute() or '..' in rel.parts or str(rel) in seen:raise Stop('MEMBER_PATH_DUPLICATE')
-  seen.add(str(rel));p=root/str(rel)
+ # Share exactly the staging logical-name rules, not broad in-root tolerance.
+ from stage_manifest import normalized,canonical,target,Stop as StageStop
+ allowed={};root=pathlib.Path(sysroot).resolve(strict=True);records={};links={}
+ try:
+  for row in manifest['files']:
+   name=canonical(normalized(row['path']))
+   if name in records:raise Stop('MEMBER_PATH_DUPLICATE')
+   records[name]=row
+   if row['type']=='symlink':links[name]=target(name,row['target'])
+   elif row['type']!='file':raise Stop('MEMBER_TYPE')
+ except StageStop:raise Stop('MEMBER_LOGICAL_PATH')
+ final={}
+ for name,link in links.items():
+  seen={name}
+  while link in links:
+   if link in seen:raise Stop('STAGED_LINK_CYCLE')
+   seen.add(link);link=links[link]
+  if link not in records or records[link]['type']!='file':raise Stop('STAGED_LINK_TARGET_MISSING')
+  final[name]=link
+ for name,row in records.items():
+  p=root/name
   if row['type']=='file':
-   if p.is_symlink() or not p.is_file() or digest(p)!=row['sha256'] or p.stat().st_size!=row['bytes']:raise Stop('MEMBER_BYTES')
+   if p.is_symlink() or not p.is_file() or not p.resolve().is_relative_to(root) or digest(p)!=row['sha256'] or p.stat().st_size!=row['bytes']:raise Stop('MEMBER_BYTES')
    allowed[str(p.resolve())]={'sha256':row['sha256'],'scope':'SELECTED_SYSROOT'}
-  elif row['type']=='symlink':
-   if not p.is_symlink() or p.readlink().as_posix()!=row['target'] or not p.resolve().is_relative_to(root):raise Stop('STAGED_LINK')
-  else:raise Stop('MEMBER_TYPE')
- # No unknown regular byte inputs, including hidden host files or altered symlink targets.
+  else:
+   if not p.is_symlink():raise Stop('STAGED_LINK')
+   raw=p.readlink().as_posix()
+   # The stage always writes relative links. Require exact canonical immediate logical edge.
+   try:actual=target(name,raw)
+   except StageStop:raise Stop('STAGED_LINK')
+   if raw.startswith('/') or actual!=links[name]:raise Stop('STAGED_LINK')
+   try:real=p.resolve(strict=True)
+   except (OSError,RuntimeError):raise Stop('STAGED_LINK')
+   expected=root/final[name];selected=records[final[name]]
+   if not real.is_relative_to(root) or real!=expected or digest(real)!=selected['sha256'] or real.stat().st_size!=selected['bytes']:raise Stop('STAGED_LINK_MEMBER_PIN')
+ # Only two prescribed usrmerge aliases. Unknown same-target aliases are rejected.
+ aliases={'lib':'usr/lib','lib64':'usr/lib64'}
  for p in root.rglob('*'):
-  if p.is_symlink() and not p.resolve().is_relative_to(root):raise Stop('STAGED_LINK_ESCAPE')
-  if p.is_file() and str(p.resolve()) not in allowed:raise Stop('UNRECORDED_SYSROOT_FILE')
+  name=p.relative_to(root).as_posix()
+  if p.is_symlink():
+   try:real=p.resolve(strict=True)
+   except (OSError,RuntimeError):raise Stop('STAGED_LINK')
+   if not real.is_relative_to(root):raise Stop('STAGED_LINK_ESCAPE')
+   if name in aliases:
+    if p.readlink().as_posix()!=aliases[name]:raise Stop('STAGED_ALIAS')
+   elif name not in links:raise Stop('UNRECORDED_SYSROOT_LINK')
+  elif p.is_file() and str(p.resolve()) not in allowed:raise Stop('UNRECORDED_SYSROOT_FILE')
  return allowed
 
 def command_plan(clang,linker,resource,sysroot,source,out):

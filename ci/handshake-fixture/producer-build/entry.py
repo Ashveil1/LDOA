@@ -1,6 +1,7 @@
 """SOURCE PROPOSAL ONLY. Separate producer BUILD; requires reviewed tool policy and staged A1 bytes."""
 import argparse,pathlib,sys,json,subprocess,time,hashlib,os,signal,resource
 from rooted import rooted_closure
+from budget import check as check_deadline
 from contracts import Stop,digest,depfile,approved_file,trace_inputs,bind_manifest,command_plan
 HERE=pathlib.Path(__file__).resolve().parent
 
@@ -41,7 +42,8 @@ def tool_gate(policy):
  return allowed
 
 def main():
- p=argparse.ArgumentParser();p.add_argument('--sysroot',required=True);p.add_argument('--member-binding',required=True);p.add_argument('--member-sha256',required=True);p.add_argument('--tool-policy',required=True);p.add_argument('--tool-policy-sha256',required=True);p.add_argument('--out',required=True);a=p.parse_args()
+ p=argparse.ArgumentParser();p.add_argument('--sysroot',required=True);p.add_argument('--member-binding',required=True);p.add_argument('--member-sha256',required=True);p.add_argument('--tool-policy',required=True);p.add_argument('--tool-policy-sha256',required=True);p.add_argument('--out',required=True);p.add_argument('--deadline-monotonic',required=True,type=float);a=p.parse_args()
+ deadline=check_deadline(a.deadline_monotonic)
  if digest(a.member_binding)!=a.member_sha256 or digest(a.tool_policy)!=a.tool_policy_sha256:raise Stop('AUTHORITY_INPUT_PIN')
  member=json.loads(pathlib.Path(a.member_binding).read_text());policy=json.loads(pathlib.Path(a.tool_policy).read_text())
  if member.get('producer_recipe_sha256')!='8101830e250b9786dc269f18c7263304ed17b5d4496fdeadc6a25ef9c8990b13' or len(member.get('excluded_optional_inputs',[]))!=12:raise Stop('A1_RECIPE_BASELINE')
@@ -52,10 +54,10 @@ def main():
   if digest(f)!=source_policy.get(f.name):raise Stop('PRODUCER_SOURCE_POLICY')
   allowed[str(f.resolve())]={'sha256':digest(f),'scope':'CURRENT_PRODUCER_SOURCE'}
  out=pathlib.Path(a.out);out.mkdir(mode=0o700)
- deadline=time.monotonic()+1200 # NEW proposed A2 build budget, not inherited A1 authority.
+ check_deadline(deadline) # Preserve wrapper deadline, never restart after staging.
  env={'PATH':'/usr/bin:/bin','HOME':str(out),'TMPDIR':str(out),'LC_ALL':'C'}
  pre,compile,link=command_plan(policy['clang'],policy['linker'],policy['resource_dir'],a.sysroot,source,out)
- receipt={'compiler_executed':False,'scope':'PRODUCER_BUILD_QUALIFICATION_NOT_RUNTIME','complete':False,'runtime_asset_ready':False,'guest_executed':False,'commands':[pre,compile,link],'stages':[]}
+ receipt={'compiler_executed':False,'scope':'PRODUCER_BUILD_QUALIFICATION_NOT_RUNTIME','complete':False,'runtime_asset_ready':False,'guest_executed':False,'commands':[pre,compile,link],'stages':[],'deadline_monotonic':deadline}
  try:
   receipt['compiler_executed']=True
   run(pre,deadline,out/'preprocess.stdout',env);deps=[approved_file(n,allowed) for n in depfile((out/'producer.d').read_text())];receipt['headers']=deps;receipt['stages'].append('PREPROCESS_INPUTS_BOUND')
@@ -68,7 +70,9 @@ def main():
   receipt['rooted_closure']=rooted_closure(out/'producer',a.sysroot,member,policy['readelf'],deadline,read)
   receipt['stages'].append('PRODUCER_ROOTED_STATIC_CLOSURE_BOUND')
   for name,row in allowed.items():
+   check_deadline(deadline)
    if digest(name)!=row['sha256']:raise Stop('POST_BUILD_INPUT_CHANGED')
+  check_deadline(deadline)
  finally:
   (out/'producer-build-receipt.json').write_text(json.dumps(receipt,indent=2))
 def cli():
