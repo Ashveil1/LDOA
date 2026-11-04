@@ -1,0 +1,38 @@
+name: isolated-build-inputs-PROPOSAL
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: isolated-build-inputs-one
+  cancel-in-progress: false
+jobs:
+  prepare:
+    if: ${{ false }} # source review + separate dispatch checkpoint required
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            ci/handshake-fixture
+            app/src/main/jniLibs/x86_64
+          sparse-checkout-cone-mode: false
+      - name: Failclosed exact tools and resources
+        timeout-minutes: 2
+        run: python3 ci/handshake-fixture/resolver/preflight.py
+      - name: Resolve controlled inputs or stop before payloads
+        timeout-minutes: 25
+        env:
+          JAVA_HOME: /usr/lib/jvm/temurin-17-jdk-amd64
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/29.0.14206865
+          HS_SDK_CMAKE: /usr/local/lib/android/sdk/cmake/3.22.1/bin/cmake
+        run: |
+          timeout --signal=TERM --kill-after=15s 1440s python3 ci/handshake-fixture/resolver/resolve_once.py
+      - name: Cleanup private inputs
+        if: always()
+        run: python3 ci/handshake-fixture/resolver/cleanup.py
+# No push/pull_request trigger, emulator/adb/sdkmanager, upload-artifact, cache,
+# release, product build or default-branch merge. if:false is intentional.
