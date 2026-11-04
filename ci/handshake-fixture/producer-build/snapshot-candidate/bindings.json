@@ -1,0 +1,19 @@
+{
+  "REVIEW.md": "b3de2345523dd4a1ca041b167990ae2734f3be75a3f8717431ac3c5f6e4ae57f",
+  "SNAPSHOT-WORKFLOW.INERT.yml": "e14c868a3f336e42ddfda301dc21a095a6337e084892abee9e0c74f17838f675",
+  "binding_contract.py": "42f8bc1c05c87d168aba8ef4a529eef7b3ac2d0135d1cdfb7a87df5c9c65e8fd",
+  "build_literal.py": "e63c9fabf7cddd5771eae0f65f10acfbd0d399dee82f6046201c45422b1ecb5e",
+  "cleanup.literal.py": "2a6cb6165effd7f02362f520e6365a8a0abe90559fec3ec626a781096866fbf1",
+  "external-postcommit-manifest.schema.json": "8e025d5acd8fe70604023e817ec7d43a13fbcf6ac01f2ca95f94956319f0a48d",
+  "fd_lifecycle.py": "e449cc637d0ffa84e41faccc60a9063a312d81866aca76cfbc354cd6976a67e5",
+  "gate.literal.py": "8733f40853d5fa19ade66c5dc0aef8f3cb8cbddf6cd691d27fc954ef4b67da69",
+  "installer.literal.py": "6c1805a3f573c84403733dbdeacbc070224e214c7861f4a1535b20af5a9c3b28",
+  "literal-bindings.json": "f68e7ddc4cd41b08a340fa5f7d5c80b5bbe94f1ab96b07464c646c197b28f227",
+  "snapshot_contract.py": "473a608d52faaf29ee1886a8478ac60363fc07494b935f82096a6720e50dd253",
+  "standalone_helper.py": "92ac336d5a0be267fdd1f61b239557f730bd18dc9e5bffb1336c88f9cae0a093",
+  "test_binding.py": "1be664012dd4e6ca83b2d9d63949a7941760e3b0939ac6335f7e662406af5aad",
+  "test_fd_lifecycle.py": "37efe0597d03d1f43ca565274f11e7781f36667e5e694c7b6a3ff358a9076f80",
+  "test_literal.py": "350b3121540a93de157f877c1b2b66ef72ba9882975b74ceae7f949c090ae17b",
+  "test_snapshot_contract.py": "1a19039d4d2b78b7c24da3b164cf1423101c964664b64302f985c701670f8853",
+  "tests.txt": "38c1d28b098de3a34d4caef2531d3c679d151da99fee70457f448b57108eca71"
+}

@@ -1,0 +1,5 @@
+{
+  "status": "UNRESOLVED_EXTERNAL_REVIEW_RECORD_NOT_DISPATCH_AUTHORITY",
+  "required_after_commit_exists": ["repository", "workflow_id", "workflow_path", "expected_head", "expected_ref", "exact_workflow_sha256_at_head", "helper_sha256", "installer_sha256", "cleanup_sha256", "gate_sha256", "reviewed_scope_and_limits", "actual_run_identity_and_context_after_execution"],
+  "rules": ["Never embed own workflow commit SHA or workflow digest into that workflow", "No expected_workflow_sha value or guessed workflow_sha equality", "Live ref/head and exact workflow/source bytes verified before separately authorized dispatch", "Record opaque managed workflow_sha and reconcile actual run afterward; unresolved remains STOP", "No default expected_head/ref; no authority created by matching caller inputs"]
+}

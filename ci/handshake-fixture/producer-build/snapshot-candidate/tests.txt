@@ -1,0 +1,42 @@
+test_caps_before_copy (test_snapshot_contract.Snapshot) ... ok
+test_deadline (test_snapshot_contract.Snapshot) ... ok
+test_exact_inventory (test_snapshot_contract.Snapshot) ... ok
+test_header_count_exact_boundary (test_snapshot_contract.Snapshot) ... ok
+test_hostdeps_separately_closed (test_snapshot_contract.Snapshot) ... ok
+test_inventory_escape_rejected (test_snapshot_contract.Snapshot) ... ok
+test_inventory_synthetic_no_contentread (test_snapshot_contract.Snapshot) ... ok
+test_managed_image_not_floating_label (test_snapshot_contract.Snapshot) ... ok
+test_missing_extra_tool_ambiguous_resource (test_snapshot_contract.Snapshot) ... ok
+test_no_overwrite (test_snapshot_contract.Snapshot) ... ok
+test_parent_privacy (test_snapshot_contract.Snapshot) ... ok
+test_receipt_dedup_and_sizecap (test_snapshot_contract.Snapshot) ... ok
+test_source_copy_hash_metadata (test_snapshot_contract.Snapshot) ... ok
+test_symlink_and_changed_metadata_rejected (test_snapshot_contract.Snapshot) ... ok
+test_alias_component_metadata_captured (test_fd_lifecycle.FD) ... ok
+test_chunk_hash_deadline_size (test_fd_lifecycle.FD) ... ok
+test_cleanup_failure_preserves_reason_and_receipts (test_fd_lifecycle.FD) ... ok
+test_cleanup_symlink_does_not_follow (test_fd_lifecycle.FD) ... ok
+test_emit_failure_still_cleanup (test_fd_lifecycle.FD) ... ok
+test_escape_component_stop (test_fd_lifecycle.FD) ... ok
+test_full_fd_lifecycle (test_fd_lifecycle.FD) ... ok
+test_identity_replaced_root_stops_cleanup (test_fd_lifecycle.FD) ... ok
+test_parent_writable_rejected (test_fd_lifecycle.FD) ... ok
+test_deterministic_generation (test_literal.Literal) ... ok
+test_gate_before_sudo_and_required_inputs (test_literal.Literal) ... ok
+test_installer_literal_digest_context_and_gate (test_literal.Literal) ... ok
+test_literal_hashes (test_literal.Literal) ... ok
+test_no_checkout_and_cleanup_owned_success (test_literal.Literal) ... ok
+test_standalone_imports_no_repo (test_literal.Literal) ... ok
+test_defaults_symbolic_or_rawsha_ref_rejected (test_binding.Binding) ... ok
+test_git_ref_malformed_components (test_binding.Binding) ... ok
+test_moved_head (test_binding.Binding) ... ok
+test_non_circular_external_values (test_binding.Binding) ... ok
+test_valid_git_ref_components (test_binding.Binding) ... ok
+test_workflow_context_opaque_distinct_recorded (test_binding.Binding) ... ok
+test_workflow_context_shape_only (test_binding.Binding) ... ok
+test_wrong_workflow_path (test_binding.Binding) ... ok
+
+----------------------------------------------------------------------
+Ran 37 tests in 0.149s
+
+OK

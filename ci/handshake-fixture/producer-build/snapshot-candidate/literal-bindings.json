@@ -1,0 +1,7 @@
+{
+  "standalone_helper.py": "92ac336d5a0be267fdd1f61b239557f730bd18dc9e5bffb1336c88f9cae0a093",
+  "installer.literal.py": "6c1805a3f573c84403733dbdeacbc070224e214c7861f4a1535b20af5a9c3b28",
+  "cleanup.literal.py": "2a6cb6165effd7f02362f520e6365a8a0abe90559fec3ec626a781096866fbf1",
+  "gate.literal.py": "8733f40853d5fa19ade66c5dc0aef8f3cb8cbddf6cd691d27fc954ef4b67da69",
+  "SNAPSHOT-WORKFLOW.INERT.yml": "e14c868a3f336e42ddfda301dc21a095a6337e084892abee9e0c74f17838f675"
+}
