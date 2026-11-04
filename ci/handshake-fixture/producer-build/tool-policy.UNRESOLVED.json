@@ -1,0 +1,8 @@
+{
+ "status":"UNRESOLVED_NO_COMPILER_AUTHORITY",
+ "ndk_version":"29.0.14206865",
+ "files":[],
+ "source_files":{},
+ "host_dependencies":"UNRESOLVED",
+ "remaining":"No actual runner clang/linker SHA/version/resource include policy qualified. Must independently review actual existing NDK29 compiler/resource bytes and explicit trusted-host dependency policy before build. No tool download or accepting whatever is present. No fallback."
+}

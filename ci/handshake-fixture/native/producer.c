@@ -1,5 +1,7 @@
 #define _GNU_SOURCE
 #include <gio/gio.h>
+#include <stdio.h>
+#include "request_protocol.h"
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <fcntl.h>
