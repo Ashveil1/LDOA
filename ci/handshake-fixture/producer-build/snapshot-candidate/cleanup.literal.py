@@ -1,6 +1,6 @@
 import os,stat,hashlib,json
 FLAGS=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW
-EXPECTED_DIGEST='788658cc92b432df093316e8b09ffae8320c81c3ec2d14e4dec03bd5386ccb40'
+EXPECTED_DIGEST='b5200cb0144580baa650f557b66016873f1a254eff0c0c0526515ae53722a239'
 def fail():raise RuntimeError('CLEANUP_BOUNDARY')
 def clear(fd):
  os.fchmod(fd,0o700)

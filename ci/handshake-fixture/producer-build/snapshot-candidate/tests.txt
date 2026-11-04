@@ -66,8 +66,12 @@ test_parent_privacy (test_snapshot_contract.Snapshot) ... ok
 test_receipt_dedup_and_sizecap (test_snapshot_contract.Snapshot) ... ok
 test_source_copy_hash_metadata (test_snapshot_contract.Snapshot) ... ok
 test_symlink_and_changed_metadata_rejected (test_snapshot_contract.Snapshot) ... ok
+test_all_literal_host_stop_codes_enumerated (test_static_diagnostic.Diagnostic) ... ok
+test_known_stop_no_path (test_static_diagnostic.Diagnostic) ... ok
+test_snapshot_cleanup_keeps_sanitized_checkpoint (test_static_diagnostic.Diagnostic) ... ok
+test_unknown_error_text_never_escapes (test_static_diagnostic.Diagnostic) ... ok
 
 ----------------------------------------------------------------------
-Ran 68 tests in 0.192s
+Ran 72 tests in 0.206s
 
 OK

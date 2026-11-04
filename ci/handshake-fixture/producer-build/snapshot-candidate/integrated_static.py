@@ -3,6 +3,7 @@ import os,stat,time,resource,hashlib,json,math
 from host_contract import Stop,closure,MAX_NODES,MAX_EDGES,MAX_TOTAL,MAX_ELF
 from descriptor_binding import authenticated_row,meta
 from resolution_policy import POLICY
+from static_diagnostic import StaticPhaseStop
 SNAP='/ldoa-qualification/ndk29-snapshot/'
 CLEAN_ENV={'PATH':'/usr/bin:/bin','LC_ALL':'C'}
 CLEANUP_RESERVE=30 # proposed seconds inside same1200 ceiling, unmeasured, no assurance
@@ -65,10 +66,11 @@ class Session:
   return {'bindings':saved,'unique_observed_bytes':self.bytes,'lookup_attempts':self.attempts,'phases':self.phases}
 def integrated_static_phase(snapshotfd,rows,image,deadline):
  # Called only AFTER snapshot verify, BEFORE snapshot cleanup. No tool subprocess.
- root=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+ root=None;session=None;phase='ENTER'
  try:
+  root=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
   if meta(os.fstat(root))!=meta(os.stat('/',follow_symlinks=False)):raise Stop('HOST_ROOT_CHANGED')
-  session=Session(root,deadline);session.check('STATIC_BEGIN');pre=session.config()
+  session=Session(root,deadline);session.check('STATIC_BEGIN');phase='CONFIG_PRE';pre=session.config();phase='TOOLS'
   tools={r['logical']:r for r in rows if r['scope']=='TOOL'};prefix='toolchains/llvm/prebuilt/linux-x86_64/bin/'
   if set(tools)!={prefix+'clang',prefix+'ld.lld'}:raise Stop('HOST_START_SET')
   starts={'clang21':SNAP+tools[prefix+'clang']['canonical'],'lld':SNAP+tools[prefix+'ld.lld']['canonical']}
@@ -76,8 +78,10 @@ def integrated_static_phase(snapshotfd,rows,image,deadline):
    captured=session.lookup(SNAP+logical)
    if captured is None or captured['canonical']!=SNAP+r['canonical'] or hashlib.sha256(captured['data']).hexdigest()!=r['sha256']:raise Stop('SEALED_TOOL_BINDING')
   # No ambientenv copied into anyconsumer. This candidate has NO consumer.
-  result=closure(starts,session.lookup);post=session.config()
+  phase='CLOSURE';result=closure(starts,session.lookup);phase='CONFIG_POST';post=session.config()
   if pre!=post:raise Stop('HOST_CONFIG_CHANGED')
-  evidence=session.finish()
+  phase='POST_BINDINGS';evidence=session.finish();phase='COMPLETE'
   return {'status':'STATIC_CONSISTENCY_ONLY_NOT_APPROVED','policy':POLICY,'environment_for_no_consumer':CLEAN_ENV,'closure':result,'host_config':pre,'evidence':evidence,'job':image,'compiler_execution_authorized':False,'runtime_loader_failure_possible':True}
- finally:os.close(root)
+ except Exception as error:raise StaticPhaseStop(error,phase,session) from None
+ finally:
+  if root is not None:os.close(root)

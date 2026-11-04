@@ -1,0 +1,15 @@
+{
+  "static_diagnostic.py": "125c3bb659906bcdd6e322acc26660cc8a14ca4fa36ab0a1c765fb8b47c1aae6",
+  "test_static_diagnostic.py": "706bbdbbadf5842ed6e9d6c9210b65b98f64a8b111469c4b34e3e1b9e0170a74",
+  "integrated_static.py": "e388f20662bf474d349dc55561fc4f102bce04fbbe5810078ef589b2e7766689",
+  "fd_lifecycle.py": "8f33956f2e33001cf3343d19ccd2c1e42de3b14d97139bce0b03202e1d66f5b2",
+  "snapshot_contract.py": "953ffd654dfeb0bbaebffc63ab0720fa83882a6838699d0fd61e641bf74fde38",
+  "build_literal.py": "ede3bb59e67905285ec7874dfe1e5e8c4bce9e907b626bf45fdc00db8e473895",
+  "standalone_helper.py": "b5200cb0144580baa650f557b66016873f1a254eff0c0c0526515ae53722a239",
+  "installer.literal.py": "90d066d210298fcc64af485366e2298bf0615e567a52fc739c282d6ff3332bc8",
+  "cleanup.literal.py": "0629463e85c3497f5bbf4f0157c39cf07126efa3d875fe648aa027ae5b01684d",
+  "SNAPSHOT-WORKFLOW.INERT.yml": "b8a99173a5322e084f866ff0fffeb00131b6ef8012ee5e4d30c6c971c420142e",
+  "literal-bindings.json": "3fe011b1a325c04ef8d546d57f41c71c581b4711ab4644b2327d46ad9986d190",
+  "tests.txt": "4015ee1f975c58a2c508551c57428baca992ce1e673c1519b21a5cd0bdeabd88",
+  "DIAGNOSTIC-REVIEW.md": "a8ce40484aa2a9b901553d156a338d63d2adc106ab12f5249a5ea6d59a8f3a24"
+}

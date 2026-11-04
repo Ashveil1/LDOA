@@ -211,7 +211,11 @@ def snapshot_only(source,parentfd,image,deadline,uid=0,emit=None,static_phase=No
    if len(json.dumps(static_result,sort_keys=True).encode())>MAX_RECEIPT:raise Stop('RECEIPT_CAP')
    result['static_consistency']=static_result
    verify_fd(fd,rows,deadline,uid);root_binding(parentfd,fd,identity)
- except Exception as error:result['reason']=safe_reason(error);result['status']='STOP'
+ except Exception as error:
+  result['reason']=safe_reason(error);result['status']='STOP'
+  if type(error).__name__=='StaticPhaseStop' and isinstance(error,Stop):
+   # The bundled finite wrapper owns this small sanitized checkpoint.
+   result['static_checkpoint']=error.checkpoint
  finally:
   result['timing']={'elapsed_total':time.monotonic()-(deadline-1200),'remaining':deadline-time.monotonic(),'cleanup_reserve_proposal':30}
   # Emit receipt BEFORE cleanup and again after. A cleanup failure does not erase the primary reason.

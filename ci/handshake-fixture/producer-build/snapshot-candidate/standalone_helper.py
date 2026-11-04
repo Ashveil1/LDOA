@@ -8,6 +8,7 @@ MAX_TOOL=512*1024**2;MAX_HEADERS=64*1024**2;MAX_TOTAL=600*1024**2;MAX_RECEIPT=4*
 class Stop(RuntimeError):pass
 def safe_reason(error):
  allowed={'DEADLINE_INVALID','DEADLINE','PATH','IMAGE_FIELDS','IMAGE_IDENTITY','IMAGE_CONTEXT','INVENTORY','CANONICAL_CONFLICT','TOOL_SCOPE','HEADER_SCOPE','DESCRIPTOR_SCOPE','SCOPE','INCOMPLETE_INVENTORY','HEADER_CAP','SNAPSHOT_CAP','DEPTH','TYPE','SOURCE_CHANGED','SOURCE_GREW','SOURCE_REPLACED','COPY_HASH','ANCESTOR_LABEL','ANCESTOR_CAP','RECEIPT_CAP','PATH_ESCAPE','SETID','RESOURCE_AMBIGUOUS','TRAVERSAL_CAP','REVISION','ROOT_BOUNDARY','OUTPUT_EXISTS','SNAPSHOT_CHANGED','CONTEXT_CHANGED','INVENTORY_CHANGED','HELPER_BOUNDARY','ALIAS_CHAIN','CLEANUP_FAILED','INSTALL_BOUNDARY','HELPER_DIGEST','RECEIPT_WRITE'}
+ if type(error).__name__=='StaticPhaseStop' and isinstance(error,Stop):return error.args[0] if error.args[0] in globals().get('HOST_REASONS',()) or error.args[0]=='STATIC_UNCLASSIFIED_STOP' else 'SAFE_SNAPSHOT_STOP'
  return error.args[0] if isinstance(error,Stop) and error.args and error.args[0] in allowed else 'SAFE_SNAPSHOT_STOP'
 def tick(deadline,clock=time.monotonic):
  now=clock()
@@ -418,6 +419,19 @@ POLICY={
  'failure':'REAL_LOADER_FAILURE_REMAINS_POSSIBLE; NO_FALLBACK_OR_WIDENING',
  'execution_authority':False,
 }
+"""Finite static-phase stop reporting. Never return exception text or filesystem paths."""
+HOST_REASONS=frozenset({
+ 'ELF_SIZE','ELF_BOUNDS','ELF_FORMAT','ELF_HEADER','ELF_SEGMENT','ELF_DUP_SEGMENT','ELF_STRING','HOST_INTERPRETER','DYNAMIC_CAP','NEEDED_CAP','DYNAMIC_DUPLICATE','NODEFLIB_UNSUPPORTED','DYNAMIC_UNTERMINATED','STRTAB','STRTAB_MAPPING','NEEDED_NAME','HOST_PATH','HOST_START_SET','HOST_ROW','HOST_ALIAS','HOST_SIZE','HOST_CHANGED','RPATH_INHERITANCE_UNSUPPORTED','HOST_RUNPATH','HOST_MISSING','HOST_AMBIGUOUS','HOST_OUTSIDE_ROOTS','HOST_NODE_CAP','HOST_BYTE_CAP','HOST_TOOL_INTERPRETER_REQUIRED','HOST_EDGE_CAP',
+ 'HOST_BINDING_DEADLINE','HOST_ALIAS_PATH','HOST_ALIAS_ESCAPE','HOST_ALIAS_CHANGED','HOST_ALIAS_CAP','HOST_ALIAS_CYCLE','HOST_COMPONENT_CHANGED','HOST_TERMINAL_TYPE','HOST_BINDING_BYTE_CAP','HOST_TERMINAL_CHANGED','HOST_BINDING_CHANGED',
+ 'STATIC_DEADLINE_RESERVE','HOST_ROOT_CHANGED','HOST_LOOKUP_CAP','HOST_ABSENCE_CHANGED','HOST_CONFIG_CAP','HOST_CONFIG_CHANGED','HOST_PRELOAD','SEALED_TOOL_BINDING'})
+PHASES=frozenset({'ENTER','CONFIG_PRE','TOOLS','CLOSURE','CONFIG_POST','POST_BINDINGS','COMPLETE'})
+class StaticPhaseStop(Stop):
+ def __init__(self,error,phase,session=None):
+  reason=error.args[0] if isinstance(error,Stop) and len(error.args)==1 and error.args[0] in HOST_REASONS else 'STATIC_UNCLASSIFIED_STOP'
+  super().__init__(reason)
+  self.checkpoint={'status':'STATIC_STOP_PARTIAL_NOT_QUALIFIED','phase':phase if phase in PHASES else 'ENTER','reason':reason}
+  if session is not None:
+   self.checkpoint.update({'lookup_attempts':session.attempts,'unique_requested_paths':len(session.records),'unique_observed_bytes':session.bytes,'phase_resources':list(session.phases)})
 """Finite SOURCE candidate. Entry reads occur only under future reviewed execution authority."""
 import os,stat,time,resource,hashlib,json,math
 SNAP='/ldoa-qualification/ndk29-snapshot/'
@@ -482,10 +496,11 @@ class Session:
   return {'bindings':saved,'unique_observed_bytes':self.bytes,'lookup_attempts':self.attempts,'phases':self.phases}
 def integrated_static_phase(snapshotfd,rows,image,deadline):
  # Called only AFTER snapshot verify, BEFORE snapshot cleanup. No tool subprocess.
- root=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+ root=None;session=None;phase='ENTER'
  try:
+  root=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
   if meta(os.fstat(root))!=meta(os.stat('/',follow_symlinks=False)):raise Stop('HOST_ROOT_CHANGED')
-  session=Session(root,deadline);session.check('STATIC_BEGIN');pre=session.config()
+  session=Session(root,deadline);session.check('STATIC_BEGIN');phase='CONFIG_PRE';pre=session.config();phase='TOOLS'
   tools={r['logical']:r for r in rows if r['scope']=='TOOL'};prefix='toolchains/llvm/prebuilt/linux-x86_64/bin/'
   if set(tools)!={prefix+'clang',prefix+'ld.lld'}:raise Stop('HOST_START_SET')
   starts={'clang21':SNAP+tools[prefix+'clang']['canonical'],'lld':SNAP+tools[prefix+'ld.lld']['canonical']}
@@ -493,11 +508,13 @@ def integrated_static_phase(snapshotfd,rows,image,deadline):
    captured=session.lookup(SNAP+logical)
    if captured is None or captured['canonical']!=SNAP+r['canonical'] or hashlib.sha256(captured['data']).hexdigest()!=r['sha256']:raise Stop('SEALED_TOOL_BINDING')
   # No ambientenv copied into anyconsumer. This candidate has NO consumer.
-  result=closure(starts,session.lookup);post=session.config()
+  phase='CLOSURE';result=closure(starts,session.lookup);phase='CONFIG_POST';post=session.config()
   if pre!=post:raise Stop('HOST_CONFIG_CHANGED')
-  evidence=session.finish()
+  phase='POST_BINDINGS';evidence=session.finish();phase='COMPLETE'
   return {'status':'STATIC_CONSISTENCY_ONLY_NOT_APPROVED','policy':POLICY,'environment_for_no_consumer':CLEAN_ENV,'closure':result,'host_config':pre,'evidence':evidence,'job':image,'compiler_execution_authorized':False,'runtime_loader_failure_possible':True}
- finally:os.close(root)
+ except Exception as error:raise StaticPhaseStop(error,phase,session) from None
+ finally:
+  if root is not None:os.close(root)
 # Standalone helper is generated by concatenating snapshot_contract.py and this source.
 import sys,errno
 PARENT='/ldoa-qualification'
@@ -711,7 +728,11 @@ def snapshot_only(source,parentfd,image,deadline,uid=0,emit=None,static_phase=No
    if len(json.dumps(static_result,sort_keys=True).encode())>MAX_RECEIPT:raise Stop('RECEIPT_CAP')
    result['static_consistency']=static_result
    verify_fd(fd,rows,deadline,uid);root_binding(parentfd,fd,identity)
- except Exception as error:result['reason']=safe_reason(error);result['status']='STOP'
+ except Exception as error:
+  result['reason']=safe_reason(error);result['status']='STOP'
+  if type(error).__name__=='StaticPhaseStop' and isinstance(error,Stop):
+   # The bundled finite wrapper owns this small sanitized checkpoint.
+   result['static_checkpoint']=error.checkpoint
  finally:
   result['timing']={'elapsed_total':time.monotonic()-(deadline-1200),'remaining':deadline-time.monotonic(),'cleanup_reserve_proposal':30}
   # Emit receipt BEFORE cleanup and again after. A cleanup failure does not erase the primary reason.

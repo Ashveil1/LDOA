@@ -1,0 +1,11 @@
+# Masked static STOP: diagnosis and finite reporting proposal only
+
+Actual41888653120 remains STOP SAFE_SNAPSHOT_STOP, no static_result, both cleanup absence proofs. Retained snapshot receipts do not contain host phase or exception. Therefore the exact static failing check CANNOT be recovered from this run. No parser/resolver success or real host failure identity is inferred.
+
+Source inspection establishes an observability defect: host Stop enums were not in snapshot safe_reason whitelist, and the integrated result/resources were returned only on success. Any descriptor/config/parser Stop or unclassified Python error could produce the same current receipt. In particular it is not evidence for cache conflict, missing library, malformed ELF or cap exhaustion individually. No synthetic case can identify which actual unknown happened.
+
+This proposal adds a finite StaticPhaseStop wrapper. Known host Stop enum names only are retained; unknown exception messages, paths, tracebacks and class names are NOT emitted. Unknown failures become STATIC_UNCLASSIFIED_STOP. Checkpoint phase uses a seven-value enum, plus bounded phase resource numbers/lookup counts/unique bytes only. Partial bindings/data/config contents are not emitted. Snapshot STOP keeps that partial checkpoint through existing finally cleanup. No retry, parser semantics, caps, search roots, privileged commands, deadline, resource grant or trust tier changes. Old receipt is not amended.
+
+72 synthetic tests pass, including all literal Stop-code coverage, unknown/private error suppression, sanitized checkpoint with cleanup, and deterministic literal generation. Rebuilt helperb5200cb0144580baa650f557b66016873f1a254eff0c0c0526515ae53722a239 is bound in literal-bindings.json; no new helper or generated workflow is approved for push or execution. Source remains outside repository. Main must review the finite exact delta before any later source backup or one-shot decision. Existing trailing whitespace is preserved; no formatting override is performed here.
+
+This ZIP is an explicit DELTA proposal over the reviewed integrated candidate, not a full replacement archive. diagnostic-bindings.json covers its members; the base bindings.json is intentionally not included or relabeled. A future reviewed full candidate would need a new complete manifest.
