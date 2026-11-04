@@ -8,7 +8,17 @@ def safe_name(name):
  p=pathlib.PurePosixPath(name)
  if not name or p.is_absolute() or '..' in p.parts:raise Stop('MEMBER_PATH')
  return str(p)
+# Exact future GNU producer recipe, no sanitizers/OpenMP/TM/quadmath/-latomic.
+# Changing recipe requires review of this targeted selection, not ignoring missing links.
+PRODUCER_RECIPE_SHA256='8101830e250b9786dc269f18c7263304ed17b5d4496fdeadc6a25ef9c8990b13'
+GCC_PREFIX='usr/lib/gcc/x86_64-linux-gnu/13/'
+OPTIONAL_GCC_ALIASES={name+'.so':'../../../x86_64-linux-gnu/'+target for name,target in {
+ 'libasan':'libasan.so.8','libatomic':'libatomic.so.1','libgomp':'libgomp.so.1',
+ 'libhwasan':'libhwasan.so.0','libitm':'libitm.so.1','liblsan':'liblsan.so.0',
+ 'libquadmath':'libquadmath.so.0','libtsan':'libtsan.so.2','libubsan':'libubsan.so.1'}.items()}
+def optional_alias(n):return OPTIONAL_GCC_ALIASES.get(n[len(GCC_PREFIX):]) if n.startswith(GCC_PREFIX) else None
 def selected(n):
+ if optional_alias(n) is not None:return False
  if any(x in n for x in ['/gio/modules/','/girepository-','/glib-2.0/codegen/']):return False
  return n.startswith(('usr/include/','usr/lib/x86_64-linux-gnu/','lib/x86_64-linux-gnu/','usr/lib64/','lib64/')) or (n.startswith('usr/lib/gcc/x86_64-linux-gnu/13/') and n.endswith(('.o','.a','.so')))
 def link_target(name,target):
@@ -49,7 +59,7 @@ def acquire(row,dest,deadline):
    h.update(b);out.write(b)
  if count!=expected or h.hexdigest()!=row['sha256']:raise Stop('PACKAGE_PIN')
  return {'package':row['package'],'url':url,'bytes':count,'sha256':h.hexdigest()}
-def inventory_tar(tf,package,records,stage,total):
+def inventory_tar(tf,package,records,stage,total,excluded=None):
  seen=set()
  for member in tf:
   n=safe_name(member.name)
@@ -57,6 +67,11 @@ def inventory_tar(tf,package,records,stage,total):
   seen.add(n)
   if member.isdir():continue
   if member.size>MEMBER_CAP:raise Stop('MEMBER_SIZE')
+  target=optional_alias(n)
+  if target is not None:
+   if package!='libgcc-13-dev' or not member.issym() or member.linkname!=target:raise Stop('OPTIONAL_GCC_ALIAS_CHANGED')
+   if excluded is not None:excluded.append({'path':n,'package':package,'type':'symlink','target':target,'reason':'OUTSIDE_PINNED_PRODUCER_LINK_RECIPE'})
+   continue
   if not selected(n):continue
   if n in records:raise Stop('SELECTED_PATH_COLLISION')
   if member.issym():records[n]={'path':n,'package':package,'type':'symlink','target':member.linkname,'normalized_target':link_target(n,member.linkname)};continue
@@ -75,7 +90,7 @@ def main():
  if hashlib.sha256(raw).hexdigest()!=a.pins_sha256:raise Stop('PROPOSAL_PIN')
  pins=json.loads(raw);rows=pins['packages']
  if len(rows)!=13 or sum(r['bytes'] for r in rows)!=TOTAL or len({r['package'] for r in rows})!=13:raise Stop('EXACT13_REQUIRED')
- root=pathlib.Path(a.private_root);root.mkdir(mode=0o700);stage=root/'selected';stage.mkdir(mode=0o700);records={};receipts=[];total=0;deadline=time.monotonic()+600
+ root=pathlib.Path(a.private_root);root.mkdir(mode=0o700);stage=root/'selected';stage.mkdir(mode=0o700);records={};receipts=[];excluded=[];total=0;deadline=time.monotonic()+600
  try:
   for i,row in enumerate(rows):
    deb=root/f'{i}.deb';receipts.append(acquire(row,deb,deadline));tar=root/'data.tar'
@@ -96,14 +111,14 @@ def main():
      if child.wait(timeout=max(.01,deadline-time.monotonic())):raise Stop('DEB_PARSE')
     finally:
      if child.poll() is None:child.kill();child.wait()
-   with tarfile.open(tar,mode='r:') as tf:total=inventory_tar(tf,row['package'],records,stage,total)
+   with tarfile.open(tar,mode='r:') as tf:total=inventory_tar(tf,row['package'],records,stage,total,excluded)
    tar.unlink();deb.unlink()
   from qualify_static import qualify,canonical
   canonical_records={canonical(n):r for n,r in records.items()}
   if len(canonical_records)!=len(records):raise Stop('USRMERGE_COLLISION')
   adjusted={n:dict(r,normalized_target=canonical(r['normalized_target'])) if r['type']=='symlink' else r for n,r in canonical_records.items()}
   missing=link_errors(adjusted)
-  result={'scope':'SELECTED_GUEST_DATA_ONLY_NOT_COMPILE_READY','packages':receipts,'files':list(records.values()),'unresolved_links':missing,'complete':False,'compiler_executed':False,'guest_executed':False,'selected_bytes':total,'producer_elf':'NOT_BUILT','runtime_asset':'NOT_READY'}
+  result={'scope':'SELECTED_GUEST_DATA_ONLY_NOT_COMPILE_READY','packages':receipts,'files':list(records.values()),'excluded_optional_gcc_aliases':excluded,'producer_recipe_sha256':PRODUCER_RECIPE_SHA256,'unresolved_links':missing,'complete':False,'compiler_executed':False,'guest_executed':False,'selected_bytes':total,'producer_elf':'NOT_BUILT','runtime_asset':'NOT_READY'}
   (root/'member-binding.json').write_text(json.dumps(result,indent=2));print(json.dumps({'packages':len(receipts),'selected_files':len(records),'selected_bytes':total,'unresolved_links':len(missing),'scope':result['scope']}))
   if missing:raise Stop('SELECTED_LINK_TARGET_MISSING')
   static=qualify(records,stage,deadline)

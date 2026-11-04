@@ -2,6 +2,7 @@
 import pathlib,os,sys,hashlib,json,shutil,subprocess,platform,tempfile,signal
 HERE=pathlib.Path(__file__).resolve().parent
 from tool_gate import qualify_tools,unchanged
+from guest_data_only import PRODUCER_RECIPE_SHA256
 PIN='57921bab9f0c78ba163536b5c90dfdb1244bd6ee9be3e7959f8d8cbc4ee47179'
 def cleanup(root):
  if root.is_symlink():raise RuntimeError('ROOT_SYMLINK')
@@ -16,6 +17,7 @@ def main():
  tools=[]
  try:tools=qualify_tools()
  except Exception:errors.append('HOST_TOOL_QUALIFICATION_FAILED')
+ if hashlib.sha256((HERE.parent/'build_selected.py').read_bytes()).hexdigest()!=PRODUCER_RECIPE_SHA256:errors.append('PRODUCER_SELECTION_RECIPE_CHANGED')
  if hashlib.sha256((HERE/'package-pins.json').read_bytes()).hexdigest()!=PIN:errors.append('PACKAGE_PROPOSAL_PIN')
  print(json.dumps({'scope':'GUEST_DATA_PREFLIGHT','errors':errors,'runtime_bound_tools':tools,'root_preexisting':root.exists()}),flush=True)
  bindings=json.loads((HERE/'source-bindings.json').read_text())

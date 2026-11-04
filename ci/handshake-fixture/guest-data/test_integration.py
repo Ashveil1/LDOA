@@ -18,7 +18,8 @@ class Integration(unittest.TestCase):
  def test_deadline_and_no_compiler_entry_contract(self):
   s=pathlib.Path(__file__).with_name('guest_data_only.py').read_text();e=pathlib.Path(__file__).with_name('entry.py').read_text()
   self.assertIn("time.monotonic()+600",s);self.assertIn('timeout=600',e);self.assertIn('os.killpg(child.pid,signal.SIGKILL)',e);self.assertIn('start_new_session=True',e);self.assertIn('finally:',e);self.assertIn('cleanup(root)',e)
-  for forbidden in ['build_selected','clang','ld.lld','ldd','apt-get']:self.assertNotIn(forbidden,e)
+  self.assertIn("(HERE.parent/'build_selected.py').read_bytes()",e)
+  for forbidden in ['clang','ld.lld','ldd','apt-get']:self.assertNotIn(forbidden,e)
 if __name__=='__main__':unittest.main()
 
 class DeadlineAndStatic(unittest.TestCase):
