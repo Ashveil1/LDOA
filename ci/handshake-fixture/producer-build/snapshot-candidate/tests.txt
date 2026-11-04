@@ -35,8 +35,12 @@ test_valid_git_ref_components (test_binding.Binding) ... ok
 test_workflow_context_opaque_distinct_recorded (test_binding.Binding) ... ok
 test_workflow_context_shape_only (test_binding.Binding) ... ok
 test_wrong_workflow_path (test_binding.Binding) ... ok
+test_labels_fixed_no_external_text (test_preinstall_stat.StatReceipt) ... ok
+test_nonroot_nonwritable_still_rejected (test_preinstall_stat.StatReceipt) ... ok
+test_opt_writable_exact_label_metadata (test_preinstall_stat.StatReceipt) ... ok
+test_root_writable_stops_before_opt_or_mkdir (test_preinstall_stat.StatReceipt) ... ok
 
 ----------------------------------------------------------------------
-Ran 37 tests in 0.149s
+Ran 41 tests in 0.149s
 
 OK

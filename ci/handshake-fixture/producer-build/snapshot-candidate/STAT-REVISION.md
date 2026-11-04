@@ -1,0 +1,5 @@
+# Minimal preinstall stat receipt source enhancement
+
+Against corrected perfilemanifest backed at f104599c, inert candidate/currentfeature e43fe279. Original run41881393825 INSTALL_BOUNDARY STOP preserved; no retry/cleanupabsence claim. No repository edit/push/registration/dispatch/runnerread/sudo/resource/trustextension/build/runtime. Only generator emits fixed ROOT/OPT uid/gid/mode/guard JSON immediately after fstat and before unchanged fail()/mkdir. flush=True retains safe logs even when guardfails. No filepath/exceptiontext/freeformlabels. Guard logically unchanged; neither chmod nor alternateroot.
+
+41tests PASS:37original+4adversarial literalinstaller tests (allOSopen/stat/mkdir/privilege mocked, no runner reads). Tests assert ROOT0777 STOPbeforeOPT/mkdir, ROOTpassOPT0775 exactmetadata, uid1001mode0755reject, fixedfields/privacy. Deterministic6artifactsPASS. Helper/cleanup/gate bytes unchanged; installer/YAML/literalbindings regenerate via generator. Unchanged activeworkflow not edited. No blanket rootabsence: receipt says beforeinstallationeffects only, not hostfilesystemaudit.
