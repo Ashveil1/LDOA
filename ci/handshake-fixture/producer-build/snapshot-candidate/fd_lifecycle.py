@@ -187,7 +187,7 @@ def exact_revision(source,rows,deadline):
  if values!=['29.0.14206865']:raise Stop('REVISION')
 
 def fingerprint(rows,parents):return json.dumps({'rows':sorted(rows,key=lambda r:r['logical']),'parents':parents},sort_keys=True,separators=(',',':'))
-def snapshot_only(source,parentfd,image,deadline,uid=0,emit=None):
+def snapshot_only(source,parentfd,image,deadline,uid=0,emit=None,static_phase=None):
  result={'scope':'JOB_IMAGE_SNAPSHOT_CANDIDATE','status':'STOP','tool_executed':False,'host_dependencies':'UNQUALIFIED_NO_EXECUTION'};fd=None;identity=None
  try:
   managed_image(image);tick(deadline);fd,identity=create_root(parentfd)
@@ -206,8 +206,14 @@ def snapshot_only(source,parentfd,image,deadline,uid=0,emit=None):
   aliases(fd,rows);root_binding(parentfd,fd,identity);seal_fd(fd,rows,deadline,uid);verify_fd(fd,rows,deadline,uid)
   result=receipt(image,rows,parents,deadline);result['status']='SNAPSHOT_ONLY_NOT_APPROVED';result['host_dependencies']='UNQUALIFIED_NO_EXECUTION';result['snapshot_only']=True
   verify_fd(fd,rows,deadline,uid);root_binding(parentfd,fd,identity)
- except Exception as error:result['reason']=safe_reason(error)
+  if static_phase is not None:
+   static_result=static_phase(fd,rows,image,deadline)
+   if len(json.dumps(static_result,sort_keys=True).encode())>MAX_RECEIPT:raise Stop('RECEIPT_CAP')
+   result['static_consistency']=static_result
+   verify_fd(fd,rows,deadline,uid);root_binding(parentfd,fd,identity)
+ except Exception as error:result['reason']=safe_reason(error);result['status']='STOP'
  finally:
+  result['timing']={'elapsed_total':time.monotonic()-(deadline-1200),'remaining':deadline-time.monotonic(),'cleanup_reserve_proposal':30}
   # Emit receipt BEFORE cleanup and again after. A cleanup failure does not erase the primary reason.
   if emit:
    try:emit({'phase':'BEFORE_CLEANUP','receipt':result})
@@ -217,6 +223,8 @@ def snapshot_only(source,parentfd,image,deadline,uid=0,emit=None):
    except Exception as error:result['cleanup']='FAILED';result['cleanup_reason']=safe_reason(error);result['status']='STOP'
    finally:os.close(fd)
   else:result['cleanup']='NOT_CREATED'
+  result['timing']['after_cleanup_remaining']=deadline-time.monotonic()
+  result['timing']['after_cleanup_elapsed_total']=time.monotonic()-(deadline-1200)
   if emit:
    try:emit({'phase':'AFTER_CLEANUP','receipt':result})
    except Exception:result['receipt_emit']='FAILED';result['status']='STOP'
@@ -241,7 +249,7 @@ def cli():
     if st.st_uid!=0 or not stat.S_ISREG(st.st_mode) or stat.S_IMODE(st.st_mode)!=0o444 or st.st_size>64:raise Stop('HELPER_BOUNDARY')
     deadline=float(os.read(deadlinefd,65));tick(deadline)
    finally:os.close(deadlinefd)
-   result=snapshot_only(pathlib.Path(NDK),parentfd,image,deadline,emit=lambda data:print(json.dumps({**data,'dispatch_binding':dispatch_binding},sort_keys=True),flush=True))
+   result=snapshot_only(pathlib.Path(NDK),parentfd,image,deadline,static_phase=integrated_static_phase,emit=lambda data:print(json.dumps({**data,'dispatch_binding':dispatch_binding},sort_keys=True),flush=True))
   finally:os.close(parentfd)
  except Exception as error:print(json.dumps({'scope':'SNAPSHOT_PREFLIGHT_STOP','reason':safe_reason(error),'tool_executed':False}),flush=True)
  return 0 if result and result['status']=='SNAPSHOT_ONLY_NOT_APPROVED' and result.get('cleanup')=='ABSENT' else 1

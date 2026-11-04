@@ -2,7 +2,14 @@
 from pathlib import Path
 import hashlib,base64,json
 R=Path(__file__).resolve().parent
-helper=(R/'snapshot_contract.py').read_text()+'\n'+(R/'binding_contract.py').read_text().replace('class Stop(RuntimeError):pass','')+'\n'+(R/'fd_lifecycle.py').read_text()
+def local_source(name):
+ text=(R/name).read_text()
+ if name in ('host_contract.py','integrated_static.py'):text=text.replace('MAX_TOTAL','HOST_MAX_TOTAL')
+ text='\n'.join(line for line in text.splitlines() if not line.startswith(('from host_contract import','from descriptor_binding import','from resolution_policy import')) and line!='class Stop(RuntimeError):pass')
+ return text+'\n'
+helper=(R/'snapshot_contract.py').read_text()+'\n'+local_source('binding_contract.py')+local_source('host_contract.py')+local_source('descriptor_binding.py')+local_source('resolution_policy.py')+local_source('integrated_static.py')+(R/'fd_lifecycle.py').read_text()
+# Descriptor/parser tick must not shadow snapshot tick(deadline,clock). Use distinct global.
+helper=helper.replace('def tick(deadline):','def host_tick(deadline):').replace('tick(deadline);b=os.read(leaf','host_tick(deadline);b=os.read(leaf').replace('tick(deadline);st=os.stat(part','host_tick(deadline);st=os.stat(part')
 compile(helper,'standalone_helper.py','exec');(R/'standalone_helper.py').write_text(helper)
 digest=hashlib.sha256(helper.encode()).hexdigest();payload=base64.b64encode(helper.encode()).decode()
 installer='''import os,stat,sys,json,hashlib,base64,time,re
@@ -196,7 +203,7 @@ __GATE__
 __INSTALL__
           INSTALL
           echo 'installed=true' >> "$GITHUB_OUTPUT"
-      - name: Snapshot only, no tool consumption
+      - name: Snapshot plus STATIC consistency, no tool consumption
         run: sudo -n /usr/bin/timeout --signal=TERM --kill-after=5s 1230s /usr/bin/python3 -I /ldoa-qualification/ndk29_snapshot.py
       - name: Owned snapshot/helper emergency cleanup
         if: always() && steps.install.outputs.installed == 'true'

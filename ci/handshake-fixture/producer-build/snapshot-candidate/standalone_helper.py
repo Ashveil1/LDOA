@@ -184,7 +184,6 @@ def alias_chain(root,name):
 
 """Pure proposed dispatch binding, no I/O or effect."""
 import re
-
 REPO='Ashveil1/LDOA'
 PATH='.github/workflows/isolated-ndk29-snapshot-candidate.yml'
 def bind(actual,expected):
@@ -204,7 +203,301 @@ def bind(actual,expected):
  if actual['repository']!=REPO or actual['ref']!=ref or actual['workflow_ref']!=REPO+'/'+PATH+'@'+ref:raise Stop('BINDING_CONTEXT')
  # workflow_sha is recorded opaque. No guessed equality or last-touched semantics.
  return {'actual':dict(actual),'expected':dict(expected),'status':'CONTEXT_MATCH_EXTERNAL_CONTROLLER_APPROVAL_STILL_REQUIRED'}
+"""Pure, bounded clang21/lld host closure candidate. Never reads or executes real files."""
+import struct,re,hashlib,json
+MAX_ELF=192*1024*1024;MAX_NODES=64;MAX_EDGES=256;HOST_MAX_TOTAL=512*1024*1024
+ROOTS=('/lib/x86_64-linux-gnu/','/usr/lib/x86_64-linux-gnu/','/lib64/','/usr/lib64/')
+def parse_elf(data):
+ if not isinstance(data,bytes) or len(data)>MAX_ELF:raise Stop('ELF_SIZE')
+ def span(offset,size):
+  if offset<0 or size<0 or offset+size>len(data):raise Stop('ELF_BOUNDS')
+  return data[offset:offset+size]
+ def unpack(fmt,offset):return struct.unpack(fmt,span(offset,struct.calcsize(fmt)))
+ if len(data)<64 or data[:7]!=b'\x7fELF\x02\x01\x01':raise Stop('ELF_FORMAT')
+ fields=unpack('<HHIQQQIHHHHHH',16);typ,machine,version,entry,phoff,shoff,flags,ehsize,phsize,phnum,*_=fields
+ if typ not in (2,3) or machine!=62 or version!=1 or ehsize!=64 or phsize!=56 or not 1<=phnum<=128:raise Stop('ELF_HEADER')
+ span(phoff,phsize*phnum);loads=[];dynamic=[];interp=[]
+ for i in range(phnum):
+  ptype,pflags,off,va,pa,filesz,memsz,align=unpack('<IIQQQQQQ',phoff+i*phsize)
+  if filesz>memsz:raise Stop('ELF_SEGMENT')
+  if ptype in (1,2,3):span(off,filesz)
+  if ptype==1:loads.append((va,filesz,off))
+  elif ptype==2:dynamic.append((off,filesz))
+  elif ptype==3:interp.append(span(off,filesz))
+ if len(dynamic)>1 or len(interp)>1:raise Stop('ELF_DUP_SEGMENT')
+ def string(raw,index=0):
+  if not 0<=index<len(raw):raise Stop('ELF_STRING')
+  end=raw.find(b'\0',index)
+  if end<0 or end-index>4096:raise Stop('ELF_STRING')
+  try:value=raw[index:end].decode('ascii')
+  except UnicodeError:raise Stop('ELF_STRING')
+  if not value or any(ord(c)<32 or ord(c)==127 for c in value):raise Stop('ELF_STRING')
+  return value
+ interpreter=string(interp[0]) if interp else None
+ if interpreter and interpreter not in ('/lib64/ld-linux-x86-64.so.2','/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2'):raise Stop('HOST_INTERPRETER')
+ tags={};needed=[]
+ if dynamic:
+  off,size=dynamic[0]
+  if size%16 or size//16>4096:raise Stop('DYNAMIC_CAP')
+  terminated=False
+  for i in range(size//16):
+   tag,value=unpack('<qQ',off+i*16)
+   if tag==0:terminated=True;break
+   if tag==1:
+    needed.append(value)
+    if len(needed)>64:raise Stop('NEEDED_CAP')
+   elif tag in (5,10,14,15,29):
+    if tag in tags:raise Stop('DYNAMIC_DUPLICATE')
+    tags[tag]=value
+   # ELF DF_1_NODEFLIB changes search semantics. Do not silently apply default roots.
+   elif tag==0x6ffffffb and value&0x800:raise Stop('NODEFLIB_UNSUPPORTED')
+  if not terminated:raise Stop('DYNAMIC_UNTERMINATED')
+  if needed or any(t in tags for t in [14,15,29]):
+   if 5 not in tags or 10 not in tags or not 0<tags[10]<=1024*1024:raise Stop('STRTAB')
+   choices=[off+tags[5]-va for va,n,off in loads if va<=tags[5] and tags[5]+tags[10]<=va+n]
+   if len(choices)!=1:raise Stop('STRTAB_MAPPING')
+   raw=span(choices[0],tags[10])
+  else:raw=b''
+ else:raw=b''
+ names=[string(raw,index) for index in needed]
+ if len(names)!=len(set(names)) or any(not re.fullmatch(r'[A-Za-z0-9_.+-]+',n) for n in names):raise Stop('NEEDED_NAME')
+ return {'interpreter':interpreter,'needed':names,'rpath':string(raw,tags[15]) if 15 in tags else None,'runpath':string(raw,tags[29]) if 29 in tags else None,'soname':string(raw,tags[14]) if 14 in tags else None,'architecture':'ELF64_LE_X86_64'}
 
+def canonical(path):
+ if not isinstance(path,str) or not path.startswith('/') or len(path)>512 or not re.fullmatch(r'[A-Za-z0-9_+./-]+',path):raise Stop('HOST_PATH')
+ parts=[]
+ for p in path.split('/'):
+  if not p:continue
+  if p in ('.','..'):raise Stop('HOST_PATH')
+  parts.append(p)
+ return '/'+ '/'.join(parts)
+
+def closure(tool_paths,lookup):
+ """lookup(path) returns frozen currentjob bytes+metadata+explicit alias chain, or None.
+ Pure map callback in tests. Future I/O adapter must enforce descriptor/hash/context gates.
+ No cache/environment/hwcaps discovery or executable loader. Unsupported semantics STOP.
+ """
+ if set(tool_paths)!={'clang21','lld'}:raise Stop('HOST_START_SET')
+ queue=[(canonical(p),True) for p in tool_paths.values()];seen={};edges=[];bindings={};total=0
+ def get(path):
+  row=lookup(path)
+  if row is None:return None
+  required={'canonical','data','metadata','aliases'}
+  if set(row)!=required or not isinstance(row['data'],bytes):raise Stop('HOST_ROW')
+  real=canonical(row['canonical']);meta=row['metadata'];aliases=row['aliases']
+  if not isinstance(aliases,list) or len(aliases)>32 or any(set(a)!={'path','target','metadata'} for a in aliases):raise Stop('HOST_ALIAS')
+  for a in aliases:
+   canonical(a['path'])
+   if not isinstance(a['target'],str) or len(a['target'])>512:raise Stop('HOST_ALIAS')
+  if meta.get('size')!=len(row['data']):raise Stop('HOST_SIZE')
+  h=hashlib.sha256(row['data']).hexdigest();bound={'requested':path,'canonical':real,'metadata':meta,'aliases':aliases,'sha256':h}
+  if path in bindings and bindings[path]!=bound:raise Stop('HOST_CHANGED')
+  bindings[path]=bound;return real,row
+ def resolve(soname,parsed,origin):
+  # RUNPATH is direct-only. RPATH inheritance is NOT guessed, even when a match might exist.
+  if parsed['rpath'] is not None:raise Stop('RPATH_INHERITANCE_UNSUPPORTED')
+  roots=[]
+  if parsed['runpath']:
+   for value in parsed['runpath'].split(':'):
+    if not value:raise Stop('HOST_RUNPATH')
+    value=value.replace('${ORIGIN}',origin).replace('$ORIGIN',origin)
+    if '$' in value:raise Stop('HOST_RUNPATH')
+    value=canonical(value)
+    # NDK private $ORIGIN directories admitted only for the exact tool's same host subtree.
+    if not value.startswith('/ldoa-qualification/ndk29-snapshot/toolchains/llvm/prebuilt/linux-x86_64/') and not any(value+'/'==r for r in ROOTS):raise Stop('HOST_RUNPATH')
+    roots.append(value+'/')
+  roots+=list(ROOTS)
+  matches=[]
+  for directory in dict.fromkeys(roots):
+   row=get(directory+soname)
+   if row is not None:matches.append((directory+soname,row))
+  if not matches:raise Stop('HOST_MISSING')
+  # Conservative: duplicate aliases to same canonical bytes fine; conflicting choices STOP, no loader-order inference.
+  if len({(r[1][0],hashlib.sha256(r[1][1]['data']).hexdigest()) for r in matches})!=1:raise Stop('HOST_AMBIGUOUS')
+  return matches[0]
+ while queue:
+  path,is_tool=queue.pop(0);hit=get(path)
+  if hit is None:raise Stop('HOST_MISSING')
+  real,row=hit
+  if not is_tool and not any(real.startswith(r) for r in ROOTS) and not real.startswith('/ldoa-qualification/ndk29-snapshot/toolchains/llvm/prebuilt/linux-x86_64/'):raise Stop('HOST_OUTSIDE_ROOTS')
+  if real in seen:continue
+  if len(seen)>=MAX_NODES:raise Stop('HOST_NODE_CAP')
+  total+=len(row['data'])
+  if total>HOST_MAX_TOTAL:raise Stop('HOST_BYTE_CAP')
+  parsed=parse_elf(row['data']);seen[real]={'parsed':parsed,'sha256':hashlib.sha256(row['data']).hexdigest(),'bytes':len(row['data'])}
+  if is_tool and not parsed['interpreter']:raise Stop('HOST_TOOL_INTERPRETER_REQUIRED')
+  if parsed['interpreter']:
+   
+   if len(edges)>=MAX_EDGES:raise Stop('HOST_EDGE_CAP')
+   edges.append({'from':real,'kind':'interpreter','to':parsed['interpreter']});queue.append((parsed['interpreter'],False))
+  for name in parsed['needed']:
+   selected,_=resolve(name,parsed,real.rsplit('/',1)[0])
+   if len(edges)>=MAX_EDGES:raise Stop('HOST_EDGE_CAP')
+   edges.append({'from':real,'kind':'needed','name':name,'to':selected});queue.append((selected,False))
+ return {'scope':'HOST_STATIC_CLOSURE_CANDIDATE_NOT_EXECUTION_PROOF','status':'UNAPPROVED_JOB_IMAGE_OS_BINDING','files':seen,'bindings':bindings,'edges':edges,'total_bytes':total,'loader_execution':False,'tool_execution':False,'runtime_linker_hwcaps_cache':'NOT_MODELED_REQUIRES_RESTRICTED_POLICY_OR_STOP'}
+"""SOURCE ONLY descriptor-bound host rows. Tests use synthetic roots only. No executable tools."""
+import os,stat,pathlib,hashlib,time
+FLAGS=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW
+def meta(st):return {'dev':st.st_dev,'ino':st.st_ino,'uid':st.st_uid,'gid':st.st_gid,'mode':stat.S_IMODE(st.st_mode),'size':st.st_size,'mtime_ns':st.st_mtime_ns,'ctime_ns':st.st_ctime_ns}
+def host_tick(deadline):
+ if time.monotonic()>=deadline:raise Stop('HOST_BINDING_DEADLINE')
+def capture(rootfd,logical,deadline,cap=MAX_ELF):
+ """Return exact lexical alias events, terminal and bytes. Retain rootfd externally identity-bound.
+ Canonical descriptorwalk starts again on each symlink expansion, never follows OS symlinks.
+ Absolute symlink target interpreted beneath this explicit logical filesystemroot, not hostambient.
+ """
+ def components(value):
+  if not isinstance(value,str) or len(value)>512 or '\0' in value:raise Stop('HOST_ALIAS_PATH')
+  parts=[]
+  for p in value.split('/'):
+   if p in ('','.'):continue
+   if p=='..':
+    if not parts:raise Stop('HOST_ALIAS_ESCAPE')
+    parts.pop()
+   else:
+    if any(ord(c)<33 or ord(c)==127 for c in p):raise Stop('HOST_ALIAS_PATH')
+    parts.append(p)
+  return parts
+ parts=components(logical);events=[];seen=set();hops=0
+ while True:
+  fd=os.dup(rootfd);prefix=[];restart=False
+  try:
+   for index,part in enumerate(parts):
+    host_tick(deadline);st=os.stat(part,dir_fd=fd,follow_symlinks=False);path='/'+ '/'.join(prefix+[part]);event={'path':path,'metadata':meta(st),'type':stat.S_IFMT(st.st_mode)}
+    if stat.S_ISLNK(st.st_mode):
+     target=os.readlink(part,dir_fd=fd);after=os.stat(part,dir_fd=fd,follow_symlinks=False)
+     if meta(after)!=meta(st):raise Stop('HOST_ALIAS_CHANGED')
+     event['target']=target;events.append(event);hops+=1
+     if hops>32:raise Stop('HOST_ALIAS_CAP')
+     rewritten=(target if target.startswith('/') else '/'.join(prefix+[target]))+'/'+ '/'.join(parts[index+1:]);parts=components(rewritten)
+     key=tuple(parts)
+     if key in seen:raise Stop('HOST_ALIAS_CYCLE')
+     seen.add(key);restart=True;break
+    events.append(event)
+    if len(events)>256:raise Stop('HOST_ALIAS_CAP')
+    if index<len(parts)-1:
+     child=os.open(part,FLAGS,dir_fd=fd)
+     if meta(os.fstat(child))!=meta(st):os.close(child);raise Stop('HOST_COMPONENT_CHANGED')
+     os.close(fd);fd=child;prefix.append(part)
+    else:
+     if not stat.S_ISREG(st.st_mode) or st.st_mode&(stat.S_ISUID|stat.S_ISGID):raise Stop('HOST_TERMINAL_TYPE')
+     if st.st_size>cap:raise Stop('HOST_BINDING_BYTE_CAP')
+     leaf=os.open(part,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=fd)
+     try:
+      if meta(os.fstat(leaf))!=meta(st):raise Stop('HOST_TERMINAL_CHANGED')
+      chunks=[];total=0
+      while True:
+       host_tick(deadline);b=os.read(leaf,65536)
+       if not b:break
+       total+=len(b)
+       if total>st.st_size or total>cap:raise Stop('HOST_BINDING_BYTE_CAP')
+       chunks.append(b)
+      if total!=st.st_size or meta(os.fstat(leaf))!=meta(st) or meta(os.stat(part,dir_fd=fd,follow_symlinks=False))!=meta(st):raise Stop('HOST_TERMINAL_CHANGED')
+      data=b''.join(chunks)
+     finally:os.close(leaf)
+     return {'canonical':path,'data':data,'metadata':meta(st),'aliases':[{'path':e['path'],'target':e['target'],'metadata':e['metadata']} for e in events if e['type']==stat.S_IFLNK]},events
+  finally:os.close(fd)
+  if not restart:raise Stop('HOST_ALIAS_PATH')
+def authenticated_row(rootfd,logical,deadline,cap=MAX_ELF):
+ first,events=capture(rootfd,logical,deadline,cap);second,again=capture(rootfd,logical,deadline,cap)
+ if first!=second or events!=again:raise Stop('HOST_BINDING_CHANGED')
+ return first,{'logical':logical,'canonical':first['canonical'],'sha256':hashlib.sha256(first['data']).hexdigest(),'metadata':first['metadata'],'components':events}
+"""Closed finite policy object. Static consistency only, not actual runtime loader prediction."""
+POLICY={
+ 'status':'SOURCE_CANDIDATE_NOT_APPROVED',
+ 'tier':'THIS_JOB_RUNNER_IMAGE_AND_OS_PROCEDURAL_TRUST_NOT_PROVENANCE',
+ 'start':'EXACT_SEALED_CLANG21_AND_LLD_THIS_JOB',
+ 'environment':{'allow':['PATH=/usr/bin:/bin','LC_ALL=C','HOME=PRIVATE','TMPDIR=PRIVATE'],'reject':['LD_LIBRARY_PATH','LD_PRELOAD','LD_AUDIT','LD_DEBUG','LD_HWCAP_MASK','GLIBC_TUNABLES','GCONV_PATH','LIBRARY_PATH','COMPILER_PATH','GCC_EXEC_PREFIX','CPATH','C_INCLUDE_PATH','CPLUS_INCLUDE_PATH']},
+ 'cache':'NOT_PARSED_OR_PREDICTED; CURRENT_JOB_OS_CACHE_METADATA_HASH_BINDING_REQUIRED_IF_PRESENT',
+ 'preload_config':'REJECT_NONEMPTY_ETC_LD_SO_PRELOAD; BIND_ABSENCE_OR_EMPTY_CURRENT_JOB',
+ 'hwcaps':'NOT_PREDICTED; CPU_AUXV_AND_OS_LOADER_VARIANT_SELECTION_REMAIN_RUNTIME_TRUST_LIMIT',
+ 'rpath':'REJECT_ALL_INHERITANCE_UNSUPPORTED',
+ 'runpath':'DIRECT_ONLY_EXPLICIT_ORIGIN_AND_DECLARED_ROOTS; AMBIGUOUS_STOP',
+ 'versions':'DT_NEEDED_IDENTITY_ONLY; SYMBOL_VERSION_AND_ABI_COMPATIBILITY_UNPROVEN',
+ 'static_result':'CONSISTENCY_GATE_NOT_NECESSARY_OR_SUFFICIENT_LOADER_PROOF',
+ 'failure':'REAL_LOADER_FAILURE_REMAINS_POSSIBLE; NO_FALLBACK_OR_WIDENING',
+ 'execution_authority':False,
+}
+"""Finite SOURCE candidate. Entry reads occur only under future reviewed execution authority."""
+import os,stat,time,resource,hashlib,json,math
+SNAP='/ldoa-qualification/ndk29-snapshot/'
+CLEAN_ENV={'PATH':'/usr/bin:/bin','LC_ALL':'C'}
+CLEANUP_RESERVE=30 # proposed seconds inside same1200 ceiling, unmeasured, no assurance
+CONFIG_CAP=4*1024**2
+class Session:
+ def __init__(self,rootfd,deadline,clock=time.monotonic):
+  self.rootfd=rootfd;self.deadline=deadline;self.clock=clock;self.start=clock();self.records={};self.bytes=0;self.attempts=0
+  self.identity=meta(os.fstat(rootfd));self.phases=[]
+ def check(self,phase):
+  now=self.clock();remaining=self.deadline-now
+  if not math.isfinite(remaining) or remaining>1200 or remaining<=CLEANUP_RESERVE:raise Stop('STATIC_DEADLINE_RESERVE')
+  if meta(os.fstat(self.rootfd))!=self.identity:raise Stop('HOST_ROOT_CHANGED')
+  self.phases.append({'phase':phase,'elapsed':now-self.start,'remaining':remaining,'cleanup_reserve':CLEANUP_RESERVE,'maxrss_KiB':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,'free_bytes':os.fstatvfs(self.rootfd).f_bavail*os.fstatvfs(self.rootfd).f_frsize})
+ def lookup(self,path,cap=None):
+  self.check('DESCRIPTOR_LOOKUP');self.attempts+=1
+  if self.attempts>MAX_EDGES:raise Stop('HOST_LOOKUP_CAP')
+  if path not in self.records and len(self.records)>=MAX_NODES:raise Stop('HOST_NODE_CAP')
+  try:row,binding=authenticated_row(self.rootfd,path,self.deadline-CLEANUP_RESERVE,cap if cap is not None else MAX_ELF)
+  except FileNotFoundError:
+   # Missing observations rechecked postphase under same root identity; never qualifies loader fallback.
+   try:authenticated_row(self.rootfd,path,self.deadline-CLEANUP_RESERVE,cap if cap is not None else MAX_ELF)
+   except FileNotFoundError:
+    self.records.setdefault(path,None);return None
+   raise Stop('HOST_ABSENCE_CHANGED')
+  if cap is not None and len(row['data'])>cap:raise Stop('HOST_CONFIG_CAP')
+  value={'row':binding,'bytes':len(row['data'])}
+  if path in self.records:
+   if self.records[path]!=value:raise Stop('HOST_CHANGED')
+  else:
+   if self.bytes+len(row['data'])>HOST_MAX_TOTAL:raise Stop('HOST_BYTE_CAP')
+   self.bytes+=len(row['data']);self.records[path]=value
+  return row
+ def config(self):
+  # Exactconfigfiles and exactconf.d membership. No cache decoding/hwcaps enumeration.
+  names=['/etc/ld.so.cache','/etc/ld.so.conf','/etc/ld.so.preload']
+  directory='/etc/ld.so.conf.d';fd=None
+  try:
+   # Directory must be real nofollow under rootfd via fixed etc component.
+   etc=os.open('etc',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=self.rootfd)
+   try:fd=os.open('ld.so.conf.d',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=etc)
+   finally:os.close(etc)
+   before=meta(os.fstat(fd));members=sorted(os.listdir(fd))
+   if len(members)>MAX_NODES or any('/' in n or n in ('.','..') for n in members):raise Stop('HOST_CONFIG_CAP')
+   names +=[directory+'/'+n for n in members]
+   if meta(os.fstat(fd))!=before:raise Stop('HOST_CONFIG_CHANGED')
+  except FileNotFoundError:members=None;before=None
+  finally:
+   if fd is not None:os.close(fd)
+  bindings={}
+  for path in names:
+   row=self.lookup(path,CONFIG_CAP)
+   if path=='/etc/ld.so.preload' and row is not None and row['data'].strip():raise Stop('HOST_PRELOAD')
+   bindings[path]=self.records[path]
+  return {'files':bindings,'conf_d_members':members,'conf_d_metadata':before}
+ def finish(self):
+  saved=dict(self.records)
+  for path in saved:self.lookup(path,CONFIG_CAP if path.startswith('/etc/') else None)
+  if self.records!=saved:raise Stop('HOST_CHANGED')
+  self.check('POST_BINDINGS')
+  return {'bindings':saved,'unique_observed_bytes':self.bytes,'lookup_attempts':self.attempts,'phases':self.phases}
+def integrated_static_phase(snapshotfd,rows,image,deadline):
+ # Called only AFTER snapshot verify, BEFORE snapshot cleanup. No tool subprocess.
+ root=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+ try:
+  if meta(os.fstat(root))!=meta(os.stat('/',follow_symlinks=False)):raise Stop('HOST_ROOT_CHANGED')
+  session=Session(root,deadline);session.check('STATIC_BEGIN');pre=session.config()
+  tools={r['logical']:r for r in rows if r['scope']=='TOOL'};prefix='toolchains/llvm/prebuilt/linux-x86_64/bin/'
+  if set(tools)!={prefix+'clang',prefix+'ld.lld'}:raise Stop('HOST_START_SET')
+  starts={'clang21':SNAP+tools[prefix+'clang']['canonical'],'lld':SNAP+tools[prefix+'ld.lld']['canonical']}
+  for logical,r in tools.items():
+   captured=session.lookup(SNAP+logical)
+   if captured is None or captured['canonical']!=SNAP+r['canonical'] or hashlib.sha256(captured['data']).hexdigest()!=r['sha256']:raise Stop('SEALED_TOOL_BINDING')
+  # No ambientenv copied into anyconsumer. This candidate has NO consumer.
+  result=closure(starts,session.lookup);post=session.config()
+  if pre!=post:raise Stop('HOST_CONFIG_CHANGED')
+  evidence=session.finish()
+  return {'status':'STATIC_CONSISTENCY_ONLY_NOT_APPROVED','policy':POLICY,'environment_for_no_consumer':CLEAN_ENV,'closure':result,'host_config':pre,'evidence':evidence,'job':image,'compiler_execution_authorized':False,'runtime_loader_failure_possible':True}
+ finally:os.close(root)
 # Standalone helper is generated by concatenating snapshot_contract.py and this source.
 import sys,errno
 PARENT='/ldoa-qualification'
@@ -394,7 +687,7 @@ def exact_revision(source,rows,deadline):
  if values!=['29.0.14206865']:raise Stop('REVISION')
 
 def fingerprint(rows,parents):return json.dumps({'rows':sorted(rows,key=lambda r:r['logical']),'parents':parents},sort_keys=True,separators=(',',':'))
-def snapshot_only(source,parentfd,image,deadline,uid=0,emit=None):
+def snapshot_only(source,parentfd,image,deadline,uid=0,emit=None,static_phase=None):
  result={'scope':'JOB_IMAGE_SNAPSHOT_CANDIDATE','status':'STOP','tool_executed':False,'host_dependencies':'UNQUALIFIED_NO_EXECUTION'};fd=None;identity=None
  try:
   managed_image(image);tick(deadline);fd,identity=create_root(parentfd)
@@ -413,8 +706,14 @@ def snapshot_only(source,parentfd,image,deadline,uid=0,emit=None):
   aliases(fd,rows);root_binding(parentfd,fd,identity);seal_fd(fd,rows,deadline,uid);verify_fd(fd,rows,deadline,uid)
   result=receipt(image,rows,parents,deadline);result['status']='SNAPSHOT_ONLY_NOT_APPROVED';result['host_dependencies']='UNQUALIFIED_NO_EXECUTION';result['snapshot_only']=True
   verify_fd(fd,rows,deadline,uid);root_binding(parentfd,fd,identity)
- except Exception as error:result['reason']=safe_reason(error)
+  if static_phase is not None:
+   static_result=static_phase(fd,rows,image,deadline)
+   if len(json.dumps(static_result,sort_keys=True).encode())>MAX_RECEIPT:raise Stop('RECEIPT_CAP')
+   result['static_consistency']=static_result
+   verify_fd(fd,rows,deadline,uid);root_binding(parentfd,fd,identity)
+ except Exception as error:result['reason']=safe_reason(error);result['status']='STOP'
  finally:
+  result['timing']={'elapsed_total':time.monotonic()-(deadline-1200),'remaining':deadline-time.monotonic(),'cleanup_reserve_proposal':30}
   # Emit receipt BEFORE cleanup and again after. A cleanup failure does not erase the primary reason.
   if emit:
    try:emit({'phase':'BEFORE_CLEANUP','receipt':result})
@@ -424,6 +723,8 @@ def snapshot_only(source,parentfd,image,deadline,uid=0,emit=None):
    except Exception as error:result['cleanup']='FAILED';result['cleanup_reason']=safe_reason(error);result['status']='STOP'
    finally:os.close(fd)
   else:result['cleanup']='NOT_CREATED'
+  result['timing']['after_cleanup_remaining']=deadline-time.monotonic()
+  result['timing']['after_cleanup_elapsed_total']=time.monotonic()-(deadline-1200)
   if emit:
    try:emit({'phase':'AFTER_CLEANUP','receipt':result})
    except Exception:result['receipt_emit']='FAILED';result['status']='STOP'
@@ -448,7 +749,7 @@ def cli():
     if st.st_uid!=0 or not stat.S_ISREG(st.st_mode) or stat.S_IMODE(st.st_mode)!=0o444 or st.st_size>64:raise Stop('HELPER_BOUNDARY')
     deadline=float(os.read(deadlinefd,65));tick(deadline)
    finally:os.close(deadlinefd)
-   result=snapshot_only(pathlib.Path(NDK),parentfd,image,deadline,emit=lambda data:print(json.dumps({**data,'dispatch_binding':dispatch_binding},sort_keys=True),flush=True))
+   result=snapshot_only(pathlib.Path(NDK),parentfd,image,deadline,static_phase=integrated_static_phase,emit=lambda data:print(json.dumps({**data,'dispatch_binding':dispatch_binding},sort_keys=True),flush=True))
   finally:os.close(parentfd)
  except Exception as error:print(json.dumps({'scope':'SNAPSHOT_PREFLIGHT_STOP','reason':safe_reason(error),'tool_executed':False}),flush=True)
  return 0 if result and result['status']=='SNAPSHOT_ONLY_NOT_APPROVED' and result.get('cleanup')=='ABSENT' else 1
