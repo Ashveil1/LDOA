@@ -1,0 +1,21 @@
+# Source delta only. Registration and execution require separate approval.
+name: isolated-existing-ndk-measurement
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  measure:
+    if: true
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Pure measurement boundary and failure tests
+        run: cd ci/handshake-fixture/producer-build && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v test_measure
+      - name: Read existing NDK bytes only
+        run: timeout --signal=TERM --kill-after=5s 150s python3 ci/handshake-fixture/producer-build/measure_existing.py
+# Local JSON receipt is printed identically into retained job logs; no artifact upload.
+# No executable --version, readelf subprocess, compiler, fetch, build, upload/cache or runtime.
