@@ -1,6 +1,6 @@
 import os,stat,hashlib,json
 FLAGS=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW
-EXPECTED_DIGEST='92ac336d5a0be267fdd1f61b239557f730bd18dc9e5bffb1336c88f9cae0a093'
+EXPECTED_DIGEST='5463f0c133c1d75923a442637fff2a6841ffd7f0b3beb50d48508c24d8899038'
 def fail():raise RuntimeError('CLEANUP_BOUNDARY')
 def clear(fd):
  os.fchmod(fd,0o700)
@@ -19,7 +19,7 @@ def clear(fd):
   else:os.unlink(name,dir_fd=fd)
 root=os.open('/',FLAGS)
 try:
- for component in ['', 'opt']:
+ for component in ['']:
   if component:
    child=os.open(component,FLAGS,dir_fd=root);os.close(root);root=child
   st=os.fstat(root)
@@ -28,7 +28,7 @@ try:
  except FileNotFoundError:print('QUALIFICATION_INSTALL_ABSENT');raise SystemExit(0)
  try:
   st=os.fstat(parent);named=os.stat('ldoa-qualification',dir_fd=root,follow_symlinks=False)
-  if st.st_uid!=0 or stat.S_IMODE(st.st_mode)!=0o755 or (st.st_dev,st.st_ino)!=(named.st_dev,named.st_ino):fail()
+  if st.st_uid!=0 or stat.S_IMODE(st.st_mode)!=0o700 or (st.st_dev,st.st_ino)!=(named.st_dev,named.st_ino):fail()
   # Do not delete unknown installation contents. Hash validates exact reviewed helper, not provenance of tools.
   names=set(os.listdir(parent))
   if not names.issubset({'ndk29_snapshot.py','context.json','deadline','ndk29-snapshot'}):fail()

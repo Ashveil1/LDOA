@@ -37,10 +37,14 @@ test_workflow_context_shape_only (test_binding.Binding) ... ok
 test_wrong_workflow_path (test_binding.Binding) ... ok
 test_labels_fixed_no_external_text (test_preinstall_stat.StatReceipt) ... ok
 test_nonroot_nonwritable_still_rejected (test_preinstall_stat.StatReceipt) ... ok
-test_opt_writable_exact_label_metadata (test_preinstall_stat.StatReceipt) ... ok
 test_root_writable_stops_before_opt_or_mkdir (test_preinstall_stat.StatReceipt) ... ok
+test_exact_single_root_child_literals (test_root_child.RootChild) ... ok
+test_existing_root_child_nooverwrite (test_root_child.RootChild) ... ok
+test_installer_existing_child_mkdir_failure_never_open_child (test_root_child.RootChild) ... ok
+test_root_guard_before_mkdir_and_no_chmod_existing (test_root_child.RootChild) ... ok
+test_symlink_child_nooverwrite (test_root_child.RootChild) ... ok
 
 ----------------------------------------------------------------------
-Ran 41 tests in 0.149s
+Ran 45 tests in 0.158s
 
 OK

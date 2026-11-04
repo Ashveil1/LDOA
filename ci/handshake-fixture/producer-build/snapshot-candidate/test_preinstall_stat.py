@@ -15,8 +15,6 @@ class StatReceipt(unittest.TestCase):
  def st(self,uid=0,gid=0,mode=0o755):return types.SimpleNamespace(st_uid=uid,st_gid=gid,st_mode=mode)
  def test_root_writable_stops_before_opt_or_mkdir(self):
   rows=self.execute([self.st(mode=0o777)]);self.assertEqual(len(rows),1);self.assertEqual(rows[0]['label'],'ROOT');self.assertFalse(rows[0]['guard']);self.assertTrue(rows[0]['before_installation_effects'])
- def test_opt_writable_exact_label_metadata(self):
-  rows=self.execute([self.st(),self.st(uid=0,gid=7,mode=0o775)]);self.assertEqual([r['label'] for r in rows],['ROOT','OPT']);self.assertEqual(rows[1]['gid'],7);self.assertEqual(rows[1]['mode'],'0775');self.assertFalse(rows[1]['guard'])
  def test_nonroot_nonwritable_still_rejected(self):
   rows=self.execute([self.st(uid=1001,mode=0o755)]);self.assertFalse(rows[0]['guard']);self.assertEqual(rows[0]['uid'],1001)
  def test_labels_fixed_no_external_text(self):

@@ -27,7 +27,7 @@ if any(not re.fullmatch(r'[a-f0-9]{40}',context[k]) for k in ['workflow_sha','he
 deadline=time.monotonic()+1200
 root=os.open('/',FLAGS)
 try:
- for component in ['', 'opt']:
+ for component in ['']:
   if component:
    child=os.open(component,FLAGS,dir_fd=root);os.close(root);root=child
   st=os.fstat(root)
@@ -35,7 +35,7 @@ try:
   print(json.dumps({'scope':'SNAPSHOT_INSTALL_ANCESTOR_STAT','label':'ROOT' if component=='' else 'OPT','uid':st.st_uid,'gid':st.st_gid,'mode':format(stat.S_IMODE(st.st_mode),'04o'),'guard':guard,'before_installation_effects':True},sort_keys=True),flush=True)
   if not guard:fail()
  # No existing directory accepted. Exact fixed installation, no user-selected paths.
- os.mkdir('ldoa-qualification',0o755,dir_fd=root)
+ os.mkdir('ldoa-qualification',0o700,dir_fd=root)
  parent=os.open('ldoa-qualification',FLAGS,dir_fd=root)
  identity=os.fstat(parent);success=False
  try:
@@ -102,7 +102,7 @@ def clear(fd):
   else:os.unlink(name,dir_fd=fd)
 root=os.open('/',FLAGS)
 try:
- for component in ['', 'opt']:
+ for component in ['']:
   if component:
    child=os.open(component,FLAGS,dir_fd=root);os.close(root);root=child
   st=os.fstat(root)
@@ -111,7 +111,7 @@ try:
  except FileNotFoundError:print('QUALIFICATION_INSTALL_ABSENT');raise SystemExit(0)
  try:
   st=os.fstat(parent);named=os.stat('ldoa-qualification',dir_fd=root,follow_symlinks=False)
-  if st.st_uid!=0 or stat.S_IMODE(st.st_mode)!=0o755 or (st.st_dev,st.st_ino)!=(named.st_dev,named.st_ino):fail()
+  if st.st_uid!=0 or stat.S_IMODE(st.st_mode)!=0o700 or (st.st_dev,st.st_ino)!=(named.st_dev,named.st_ino):fail()
   # Do not delete unknown installation contents. Hash validates exact reviewed helper, not provenance of tools.
   names=set(os.listdir(parent))
   if not names.issubset({'ndk29_snapshot.py','context.json','deadline','ndk29-snapshot'}):fail()
@@ -197,7 +197,7 @@ __INSTALL__
           INSTALL
           echo 'installed=true' >> "$GITHUB_OUTPUT"
       - name: Snapshot only, no tool consumption
-        run: sudo -n /usr/bin/timeout --signal=TERM --kill-after=5s 1230s /usr/bin/python3 -I /opt/ldoa-qualification/ndk29_snapshot.py
+        run: sudo -n /usr/bin/timeout --signal=TERM --kill-after=5s 1230s /usr/bin/python3 -I /ldoa-qualification/ndk29_snapshot.py
       - name: Owned snapshot/helper emergency cleanup
         if: always() && steps.install.outputs.installed == 'true'
         run: |
