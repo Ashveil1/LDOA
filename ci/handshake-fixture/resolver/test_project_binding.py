@@ -4,10 +4,13 @@ SOURCE=pathlib.Path(__file__).with_name('local-repositories.init.gradle')
 class Binding(unittest.TestCase):
  def test_exact_explicit_source_binding(self):
   text=SOURCE.read_text();tail=text.split('gradle.projectsEvaluated {',1)[1]
-  for required in ['evaluatedGradle.getRootProject()','capturedRoot.getAllprojects()','capturedRoot.getRootDir()','capturedRoot.getTasks().register','resolverTask.doLast','capturedProjects.each','selectedProject.getConfigurations()','configuration.isCanBeResolved()','configuration.resolve()','configuration.getResolvedConfiguration().getResolvedArtifacts()','artifact.getFile().length()','capturedOutput.text=']:
+  for required in ['evaluatedGradle.getRootProject()','capturedRoot.getAllprojects()','capturedRoot.getRootDir()','capturedRoot.getTasks().register','resolverTask.doLast','capturedProjects.each','selectedProject.getConfigurations()','configuration.isCanBeResolved()','configuration.getIncoming().getResolutionResult()','graph.getAllComponents()','graph.getAllDependencies()','capturedOutput.text=']:
    self.assertIn(required,tail)
+  # Ignore quoted map keys and string contents when checking implicit delegate reads.
+  checked=re.sub(r"'[^']*'","''",tail)
+  checked=re.sub(r'\bconfigurations\s*:', 'configuration_rows:', checked)
   for bare in [r'(?<![.\w])allprojects\b',r'(?<![.\w])rootProject\b',r'(?<![.\w])rootDir\b',r'(?<![.\w])configurations\b',r'(?<![.\w])doLast\b',r'\bit\b']:
-   self.assertIsNone(re.search(bare,tail),bare)
+   self.assertIsNone(re.search(bare,checked),bare)
   self.assertNotIn('url=uri(',text)
  def test_poison_task_delegate_synthetic_model(self):
   # Independent model illustrates the captured-object invariant; does not validate Groovy syntax/runtime.

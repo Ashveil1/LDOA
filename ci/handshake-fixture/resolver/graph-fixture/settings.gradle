@@ -1,0 +1,3 @@
+rootProject.name = 'graph-qualification'
+include 'producer', 'consumer'
+dependencyResolutionManagement { repositories { maven { url = uri('repo') } } }

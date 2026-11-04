@@ -15,6 +15,7 @@ allprojects { p ->
  p.buildscript.repositories.clear()
  p.buildscript.repositories.maven { url=new java.net.URI(System.getenv('HS_REVIEWED_LOCAL_MAVEN_PROXY')); allowInsecureProtocol=true }
 }
+// GRAPH_INVENTORY_START: reused verbatim by the offline qualification fixture.
 gradle.projectsEvaluated { evaluatedGradle ->
  final org.gradle.api.Project capturedRoot = evaluatedGradle.getRootProject()
  final java.util.List capturedProjects = new java.util.ArrayList(capturedRoot.getAllprojects())
@@ -22,16 +23,59 @@ gradle.projectsEvaluated { evaluatedGradle ->
  final java.io.File capturedOutput = new java.io.File(capturedRoot.getRootDir(), 'selected-inputs.json')
  capturedRoot.getTasks().register('resolveLockedInputs') { resolverTask ->
   resolverTask.doLast { ignoredTask ->
+   def attributesOf = { attributes ->
+    def result = new java.util.TreeMap()
+    attributes.keySet().each { key -> result.put(key.getName(), String.valueOf(attributes.getAttribute(key))) }
+    result
+   }
+   def componentId = { identifier ->
+    def kind = identifier instanceof org.gradle.api.artifacts.component.ModuleComponentIdentifier ? 'EXTERNAL_MODULE' :
+     identifier instanceof org.gradle.api.artifacts.component.ProjectComponentIdentifier ? 'LOCAL_PROJECT_DEFERRED' : 'OTHER_COMPONENT_UNQUALIFIED'
+    [id:identifier.getDisplayName(),kind:kind]
+   }
+   def variantOf = { variant ->
+    [name:variant.getDisplayName(),owner:componentId(variant.getOwner()),attributes:attributesOf(variant.getAttributes()),
+     capabilities:variant.getCapabilities().collect { capability -> [group:capability.getGroup(),name:capability.getName(),version:capability.getVersion()] },
+     external_variant:variant.getExternalVariant().isPresent() ? variant.getExternalVariant().get().getDisplayName() : null]
+   }
    def rows=[]
+   def failureCount=0
    capturedProjects.each { selectedProject ->
     selectedProject.getConfigurations().findAll { configuration -> configuration.isCanBeResolved() }.sort { left, right -> left.getName() <=> right.getName() }.each { configuration ->
-     configuration.resolve()
-     configuration.getResolvedConfiguration().getResolvedArtifacts().each { artifact ->
-      rows.add([project:selectedProject.getPath(),configuration:configuration.getName(),module:artifact.getModuleVersion().getId().toString(),name:artifact.getName(),classifier:artifact.getClassifier(),type:artifact.getType(),file:artifact.getFile().getName(),bytes:artifact.getFile().length()])
+     def row=[project:selectedProject.getPath(),configuration:configuration.getName(),requested_attributes:attributesOf(configuration.getAttributes()),
+      status:'GRAPH_NOT_INSPECTED',components:[],edges:[],file_inputs:[],errors:[],external_artifact_selection:'UNQUALIFIED',complete_build_input_lock:false]
+     rows.add(row)
+     try {
+      // Do not materialize file collections: these may carry producer task outputs.
+      configuration.getAllDependencies().findAll { dependency -> dependency instanceof org.gradle.api.artifacts.FileCollectionDependency }.each { dependency ->
+       row.file_inputs.add([declaration_kind:'FILE_COLLECTION_DEPENDENCY',status:'UNQUALIFIED_FILE_INPUT',files_materialized:false])
+      }
+      def graph=configuration.getIncoming().getResolutionResult()
+      graph.getAllComponents().each { component ->
+       row.components.add(componentId(component.getId()) + [selection_reasons:component.getSelectionReason().getDescriptions().collect { reason -> [cause:reason.getCause().toString()] },
+        selected_variants:component.getVariants().collect { variant -> variantOf(variant) }])
+      }
+      graph.getAllDependencies().each { dependency ->
+       def edge=[from:componentId(dependency.getFrom().getId()),requested:dependency.getRequested().getDisplayName(),constraint:dependency.isConstraint()]
+       if (dependency instanceof org.gradle.api.artifacts.result.UnresolvedDependencyResult) {
+        edge.status='UNRESOLVED';edge.failure_reason='UNRESOLVED_DEPENDENCY';edge.failure_class='DEPENDENCY_RESOLUTION_FAILURE';failureCount++
+       } else if (dependency instanceof org.gradle.api.artifacts.result.ResolvedDependencyResult) {
+        edge.status='RESOLVED';edge.selected=componentId(dependency.getSelected().getId());edge.selected_variant=variantOf(dependency.getResolvedVariant())
+       } else { edge.status='UNKNOWN_EDGE';failureCount++ }
+       row.edges.add(edge)
+      }
+      row.status=row.edges.any { edge -> edge.status!='RESOLVED' } ? 'GRAPH_FAILED' : 'GRAPH_RESOLVED_ARTIFACTS_UNQUALIFIED'
+     } catch (Exception failure) {
+      row.status='GRAPH_FAILED';row.errors.add([reason:'GRAPH_INSPECTION_EXCEPTION',failure_class:'GRAPH_INSPECTION_FAILURE']);failureCount++
      }
     }
    }
-   capturedOutput.text=groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(rows))
+   def inventory=[schema:1,scope:'ALL_RESOLVABLE_CONFIGURATION_GRAPH_PREPARATION',complete_build_input_lock:false,
+    external_artifact_selection:'UNQUALIFIED',local_producer_outputs:'DEFERRED',file_inputs:'UNQUALIFIED',
+    configuration_count:rows.size(),graph_failure_count:failureCount,configurations:rows]
+   capturedOutput.text=groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(inventory))
+   println('GRAPH_INVENTORY configurations='+rows.size()+' failures='+failureCount+' complete_build_input_lock=false external_artifacts=UNQUALIFIED')
+   if (failureCount) throw new GradleException('STRICT_GRAPH_INVENTORY_FAILED: '+failureCount+'; see selected-inputs.json')
   }
  }
 }

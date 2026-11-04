@@ -1,0 +1,31 @@
+import org.gradle.api.attributes.Usage
+import org.gradle.api.attributes.Category
+import org.gradle.api.artifacts.type.ArtifactTypeDefinition
+project(':producer') {
+ def output = tasks.register('forbiddenProducer') { doLast { throw new GradleException('PRODUCER_TASK_EXECUTED') } }
+ configurations.create('multi') {
+  canBeResolved=false;canBeConsumed=true
+  attributes { attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage, Usage.JAVA_API)); attribute(Category.CATEGORY_ATTRIBUTE, objects.named(Category, Category.LIBRARY)) }
+  ['alpha','beta'].each { kind -> outgoing.variants.create(kind) {
+   attributes.attribute(ArtifactTypeDefinition.ARTIFACT_TYPE_ATTRIBUTE,kind)
+   artifact(layout.buildDirectory.file(kind+'.bin')) { builtBy(output) }
+  } }
+ }
+ dependencies { multi 'fixture:external:1' }
+}
+project(':consumer') {
+ configurations.create('probe') {
+  canBeResolved=true;canBeConsumed=false
+  attributes { attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage, Usage.JAVA_API)); attribute(Category.CATEGORY_ATTRIBUTE, objects.named(Category, Category.LIBRARY)) }
+ }
+ dependencies {
+  probe project(path:':producer',configuration:'multi')
+  probe platform('fixture:bom:1')
+  probe 'fixture:leaf'
+  probe files(layout.projectDirectory.file('declared-only.txt'))
+ }
+ if (providers.gradleProperty('graphFixtureUnresolved').isPresent()) {
+  configurations.create('unresolvedProbe') { canBeResolved=true;canBeConsumed=false }
+  dependencies { unresolvedProbe 'fixture:missing:1' }
+ }
+}
