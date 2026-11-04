@@ -1,0 +1,87 @@
+[
+  {
+    "case": "positive",
+    "expected": "ACCEPTED",
+    "deadline_ms": 5000
+  },
+  {
+    "case": "wrong_token",
+    "expected": "REJECTED",
+    "deadline_ms": 5000
+  },
+  {
+    "case": "wrong_pin",
+    "expected": "REJECTED",
+    "deadline_ms": 5000
+  },
+  {
+    "case": "request_symlink",
+    "expected": "REJECTED",
+    "deadline_ms": 5000
+  },
+  {
+    "case": "snapshot_symlink",
+    "expected": "REJECTED",
+    "deadline_ms": 5000
+  },
+  {
+    "case": "request_nonregular",
+    "expected": "REJECTED",
+    "deadline_ms": 5000
+  },
+  {
+    "case": "snapshot_nonregular",
+    "expected": "REJECTED",
+    "deadline_ms": 5000
+  },
+  {
+    "case": "bad_mode",
+    "expected": "REJECTED",
+    "deadline_ms": 5000
+  },
+  {
+    "case": "foreign_owner_if_constructible",
+    "expected": "UNSUPPORTED",
+    "deadline_ms": 5000
+  },
+  {
+    "case": "partial_tmp_only",
+    "expected": "UNAVAILABLE",
+    "deadline_ms": 5000
+  },
+  {
+    "case": "published_partial",
+    "expected": "INCONCLUSIVE",
+    "deadline_ms": 5000
+  },
+  {
+    "case": "oversized_snapshot",
+    "expected": "INCONCLUSIVE",
+    "deadline_ms": 5000
+  },
+  {
+    "case": "zero_records",
+    "expected": "INCONCLUSIVE",
+    "deadline_ms": 5000
+  },
+  {
+    "case": "second_request",
+    "expected": "REJECTED",
+    "deadline_ms": 5000
+  },
+  {
+    "case": "preexisting_final",
+    "expected": "REJECTED",
+    "deadline_ms": 5000
+  },
+  {
+    "case": "monitor_disabled",
+    "expected": "UNAVAILABLE",
+    "deadline_ms": 5000
+  },
+  {
+    "case": "no_request",
+    "expected": "UNAVAILABLE",
+    "deadline_ms": 5000
+  }
+]

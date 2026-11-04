@@ -1,0 +1,22 @@
+{
+  "scope": "OBSERVED_ARCHIVE_BYTES_NOT_INSTALLATION_READY",
+  "historical_attempt": "STOP_EXPECTED_LAYOUT_MISSING_UNCHANGED",
+  "payload_retained": false,
+  "descriptor_content": "UNREAD",
+  "archives": [
+    {
+      "package": "emulator",
+      "url": "https://dl.google.com/android/repository/emulator-linux_x64-16740729.zip",
+      "bytes": 349658551,
+      "sha1": "f41f9e31eb5ca64926603c03265c50bbc0ff4172",
+      "sha256": "cbc7c3cfb83220b8a0f9c513fdab557712e74d339ec19ddffa43f23350ae9bdd"
+    },
+    {
+      "package": "system-images;android-34;default;x86_64",
+      "url": "https://dl.google.com/android/repository/sys-img/android/x86_64-34_r04.zip",
+      "bytes": 720747116,
+      "sha1": "5f6a249f9bc3b1b4c459b13ce2eb646c9680bed1",
+      "sha256": "b57f6386af25b0fe5488e77196b43c03778c6760e6f4311611d090391b9cb2b3"
+    }
+  ]
+}

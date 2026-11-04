@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "scope": "FRESH_COMMITTED_PREBUILT_NATIVE_BYTES_NO_TARGET_EXECUTION",
+  "repository_commit": "752ee4aba39771f19720120c3f7df0b818859c26",
+  "files": [
+    {
+      "name": "libandroid-shmem.so",
+      "repository_path": "app/src/main/jniLibs/x86_64/libandroid-shmem.so",
+      "sha256": "092926060298acd3778e6239033d7aef1280dcb59aebe021a3719612e6a3465f",
+      "bytes": 14368,
+      "git_blob_sha1": "c7835af337647d77c472094917655490555cd677",
+      "url": "https://raw.githubusercontent.com/Ashveil1/LDOA/752ee4aba39771f19720120c3f7df0b818859c26/app/src/main/jniLibs/x86_64/libandroid-shmem.so"
+    },
+    {
+      "name": "libproot.so",
+      "repository_path": "app/src/main/jniLibs/x86_64/libproot.so",
+      "sha256": "f2f1bb55c984fd3686f3bf66e4fc5e76bf05e67d30304d7bd24808b53cec74e2",
+      "bytes": 282049,
+      "git_blob_sha1": "182cc5358f03e91288663f5964fbd361f7960f36",
+      "url": "https://raw.githubusercontent.com/Ashveil1/LDOA/752ee4aba39771f19720120c3f7df0b818859c26/app/src/main/jniLibs/x86_64/libproot.so"
+    },
+    {
+      "name": "libproot_loader.so",
+      "repository_path": "app/src/main/jniLibs/x86_64/libproot_loader.so",
+      "sha256": "a836b0569c84b1661333d16bacf6b396ff08fea816a5c936a82e08ddeeca8341",
+      "bytes": 18368,
+      "git_blob_sha1": "5da6064477e48e61a500bf21b1a017a8c1c3c77d",
+      "url": "https://raw.githubusercontent.com/Ashveil1/LDOA/752ee4aba39771f19720120c3f7df0b818859c26/app/src/main/jniLibs/x86_64/libproot_loader.so"
+    },
+    {
+      "name": "libtalloc.so",
+      "repository_path": "app/src/main/jniLibs/x86_64/libtalloc.so",
+      "sha256": "7fa6722a4320495b1b85832fc7fd02de0cb367b45f116c1921b2830a6936da90",
+      "bytes": 32536,
+      "git_blob_sha1": "11a160093fb9c6dcc07dee978e06bb77572a87b8",
+      "url": "https://raw.githubusercontent.com/Ashveil1/LDOA/752ee4aba39771f19720120c3f7df0b818859c26/app/src/main/jniLibs/x86_64/libtalloc.so"
+    }
+  ],
+  "not_packaged": [
+    "libproot_loader32.so"
+  ],
+  "loader32_rationale": "x86_64-only fixed producer/runtime, noELF32 target permitted",
+  "source_to_binary_reproducibility": "NOT_PROVEN"
+}

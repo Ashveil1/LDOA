@@ -1,0 +1,261 @@
+{
+  "schema": 1,
+  "scope": "SOURCE_ONLY_INPUT_DAG_NOT_EXECUTION",
+  "nodes": [
+    {
+      "id": "fixture_source",
+      "kind": "source",
+      "state": "SOURCE_PRESENT",
+      "requires": [],
+      "path": "fixture/build.gradle.kts"
+    },
+    {
+      "id": "producer_source",
+      "kind": "source",
+      "state": "SOURCE_PRESENT",
+      "requires": [],
+      "path": "native/producer.c"
+    },
+    {
+      "id": "agp_metadata",
+      "kind": "metadata",
+      "state": "METADATA_OBSERVED",
+      "requires": []
+    },
+    {
+      "id": "noble_signed_indexes",
+      "kind": "metadata",
+      "state": "METADATA_OBSERVED",
+      "requires": []
+    },
+    {
+      "id": "native_git_tree",
+      "kind": "metadata",
+      "state": "METADATA_OBSERVED",
+      "requires": []
+    },
+    {
+      "id": "runner_documentation",
+      "kind": "metadata",
+      "state": "METADATA_OBSERVED",
+      "requires": []
+    },
+    {
+      "id": "native_payloads",
+      "kind": "payload",
+      "state": "INPUT_BOUND",
+      "requires": [
+        "native_git_tree"
+      ],
+      "observation": "347321B private retained, never executed"
+    },
+    {
+      "id": "native_lock",
+      "kind": "generated_lock",
+      "state": "INPUT_BOUND",
+      "requires": [
+        "native_payloads",
+        "native_git_tree"
+      ],
+      "path": "android-native-inputs.json",
+      "producer": "StageA exact committed blobs size+GitblobSHA1+SHA256 binding"
+    },
+    {
+      "id": "maven_selection",
+      "kind": "generated_lock",
+      "state": "MISSING",
+      "requires": [
+        "agp_metadata",
+        "fixture_source"
+      ],
+      "path": "offline-selected-dependencies.json",
+      "producer": "Exact fresh Gradle variant/coordinate resolution, not direct-POM approximation"
+    },
+    {
+      "id": "maven_lock",
+      "kind": "generated_lock",
+      "state": "MISSING",
+      "requires": [
+        "maven_selection"
+      ],
+      "path": "ci-validation/maven-download.lock.json",
+      "producer": "Fresh resolved metadata+artifact URL/size/SHA256 lock, not historical311 identity"
+    },
+    {
+      "id": "maven_payloads",
+      "kind": "payload",
+      "state": "MISSING",
+      "requires": [
+        "maven_lock"
+      ]
+    },
+    {
+      "id": "noble_package_lock",
+      "kind": "generated_lock",
+      "state": "MISSING",
+      "requires": [
+        "noble_signed_indexes",
+        "producer_source"
+      ],
+      "path": "sysroot-packages.lock.json",
+      "producer": "Exact chosen versions+closure from authenticated index records"
+    },
+    {
+      "id": "noble_payloads",
+      "kind": "payload",
+      "state": "MISSING",
+      "requires": [
+        "noble_package_lock"
+      ]
+    },
+    {
+      "id": "sysroot_selection",
+      "kind": "generated_lock",
+      "state": "MISSING",
+      "requires": [
+        "noble_payloads"
+      ],
+      "path": "sysroot-file-selection.json",
+      "producer": "select_sysroot_files.py over verified package contents"
+    },
+    {
+      "id": "toolchain",
+      "kind": "tool_observation",
+      "state": "FUTURE_OBSERVATION",
+      "requires": [
+        "runner_documentation"
+      ]
+    },
+    {
+      "id": "guest_compile",
+      "kind": "build_observation",
+      "state": "FUTURE_OBSERVATION",
+      "requires": [
+        "sysroot_selection",
+        "producer_source",
+        "toolchain"
+      ]
+    },
+    {
+      "id": "compile_inputs",
+      "kind": "generated_lock",
+      "state": "MISSING",
+      "requires": [
+        "guest_compile",
+        "toolchain"
+      ],
+      "path": "compile-inputs.lock.json",
+      "producer": "freeze_inputs.py+actual header/ELF/tool observations"
+    },
+    {
+      "id": "compiler_host_inventory",
+      "kind": "generated_lock",
+      "state": "MISSING",
+      "requires": [
+        "toolchain"
+      ],
+      "path": "compiler-host-inputs.json",
+      "producer": "Exact actual tool ELF/resource graph"
+    },
+    {
+      "id": "runtime_asset",
+      "kind": "generated_lock",
+      "state": "MISSING",
+      "requires": [
+        "guest_compile",
+        "compile_inputs"
+      ],
+      "path": "runtime-asset-plan.json",
+      "producer": "stage_runtime.py verified runtime ZIP/member receipt"
+    },
+    {
+      "id": "runtime_zip",
+      "kind": "payload",
+      "state": "MISSING",
+      "requires": [
+        "runtime_asset"
+      ]
+    },
+    {
+      "id": "compile_freshness",
+      "kind": "generated_lock",
+      "state": "MISSING",
+      "requires": [
+        "compile_inputs",
+        "compiler_host_inventory",
+        "runtime_asset"
+      ],
+      "path": "compile-freshness.json",
+      "producer": "refresh_compile_evidence.py; never infer from stale build result"
+    },
+    {
+      "id": "generated_payload",
+      "kind": "generated_lock",
+      "state": "MISSING",
+      "requires": [
+        "native_lock",
+        "native_payloads",
+        "compile_freshness",
+        "runtime_zip",
+        "fixture_source"
+      ],
+      "path": "generated/payload-binding.json",
+      "producer": "prepare_payload.py with unified source_inventory pin"
+    },
+    {
+      "id": "apk_build",
+      "kind": "build_observation",
+      "state": "FUTURE_OBSERVATION",
+      "requires": [
+        "generated_payload",
+        "maven_payloads",
+        "toolchain"
+      ]
+    },
+    {
+      "id": "apk_binding",
+      "kind": "build_observation",
+      "state": "FUTURE_OBSERVATION",
+      "requires": [
+        "apk_build"
+      ]
+    },
+    {
+      "id": "emulator_image_lock",
+      "kind": "metadata",
+      "state": "METADATA_OBSERVED",
+      "requires": [],
+      "path": "ci-validation/archive-byte-observations.json"
+    },
+    {
+      "id": "emulator_image_payloads",
+      "kind": "payload",
+      "state": "MISSING",
+      "requires": [
+        "emulator_image_lock"
+      ]
+    },
+    {
+      "id": "image_descriptor",
+      "kind": "tool_observation",
+      "state": "FUTURE_OBSERVATION",
+      "requires": [
+        "emulator_image_payloads"
+      ]
+    },
+    {
+      "id": "runtime_target",
+      "kind": "runtime_observation",
+      "state": "FUTURE_OBSERVATION",
+      "requires": [
+        "apk_binding",
+        "emulator_image_payloads",
+        "image_descriptor",
+        "toolchain"
+      ]
+    }
+  ],
+  "historical311_and13": "Missing prior outputs, not a required count for newly resolved locks",
+  "source_pin_scheme": "SHA256(sorted path+NUL+fileSHA256+newline)",
+  "no_activation": true
+}

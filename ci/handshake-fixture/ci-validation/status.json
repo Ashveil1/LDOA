@@ -1,0 +1,50 @@
+{
+  "classification": "NEW_SOURCE_RECONCILIATION_ONLY",
+  "source_ready_for_build": false,
+  "runtime_ready": false,
+  "old_125_pin_equivalence": false,
+  "historical_archive_attempt": "STOP_EXPECTED_LAYOUT_MISSING_UNCHANGED",
+  "descriptor_content": "UNREAD",
+  "missing_authoritative_inputs": [
+    "deps.discovery.json",
+    "sysroot-packages.lock.json",
+    "sysroot-file-selection.json",
+    "compile-inputs.lock.json",
+    "compile-evidence.json",
+    "runtime-elf-graph.json",
+    "selected-linker-inputs.json",
+    "android-native-inputs.json",
+    "runtime-asset-plan.json",
+    "offline-selected-dependencies.json",
+    "offline-discovery-status.json",
+    "compiler-host-inputs.json",
+    "preprocessor-inputs.json",
+    "generated/payload-binding.json",
+    "ci-validation/maven-download.lock.json",
+    "ci-validation/maven-metadata-url-verification.json",
+    "ci-validation/local-seed-preflight.json"
+  ],
+  "missing_counts": {
+    "maven_lock_entries": 311,
+    "noble_package_entries": 13
+  },
+  "fresh_execution": {
+    "build": false,
+    "tests": false,
+    "runtime": false,
+    "dependency_fetch": false
+  },
+  "gates": {
+    "workflow_if_false": true,
+    "job_cli_exit": 78,
+    "build_wrapper_exit": 78,
+    "run_wrapper_exit": 78
+  },
+  "remaining": [
+    "new source review and static consistency closure",
+    "new exact dependency/native/guest/compiler inventories from authoritative bytes",
+    "actual toolchain/resources preflight",
+    "new clean build and artifact binding if separately scoped",
+    "fixed runtime plan and owner scope decision if undertaken"
+  ]
+}

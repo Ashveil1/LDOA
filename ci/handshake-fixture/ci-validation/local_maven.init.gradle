@@ -1,0 +1,10 @@
+// Future locked seed only. No external repositories or resolution fallback.
+settingsEvaluated { settings ->
+ def seed = new File(settings.settingsDir,'private-run/maven')
+ if (!seed.isDirectory()) throw new GradleException('LOCKED_MAVEN_SEED_REQUIRED')
+ settings.pluginManagement.repositories.clear()
+ settings.pluginManagement.repositories.maven { url=seed.toURI() }
+ settings.dependencyResolutionManagement.repositoriesMode.set(org.gradle.api.initialization.resolve.RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+ settings.dependencyResolutionManagement.repositories.clear()
+ settings.dependencyResolutionManagement.repositories.maven { url=seed.toURI() }
+}

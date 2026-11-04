@@ -1,0 +1,1 @@
+{"scope":"EXTERNAL_REVIEW_PIN_CONTRACT","commit":null,"reason":"No self-referential HEAD pin. Future execution requires approved immutable SHA supplied outside candidate tree; source tree never stores its own commit hash."}

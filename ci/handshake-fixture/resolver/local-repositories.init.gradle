@@ -1,0 +1,33 @@
+beforeSettings { settings ->
+ def p = System.getenv('HS_REVIEWED_LOCAL_MAVEN_PROXY')
+ if (p != 'http://127.0.0.1:18763/') throw new GradleException('BOUNDED_PROXY_REQUIRED')
+ settings.pluginManagement.repositories.clear()
+ settings.pluginManagement.repositories.maven { url=uri(p); allowInsecureProtocol=true }
+}
+settingsEvaluated { settings ->
+ settings.pluginManagement.repositories.clear()
+ settings.pluginManagement.repositories.maven { url=uri(System.getenv('HS_REVIEWED_LOCAL_MAVEN_PROXY')); allowInsecureProtocol=true }
+ settings.dependencyResolutionManagement.repositoriesMode.set(org.gradle.api.initialization.resolve.RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+ settings.dependencyResolutionManagement.repositories.clear()
+ settings.dependencyResolutionManagement.repositories.maven { url=uri(System.getenv('HS_REVIEWED_LOCAL_MAVEN_PROXY')); allowInsecureProtocol=true }
+}
+allprojects { p ->
+ p.buildscript.repositories.clear()
+ p.buildscript.repositories.maven { url=uri(System.getenv('HS_REVIEWED_LOCAL_MAVEN_PROXY')); allowInsecureProtocol=true }
+}
+gradle.projectsEvaluated {
+ rootProject.tasks.register('resolveLockedInputs') {
+  doLast {
+   def rows=[]
+   allprojects.sort{it.path}.each { p ->
+    p.configurations.findAll{it.canBeResolved}.sort{it.name}.each { c ->
+     c.resolve()
+     c.resolvedConfiguration.resolvedArtifacts.each { a ->
+      rows.add([project:p.path,configuration:c.name,module:a.moduleVersion.id.toString(),name:a.name,classifier:a.classifier,type:a.type,file:a.file.name,bytes:a.file.length()])
+     }
+    }
+   }
+   new File(rootDir,'selected-inputs.json').text=groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(rows))
+  }
+ }
+}

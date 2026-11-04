@@ -1,0 +1,35 @@
+name: isolated-handshake-validation-CANDIDATE
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: isolated-handshake-once
+  cancel-in-progress: false
+jobs:
+  fixture:
+    # Deliberately non-dispatchable until bootstrap/output/entrypoint review.
+    if: ${{ false }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40 # PROPOSED, not approved
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            ci/handshake-fixture
+            app/src/main/jniLibs/x86_64
+          sparse-checkout-cone-mode: false
+      - name: Standard host preflight, no autofetch
+        timeout-minutes: 2
+        run: python3 ci/handshake-fixture/ci-validation/host_preflight.py
+      - name: One bounded fixture outcome
+        timeout-minutes: 35 # PROPOSED within40, not approved
+        shell: bash
+        run: |
+          timeout --signal=TERM --kill-after=30s 2100s python3 ci/handshake-fixture/ci-validation/job_once.py
+      - name: Owned cleanup classification only
+        if: always()
+        run: |
+          printf '%s\n' '{"scope":"HANDSHAKE_FIXTURE_ONLY","stage":"OWNED_JOB_ENDED","guest_absence":"NOT_PROVEN"}'
+# No upload-artifact/cache/retry/schedule/push trigger, screenshots/logcat/APK export.

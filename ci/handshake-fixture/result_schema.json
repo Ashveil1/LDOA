@@ -1,0 +1,302 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Handshake evidence shape, not a success verdict",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "fixture_only",
+    "scope",
+    "pins",
+    "cases",
+    "cleanup"
+  ],
+  "properties": {
+    "schema": {
+      "const": 1,
+      "type": "integer"
+    },
+    "fixture_only": {
+      "const": true
+    },
+    "scope": {
+      "const": "HANDSHAKE_FIXTURE_ONLY"
+    },
+    "pins": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "native",
+        "guest",
+        "apk",
+        "test_apk"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "native": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "guest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "apk": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "test_apk": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 17,
+      "maxItems": 17,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "android_uid",
+          "android_owner",
+          "guest_uid",
+          "guest_owner",
+          "case",
+          "expected",
+          "result",
+          "elapsed_ms",
+          "mode",
+          "snapshot_bytes",
+          "snapshot_sha256",
+          "snapshot_reason",
+          "token_sha256",
+          "monitor",
+          "cleanup",
+          "request_seen",
+          "published",
+          "accepted",
+          "failure_stage",
+          "guest_identity_reason",
+          "terminal",
+          "exit_code",
+          "capability",
+          "file_cleanup"
+        ],
+        "properties": {
+          "android_uid": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647
+          },
+          "android_owner": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647
+          },
+          "guest_uid": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "guest_owner": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "case": {
+            "enum": [
+              "positive",
+              "wrong_token",
+              "wrong_pin",
+              "request_symlink",
+              "snapshot_symlink",
+              "request_nonregular",
+              "snapshot_nonregular",
+              "bad_mode",
+              "foreign_owner_if_constructible",
+              "partial_tmp_only",
+              "published_partial",
+              "oversized_snapshot",
+              "zero_records",
+              "second_request",
+              "preexisting_final",
+              "monitor_disabled",
+              "no_request"
+            ]
+          },
+          "expected": {
+            "enum": [
+              "ACCEPTED",
+              "REJECTED",
+              "UNAVAILABLE",
+              "INCONCLUSIVE",
+              "UNSUPPORTED"
+            ]
+          },
+          "result": {
+            "enum": [
+              "ACCEPTED",
+              "REJECTED",
+              "UNAVAILABLE",
+              "INCONCLUSIVE",
+              "UNSUPPORTED"
+            ]
+          },
+          "elapsed_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 60000
+          },
+          "mode": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4095
+          },
+          "snapshot_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 524289
+          },
+          "snapshot_sha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "snapshot_reason": {
+            "enum": [
+              "COMPLETE",
+              "NOT_PUBLISHED",
+              "REJECTED",
+              "UNAVAILABLE",
+              "PARTIAL",
+              "CAP_EXCEEDED",
+              "POST_RENAME_FSYNC_FAILED"
+            ]
+          },
+          "token_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "monitor": {
+            "enum": [
+              "INOTIFY",
+              "DISABLED",
+              "UNAVAILABLE"
+            ]
+          },
+          "cleanup": {
+            "enum": [
+              "KNOWN_OWNED_REAPED",
+              "FAILED",
+              "UNKNOWN",
+              "NOT_LAUNCHED"
+            ]
+          },
+          "request_seen": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2
+          },
+          "published": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2
+          },
+          "accepted": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2
+          },
+          "failure_stage": {
+            "enum": [
+              "NONE",
+              "MONITOR",
+              "CASE_TIMEOUT",
+              "VALIDATION",
+              "UNSUPPORTED",
+              "TRANSPORT",
+              "RUNAS",
+              "CLEANUP"
+            ]
+          },
+          "guest_identity_reason": {
+            "enum": [
+              "READY_OBSERVED",
+              "NOT_LAUNCHED",
+              "MONITOR_UNAVAILABLE",
+              "READY_UNAVAILABLE"
+            ]
+          },
+          "terminal": {
+            "enum": [
+              "NONE",
+              "NORMAL_END",
+              "MONITOR_UNAVAILABLE"
+            ]
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "capability": {
+            "enum": [
+              "AVAILABLE",
+              "UNAVAILABLE_MONITOR",
+              "UNKNOWN"
+            ]
+          },
+          "file_cleanup": {
+            "enum": [
+              "REMOVED",
+              "FAILED",
+              "NOT_ATTEMPTED"
+            ]
+          }
+        }
+      }
+    },
+    "cleanup": {
+      "enum": [
+        "KNOWN_OWNED_REAPED",
+        "FAILED",
+        "UNKNOWN",
+        "NOT_LAUNCHED"
+      ]
+    }
+  },
+  "$comment": "Python checker additionally enforces exact ordered inventory/cross-field constraints. Host assess() returns MATCH or MISMATCH; genuine unexpected evidence stays transport-valid. Fixture build/run still intentionally blocked."
+}

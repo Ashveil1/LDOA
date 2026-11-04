@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "source_tag": "v5.1.107.101",
+  "binary_binding": "Repo notice/version string matches version; source-to-prebuilt reproducibility NOT_VERIFIED",
+  "claims": [
+    "Option marks initial tracee killall_on_exit",
+    "terminate_tracee marked initial tracee calls kill_all_tracees",
+    "kill_all_tracees sends SIGKILL to each recorded tracee",
+    "event_loop atexit and handled fatal signals invoke recorded-tracee kill"
+  ],
+  "limits": [
+    "SIGKILL of tracer bypasses handler/atexit",
+    "Source does not establish all kills reaped before Process exit",
+    "No proof against escaped/unrecorded tracees",
+    "Do not claim universal process absence"
+  ],
+  "sources": []
+}
