@@ -1,7 +1,10 @@
 """Mocked orchestration/deadline tests, no Gradle or payloads."""
 import pathlib,tempfile,types,unittest
+from unittest.mock import patch
 from resolve_once import run_graph_stages
 class Stages(unittest.TestCase):
+ def setUp(self):
+  quiet=patch('resolve_once.print',create=True);quiet.start();self.addCleanup(quiet.stop)
  def test_shared_budget_order_and_flags(self):
   with tempfile.TemporaryDirectory() as td:
    work=pathlib.Path(td);fixture=work/'graph-fixture';fixture.mkdir();(fixture/'selected-inputs.json').write_text('{}')

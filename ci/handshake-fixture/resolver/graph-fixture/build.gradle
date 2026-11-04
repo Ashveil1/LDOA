@@ -14,6 +14,8 @@ project(':producer') {
  dependencies { multi 'fixture:external:1' }
 }
 project(':consumer') {
+ // Core plugin installs JVM Maven variant derivation/schema; no plugin download or build task invocation.
+ apply plugin: 'java-base'
  configurations.create('probe') {
   canBeResolved=true;canBeConsumed=false
   attributes { attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage, Usage.JAVA_API)); attribute(Category.CATEGORY_ATTRIBUTE, objects.named(Category, Category.LIBRARY)) }
