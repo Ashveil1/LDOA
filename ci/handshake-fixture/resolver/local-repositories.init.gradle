@@ -2,32 +2,36 @@ beforeSettings { settings ->
  def p = System.getenv('HS_REVIEWED_LOCAL_MAVEN_PROXY')
  if (p != 'http://127.0.0.1:18763/') throw new GradleException('BOUNDED_PROXY_REQUIRED')
  settings.pluginManagement.repositories.clear()
- settings.pluginManagement.repositories.maven { url=uri(p); allowInsecureProtocol=true }
+ settings.pluginManagement.repositories.maven { url=new java.net.URI(p); allowInsecureProtocol=true }
 }
 settingsEvaluated { settings ->
  settings.pluginManagement.repositories.clear()
- settings.pluginManagement.repositories.maven { url=uri(System.getenv('HS_REVIEWED_LOCAL_MAVEN_PROXY')); allowInsecureProtocol=true }
+ settings.pluginManagement.repositories.maven { url=new java.net.URI(System.getenv('HS_REVIEWED_LOCAL_MAVEN_PROXY')); allowInsecureProtocol=true }
  settings.dependencyResolutionManagement.repositoriesMode.set(org.gradle.api.initialization.resolve.RepositoriesMode.FAIL_ON_PROJECT_REPOS)
  settings.dependencyResolutionManagement.repositories.clear()
- settings.dependencyResolutionManagement.repositories.maven { url=uri(System.getenv('HS_REVIEWED_LOCAL_MAVEN_PROXY')); allowInsecureProtocol=true }
+ settings.dependencyResolutionManagement.repositories.maven { url=new java.net.URI(System.getenv('HS_REVIEWED_LOCAL_MAVEN_PROXY')); allowInsecureProtocol=true }
 }
 allprojects { p ->
  p.buildscript.repositories.clear()
- p.buildscript.repositories.maven { url=uri(System.getenv('HS_REVIEWED_LOCAL_MAVEN_PROXY')); allowInsecureProtocol=true }
+ p.buildscript.repositories.maven { url=new java.net.URI(System.getenv('HS_REVIEWED_LOCAL_MAVEN_PROXY')); allowInsecureProtocol=true }
 }
-gradle.projectsEvaluated {
- rootProject.tasks.register('resolveLockedInputs') {
-  doLast {
+gradle.projectsEvaluated { evaluatedGradle ->
+ final org.gradle.api.Project capturedRoot = evaluatedGradle.getRootProject()
+ final java.util.List capturedProjects = new java.util.ArrayList(capturedRoot.getAllprojects())
+ capturedProjects.sort { left, right -> left.getPath() <=> right.getPath() }
+ final java.io.File capturedOutput = new java.io.File(capturedRoot.getRootDir(), 'selected-inputs.json')
+ capturedRoot.getTasks().register('resolveLockedInputs') { resolverTask ->
+  resolverTask.doLast { ignoredTask ->
    def rows=[]
-   allprojects.sort{it.path}.each { p ->
-    p.configurations.findAll{it.canBeResolved}.sort{it.name}.each { c ->
-     c.resolve()
-     c.resolvedConfiguration.resolvedArtifacts.each { a ->
-      rows.add([project:p.path,configuration:c.name,module:a.moduleVersion.id.toString(),name:a.name,classifier:a.classifier,type:a.type,file:a.file.name,bytes:a.file.length()])
+   capturedProjects.each { selectedProject ->
+    selectedProject.getConfigurations().findAll { configuration -> configuration.isCanBeResolved() }.sort { left, right -> left.getName() <=> right.getName() }.each { configuration ->
+     configuration.resolve()
+     configuration.getResolvedConfiguration().getResolvedArtifacts().each { artifact ->
+      rows.add([project:selectedProject.getPath(),configuration:configuration.getName(),module:artifact.getModuleVersion().getId().toString(),name:artifact.getName(),classifier:artifact.getClassifier(),type:artifact.getType(),file:artifact.getFile().getName(),bytes:artifact.getFile().length()])
      }
     }
    }
-   new File(rootDir,'selected-inputs.json').text=groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(rows))
+   capturedOutput.text=groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(rows))
   }
  }
 }
