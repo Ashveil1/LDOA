@@ -120,7 +120,9 @@ jobs:
             if component:
              child=os.open(component,FLAGS,dir_fd=root);os.close(root);root=child
             st=os.fstat(root)
-            if st.st_uid!=0 or stat.S_IMODE(st.st_mode)&0o022:fail()
+            guard=st.st_uid==0 and not bool(stat.S_IMODE(st.st_mode)&0o022)
+            print(json.dumps({'scope':'SNAPSHOT_INSTALL_ANCESTOR_STAT','label':'ROOT' if component=='' else 'OPT','uid':st.st_uid,'gid':st.st_gid,'mode':format(stat.S_IMODE(st.st_mode),'04o'),'guard':guard,'before_installation_effects':True},sort_keys=True),flush=True)
+            if not guard:fail()
            # No existing directory accepted. Exact fixed installation, no user-selected paths.
            os.mkdir('ldoa-qualification',0o755,dir_fd=root)
            parent=os.open('ldoa-qualification',FLAGS,dir_fd=root)
