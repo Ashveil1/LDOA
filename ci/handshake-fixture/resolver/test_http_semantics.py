@@ -28,7 +28,7 @@ class Semantics(unittest.TestCase):
      c=http.client.HTTPConnection('local');c.sock=socket.socket(socket.AF_UNIX);c.sock.connect(str(root/'broker.sock'));c.request(method,'/a/b/c/'+name+'.pom');r=c.getresponse();status=r.status;data=r.read();c.close();return status,data
     self.assertEqual(request('HEAD','ok'),(200,b''));self.assertEqual(request('GET','ok'),(200,b'OK'));self.assertEqual(calls.count('/a/b/c/ok.pom'),1)
     self.assertEqual(request('GET','fallback'),(200,b'OK'));self.assertEqual(calls.count('/a/b/c/fallback.pom'),2)
-    self.assertEqual(store.origins['a/b/c/fallback.pom'],[{'root':'google','status':404},{'root':'central','status':200}])
+    self.assertEqual(store.origins['a/b/c/fallback.pom'],[{'root':'google','state':'HTTP_RESPONSE','status':404},{'root':'central','state':'HTTP_RESPONSE','status':200}])
     for method in ['HEAD','GET','HEAD']:self.assertEqual(request(method,'missing')[0],404)
     self.assertEqual(calls.count('/a/b/c/missing.pom'),2) # one call to each fixed root, never retry
     for name,reason in [('mixed','UPSTREAM_HTTP_STATUS'),('forbidden','UPSTREAM_HTTP_STATUS'),('redirect','UPSTREAM_REDIRECT_REFUSED'),('cap','CONTENT_LENGTH_CAP'),('truncated','TRUNCATED_RESPONSE')]:

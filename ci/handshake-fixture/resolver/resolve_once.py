@@ -6,7 +6,7 @@ HERE=pathlib.Path(__file__).resolve().parent
 
 def main():
  # Before any reachable payload URL: test actual namespace+seccomp boundary with synthetic origin.
- subprocess.run([sys.executable,'-m','unittest','-v','test_transport','test_provision','test_pair','test_http_semantics','test_project_binding'],cwd=HERE,check=True,timeout=40)
+ subprocess.run([sys.executable,'-m','unittest','-v','test_transport','test_provision','test_pair','test_http_semantics','test_project_binding','test_io'],cwd=HERE,check=True,timeout=40)
  parent=pathlib.Path(os.environ['RUNNER_TEMP']).resolve();root=parent/'ldoa-build-inputs-one'
  root.mkdir(mode=0o700) # preexisting run is STOP, never resume
  lib=ctypes.CDLL(None,use_errno=True)

@@ -1,4 +1,5 @@
 """Fixed bounded Maven transport. Host process only; target gets no external network."""
+import socket,ssl,errno
 import http.server,socketserver,urllib.request,urllib.error,urllib.parse,pathlib,hashlib,json,threading,re,os
 ROOTS=('https://dl.google.com/dl/android/maven2/','https://repo.maven.apache.org/maven2/')
 class Missing(ValueError):pass
@@ -15,9 +16,10 @@ class Store:
   for index,base in enumerate(ROOTS):
    root_id=('google','central')[index]
    url=base+path
+   attempt={'root':root_id,'state':'ATTEMPTED'};self.origins[path].append(attempt)
    try:
     with opener.open(urllib.request.Request(url,headers={'Accept-Encoding':'identity'}),timeout=20) as r:
-     self.origins[path].append({'root':root_id,'status':r.status})
+     attempt.update(state='HTTP_RESPONSE',status=r.status)
      if r.status!=200 or r.url!=url or r.headers.get('Content-Encoding','identity')!='identity':raise ValueError('UPSTREAM_RESPONSE_SCOPE')
      n=r.headers.get('Content-Length')
      remaining=self.totalcap-self.wire
@@ -36,9 +38,11 @@ class Store:
      if n and len(data)!=int(n):raise ValueError('TRUNCATED_RESPONSE')
      return data,url
    except urllib.error.HTTPError as e:
-    status=e.code;self.origins[path].append({'root':root_id,'status':status});e.close() # Do not consume or log upstream error response bodies.
+    status=e.code;attempt.update(state='HTTP_RESPONSE',status=status);e.close() # Do not consume or log upstream error response bodies.
     if status==404:continue
     raise Refused('UPSTREAM_HTTP_STATUS',status)
+   except Exception as e:
+    attempt.update(state='REFUSED',reason=failure_info(e)['reason']);raise
   raise Missing('VERIFIED_BOTH_ROOTS_404')
  def get(self,path):
   if not re.fullmatch(r'[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+){3,}',path) or any(p in ('.','..') for p in path.split('/')):raise ValueError('PATH_SCOPE')
@@ -77,11 +81,19 @@ class Store:
   return {'scope':'MAVEN_TRANSPORT_RECEIPT','failures':[{'path':p,**f} for p,f in self.failures.items()],'origin_statuses':[{'path':p,'roots':rows} for p,rows in self.origins.items()],'cached_bytes':self.total,'response_body_bytes':self.wire,'cached_responses':len(self.receipts),'failed_paths':len(self.failed),'http':list(self.http.values())}
  def close(self):
   (self.root/'transport-receipt.json').write_text(json.dumps({'bytes':self.total,'wire_bytes':self.wire,'entries':list(self.receipts.values()),'failed_paths':sorted(self.failed),'failures':self.failures,'http':list(self.http.values()),'bounded':True},indent=2))
+def io_reason(e):
+ # Unwrap only typed URLError.reason, never parse or retain its message.
+ cause=e.reason if isinstance(e,urllib.error.URLError) and isinstance(e.reason,BaseException) else e
+ if isinstance(cause,(TimeoutError,socket.timeout)):return 'UPSTREAM_TIMEOUT'
+ if isinstance(cause,socket.gaierror):return 'UPSTREAM_DNS'
+ if isinstance(cause,ssl.SSLError):return 'UPSTREAM_TLS'
+ if isinstance(cause,ConnectionError) or isinstance(cause,OSError) and cause.errno in {errno.ECONNREFUSED,errno.ECONNRESET,errno.ECONNABORTED,errno.ENETUNREACH,errno.EHOSTUNREACH,errno.EPIPE}:return 'UPSTREAM_CONNECTION'
+ return 'UPSTREAM_IO_OTHER'
 def failure_info(e):
  if isinstance(e,Missing):return {'reason':'VERIFIED_BOTH_ROOTS_404'}
  if isinstance(e,Refused):return {'reason':e.reason,'upstream_status':e.upstream_status}
  allowed={'PATH_SCOPE','EXTENSION_SCOPE','UPSTREAM_REDIRECT_REFUSED','UPSTREAM_RESPONSE_SCOPE','WIRE_TOTAL_CAP','CONTENT_LENGTH_CAP','TRUNCATED_RESPONSE','FILE_CAP','CACHE_MUTATION','ENTRY_CAP','TOTAL_CAP','FILE_OR_TOTAL_CAP'}
- reason=str(e) if isinstance(e,ValueError) and str(e) in allowed else ('UPSTREAM_IO' if isinstance(e,(OSError,urllib.error.URLError)) else 'INTERNAL_REFUSAL')
+ reason=str(e) if isinstance(e,ValueError) and str(e) in allowed else (io_reason(e) if isinstance(e,(OSError,urllib.error.URLError)) else 'INTERNAL_REFUSAL')
  return {'reason':reason}
 class UnixHTTP(socketserver.ThreadingMixIn,socketserver.UnixStreamServer):daemon_threads=True
 class Handler(http.server.BaseHTTPRequestHandler):
