@@ -16,9 +16,13 @@ OPTIONAL_GCC_ALIASES={name+'.so':'../../../x86_64-linux-gnu/'+target for name,ta
  'libasan':'libasan.so.8','libatomic':'libatomic.so.1','libgomp':'libgomp.so.1',
  'libhwasan':'libhwasan.so.0','libitm':'libitm.so.1','liblsan':'liblsan.so.0',
  'libquadmath':'libquadmath.so.0','libtsan':'libtsan.so.2','libubsan':'libubsan.so.1'}.items()}
+OPTIONAL_GI_UTILITIES={
+ 'usr/lib/x86_64-linux-gnu/glib-2.0/gi-compile-repository':'5db0658d262135a548f29e9b267c22ec759a068d77af4bbbb1811e6172e55ae7',
+ 'usr/lib/x86_64-linux-gnu/glib-2.0/gi-decompile-typelib':'9df77824ae75f3d657b1c458ec9a192ab7425fbc6a426dabeb7910c316f83888',
+ 'usr/lib/x86_64-linux-gnu/glib-2.0/gi-inspect-typelib':'f06aeaa45b54335b43a4c9e5fd00499f91d2927b2110919fc7b81b1747a4638b'}
 def optional_alias(n):return OPTIONAL_GCC_ALIASES.get(n[len(GCC_PREFIX):]) if n.startswith(GCC_PREFIX) else None
 def selected(n):
- if optional_alias(n) is not None:return False
+ if optional_alias(n) is not None or n in OPTIONAL_GI_UTILITIES:return False
  if any(x in n for x in ['/gio/modules/','/girepository-','/glib-2.0/codegen/']):return False
  return n.startswith(('usr/include/','usr/lib/x86_64-linux-gnu/','lib/x86_64-linux-gnu/','usr/lib64/','lib64/')) or (n.startswith('usr/lib/gcc/x86_64-linux-gnu/13/') and n.endswith(('.o','.a','.so')))
 def link_target(name,target):
@@ -67,6 +71,12 @@ def inventory_tar(tf,package,records,stage,total,excluded=None):
   seen.add(n)
   if member.isdir():continue
   if member.size>MEMBER_CAP:raise Stop('MEMBER_SIZE')
+  if n in OPTIONAL_GI_UTILITIES:
+   if package!='libglib2.0-dev' or not member.isfile():raise Stop('OPTIONAL_GI_TYPE_OWNER_CHANGED')
+   data=tf.extractfile(member).read(MEMBER_CAP+1)
+   if len(data)!=member.size or hashlib.sha256(data).hexdigest()!=OPTIONAL_GI_UTILITIES[n]:raise Stop('OPTIONAL_GI_HASH_CHANGED')
+   if excluded is not None:excluded.append({'path':n,'package':package,'type':'file','sha256':OPTIONAL_GI_UTILITIES[n],'reason':'GI_TOOL_OUTSIDE_PINNED_PRODUCER_RECIPE'})
+   continue
   target=optional_alias(n)
   if target is not None:
    if package!='libgcc-13-dev' or not member.issym() or member.linkname!=target:raise Stop('OPTIONAL_GCC_ALIAS_CHANGED')
@@ -118,7 +128,7 @@ def main():
   if len(canonical_records)!=len(records):raise Stop('USRMERGE_COLLISION')
   adjusted={n:dict(r,normalized_target=canonical(r['normalized_target'])) if r['type']=='symlink' else r for n,r in canonical_records.items()}
   missing=link_errors(adjusted)
-  result={'scope':'SELECTED_GUEST_DATA_ONLY_NOT_COMPILE_READY','packages':receipts,'files':list(records.values()),'excluded_optional_gcc_aliases':excluded,'producer_recipe_sha256':PRODUCER_RECIPE_SHA256,'unresolved_links':missing,'complete':False,'compiler_executed':False,'guest_executed':False,'selected_bytes':total,'producer_elf':'NOT_BUILT','runtime_asset':'NOT_READY'}
+  result={'scope':'SELECTED_GUEST_DATA_ONLY_NOT_COMPILE_READY','packages':receipts,'files':list(records.values()),'excluded_optional_inputs':excluded,'producer_recipe_sha256':PRODUCER_RECIPE_SHA256,'unresolved_links':missing,'complete':False,'compiler_executed':False,'guest_executed':False,'selected_bytes':total,'producer_elf':'NOT_BUILT','runtime_asset':'NOT_READY'}
   (root/'member-binding.json').write_text(json.dumps(result,indent=2));print(json.dumps({'packages':len(receipts),'selected_files':len(records),'selected_bytes':total,'unresolved_links':len(missing),'scope':result['scope']}))
   if missing:raise Stop('SELECTED_LINK_TARGET_MISSING')
   static=qualify(records,stage,deadline)

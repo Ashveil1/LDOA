@@ -40,3 +40,5 @@ class DeadlineAndStatic(unittest.TestCase):
    p=pathlib.Path(d);(p/'elf').write_bytes(b'\x7fELF')
    with m.patch('qualify_static.subprocess.run',fake):result=qualify({'elf':{'path':'elf','type':'file','sha256':'synthetic','package':'p'}},p,time.monotonic()+5)
    self.assertEqual(result['missing'][0]['needed'],'missing.so');self.assertFalse(result['runtime_asset_ready'])
+
+from test_static_search import Search
