@@ -7,8 +7,15 @@ class Program(ctypes.Structure):_fields_=[('len',ctypes.c_ushort),('filter',ctyp
 def restrict():
  if os.uname().machine!='x86_64':raise RuntimeError('ARCH_REQUIRED')
  ins=[(0x20,0,0,4),(0x15,1,0,0xc000003e),(0x06,0,0,0x80000000),(0x20,0,0,0),(0x35,0,1,0x40000000),(0x06,0,0,0x50000|1)]
- # setns, unshare, mount, ptrace, process_vm_readv/writev, bpf, open_by_handle_at, socketpair
- for nr in [308,272,165,101,310,311,321,304,53,425,438]:ins.extend([(0x15,0,1,nr),(0x06,0,0,0x50000|1)])
+ # setns, unshare, mount, ptrace, process_vm_readv/writev, bpf, open_by_handle_at; socketpair is filtered separately
+ for nr in [308,272,165,101,310,311,321,304,425,438]:ins.extend([(0x15,0,1,nr),(0x06,0,0,0x50000|1)])
+ # socketpair53: permit ONLY anonymous AF_UNIX1/SOCK_STREAM1/protocol0.
+ # Require zero high words too. No SOCK_CLOEXEC/NONBLOCK or alternate families/types.
+ pair=[]
+ for offset,value in [(16,1),(20,0),(24,1),(28,0),(32,0),(36,0)]:
+  pair.extend([(0x20,0,0,offset),(0x15,1,0,value),(0x06,0,0,0x50000|1)])
+ pair.append((0x06,0,0,0x7fff0000))
+ ins.append((0x15,0,len(pair),53));ins.extend(pair)
  # socket syscall41: argument0 AF_UNIX1 denied; all IP sockets constrained by network namespace.
  ins.extend([(0x15,0,4,41),(0x20,0,0,16),(0x15,0,1,1),(0x06,0,0,0x50000|1),(0x06,0,0,0x7fff0000),(0x06,0,0,0x7fff0000)])
  arr=(Filter*len(ins))(*(Filter(*i) for i in ins));lib=ctypes.CDLL(None,use_errno=True)
