@@ -6,7 +6,7 @@ HERE=pathlib.Path(__file__).resolve().parent
 
 def main():
  # Before any reachable payload URL: test actual namespace+seccomp boundary with synthetic origin.
- subprocess.run([sys.executable,'-m','unittest','-v','test_transport','test_provision','test_pair'],cwd=HERE,check=True,timeout=40)
+ subprocess.run([sys.executable,'-m','unittest','-v','test_transport','test_provision','test_pair','test_http_semantics'],cwd=HERE,check=True,timeout=40)
  parent=pathlib.Path(os.environ['RUNNER_TEMP']).resolve();root=parent/'ldoa-build-inputs-one'
  root.mkdir(mode=0o700) # preexisting run is STOP, never resume
  lib=ctypes.CDLL(None,use_errno=True)
@@ -30,7 +30,9 @@ def main():
  cmd=['unshare','--user','--map-root-user','--net',sys.executable,str(HERE/'confinement.py'),'--inside',str(root/'broker.sock'),str(executable),'--stacktrace','--no-daemon','--max-workers=2','--no-configuration-cache','--console=plain','-Dorg.gradle.java.installations.auto-download=false','-Dorg.gradle.daemon=false','-Djava.io.tmpdir='+str(work),'-I',str(HERE/'local-repositories.init.gradle'),'-p',str(work/'fixture'),'resolveLockedInputs']
  try:
   result=subprocess.run(cmd,env=env,timeout=1200);code=result.returncode
- finally:server.shutdown();server.server_close();store.close()
- print(json.dumps({'scope':'INPUT_RESOLUTION_ONLY','returncode':code,'maven_bytes':store.total,'artifacts':len(store.receipts),'build':False,'runtime':False}))
+ finally:
+  server.shutdown();server.server_close();store.close()
+  print(json.dumps(store.summary(),sort_keys=True),flush=True)
+ print(json.dumps({'scope':'INPUT_RESOLUTION_ONLY','returncode':code,'maven_bytes':store.total,'cached_responses':len(store.receipts),'build':False,'runtime':False}))
  return code
 if __name__=='__main__':raise SystemExit(main())
