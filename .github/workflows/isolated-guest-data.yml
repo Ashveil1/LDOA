@@ -1,0 +1,34 @@
+# Proposed only. No existing workflow edit or registration. Enable only after review.
+name: isolated-guest-data-only-PROPOSAL
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: isolated-guest-data-one
+  cancel-in-progress: false
+jobs:
+  inspect:
+    if: true
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Pure local tests then one data stage or stop
+        run: |
+          cd ci/handshake-fixture/guest-data
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v test_guest_data test_integration test_tool_gate
+          timeout --signal=TERM --kill-after=15s 630s python3 entry.py
+      - name: Emergency owned-root cleanup
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os,pathlib,shutil
+          p=pathlib.Path(os.environ['RUNNER_TEMP'])/'ldoa-guest-data-one'
+          if p.is_symlink(): raise SystemExit('OWNED_ROOT_SYMLINK_STOP')
+          if p.exists(): shutil.rmtree(p)
+          print('GUEST_EMERGENCY_CLEANUP_ABSENT',not p.exists())
+          PY
+# No Gradle, compiler, apt/install, guest execution, cache, upload, release or runtime.
