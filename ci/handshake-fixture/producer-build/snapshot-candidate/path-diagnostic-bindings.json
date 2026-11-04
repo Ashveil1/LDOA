@@ -1,0 +1,13 @@
+{
+  "host_contract.py": "ca80683f55d445b5da63ec02a0054a98f358c5ec68f82f0bb24a4499bd8385bc",
+  "static_diagnostic.py": "3076ff7f6bbcc8295d6bb4205e06e88e1c958e12e299e8f0e58fb58e1c2231e8",
+  "test_path_diagnostic.py": "adf91a9305e063f27e61c67a1c9b81c8ee601db9e778cf46861e98403e088d93",
+  "test_static_diagnostic.py": "f1a14c828c70ad1b85bebc60a57902aeed1d8dc651dc698e6d67d0f2e381156e",
+  "standalone_helper.py": "9e57597b29d264b3a20edb1e23c6641c2fe7ee7028b576fb727bd113270c2a02",
+  "installer.literal.py": "13221cfc1c481431a3152e5a2b8ba0a4ddedb88e84e70bfb2db1f585db859c48",
+  "cleanup.literal.py": "9b23e68d445061de6dcbed14524cd0d4d57fe585ffe332478d6fa3105234c10e",
+  "SNAPSHOT-WORKFLOW.INERT.yml": "0993201aacf2f4d8bb0b653fbcd4e78fe79c5e5eaf19d7faf9add00150274624",
+  "literal-bindings.json": "b5bfd4f7d9d1bb83a3b2fb6ba2aa1217148237959f0bbdcdfc7f76c3523834d1",
+  "tests.txt": "e69f154bcf07e0a74b91153091d597c84cc1aff9cde580cdd90a7141a5c10b3d",
+  "PATH-REVIEW.md": "d6a58cd334a58116c521b87b74942ffccfd536e458aa234619309204c7dc868a"
+}

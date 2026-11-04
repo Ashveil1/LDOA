@@ -12,7 +12,7 @@ class Diagnostic(unittest.TestCase):
   for n in ['host_contract.py','descriptor_binding.py','integrated_static.py']:
    for node in ast.walk(ast.parse((r/n).read_text())):
     if isinstance(node,ast.Call) and isinstance(node.func,ast.Name) and node.func.id=='Stop' and node.args and isinstance(node.args[0],ast.Constant):found.add(node.args[0].value)
-  self.assertEqual(found,HOST_REASONS)
+  self.assertEqual(found|{'HOST_PATH'},HOST_REASONS)
  def test_snapshot_cleanup_keeps_sanitized_checkpoint(self):
   import tempfile,time,os
   from test_fd_lifecycle import ns,FD

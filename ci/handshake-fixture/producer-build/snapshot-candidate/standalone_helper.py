@@ -264,12 +264,23 @@ def parse_elf(data):
  if len(names)!=len(set(names)) or any(not re.fullmatch(r'[A-Za-z0-9_.+-]+',n) for n in names):raise Stop('NEEDED_NAME')
  return {'interpreter':interpreter,'needed':names,'rpath':string(raw,tags[15]) if 15 in tags else None,'runpath':string(raw,tags[29]) if 29 in tags else None,'soname':string(raw,tags[14]) if 14 in tags else None,'architecture':'ELF64_LE_X86_64'}
 
-def canonical(path):
- if not isinstance(path,str) or not path.startswith('/') or len(path)>512 or not re.fullmatch(r'[A-Za-z0-9_+./-]+',path):raise Stop('HOST_PATH')
+PATH_CONTEXTS=frozenset({'START','ROW_CANONICAL','ALIAS_COMPONENT','RUNPATH_EXPANDED','UNSPECIFIED'})
+PATH_CATEGORIES=frozenset({'NOT_STRING','NOT_ABSOLUTE','LENGTH','CHARSET','DOT_COMPONENT','PARENT_COMPONENT'})
+class HostPathStop(Stop):
+ def __init__(self,context,category):
+  super().__init__('HOST_PATH')
+  self.path_category={'context':context if context in PATH_CONTEXTS else 'UNSPECIFIED','category':category}
+def canonical(path,context='UNSPECIFIED'):
+ def fail(category):raise HostPathStop(context,category)
+ if not isinstance(path,str):fail('NOT_STRING')
+ if not path.startswith('/'):fail('NOT_ABSOLUTE')
+ if len(path)>512:fail('LENGTH')
+ if not re.fullmatch(r'[A-Za-z0-9_+./-]+',path):fail('CHARSET')
  parts=[]
  for p in path.split('/'):
   if not p:continue
-  if p in ('.','..'):raise Stop('HOST_PATH')
+  if p=='.':fail('DOT_COMPONENT')
+  if p=='..':fail('PARENT_COMPONENT')
   parts.append(p)
  return '/'+ '/'.join(parts)
 
@@ -279,16 +290,16 @@ def closure(tool_paths,lookup):
  No cache/environment/hwcaps discovery or executable loader. Unsupported semantics STOP.
  """
  if set(tool_paths)!={'clang21','lld'}:raise Stop('HOST_START_SET')
- queue=[(canonical(p),True) for p in tool_paths.values()];seen={};edges=[];bindings={};total=0
+ queue=[(canonical(p,'START'),True) for p in tool_paths.values()];seen={};edges=[];bindings={};total=0
  def get(path):
   row=lookup(path)
   if row is None:return None
   required={'canonical','data','metadata','aliases'}
   if set(row)!=required or not isinstance(row['data'],bytes):raise Stop('HOST_ROW')
-  real=canonical(row['canonical']);meta=row['metadata'];aliases=row['aliases']
+  real=canonical(row['canonical'],'ROW_CANONICAL');meta=row['metadata'];aliases=row['aliases']
   if not isinstance(aliases,list) or len(aliases)>32 or any(set(a)!={'path','target','metadata'} for a in aliases):raise Stop('HOST_ALIAS')
   for a in aliases:
-   canonical(a['path'])
+   canonical(a['path'],'ALIAS_COMPONENT')
    if not isinstance(a['target'],str) or len(a['target'])>512:raise Stop('HOST_ALIAS')
   if meta.get('size')!=len(row['data']):raise Stop('HOST_SIZE')
   h=hashlib.sha256(row['data']).hexdigest();bound={'requested':path,'canonical':real,'metadata':meta,'aliases':aliases,'sha256':h}
@@ -303,7 +314,7 @@ def closure(tool_paths,lookup):
     if not value:raise Stop('HOST_RUNPATH')
     value=value.replace('${ORIGIN}',origin).replace('$ORIGIN',origin)
     if '$' in value:raise Stop('HOST_RUNPATH')
-    value=canonical(value)
+    value=canonical(value,'RUNPATH_EXPANDED')
     # NDK private $ORIGIN directories admitted only for the exact tool's same host subtree.
     if not value.startswith('/ldoa-qualification/ndk29-snapshot/toolchains/llvm/prebuilt/linux-x86_64/') and not any(value+'/'==r for r in ROOTS):raise Stop('HOST_RUNPATH')
     roots.append(value+'/')
@@ -430,6 +441,8 @@ class StaticPhaseStop(Stop):
   reason=error.args[0] if isinstance(error,Stop) and len(error.args)==1 and error.args[0] in HOST_REASONS else 'STATIC_UNCLASSIFIED_STOP'
   super().__init__(reason)
   self.checkpoint={'status':'STATIC_STOP_PARTIAL_NOT_QUALIFIED','phase':phase if phase in PHASES else 'ENTER','reason':reason}
+  if isinstance(error,HostPathStop) and error.path_category.get('context') in PATH_CONTEXTS and error.path_category.get('category') in PATH_CATEGORIES:
+   self.checkpoint['path_category']=dict(error.path_category)
   if session is not None:
    self.checkpoint.update({'lookup_attempts':session.attempts,'unique_requested_paths':len(session.records),'unique_observed_bytes':session.bytes,'phase_resources':list(session.phases)})
 """Finite SOURCE candidate. Entry reads occur only under future reviewed execution authority."""

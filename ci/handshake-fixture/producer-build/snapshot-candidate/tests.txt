@@ -44,6 +44,9 @@ test_installer_literal_digest_context_and_gate (test_literal.Literal) ... ok
 test_literal_hashes (test_literal.Literal) ... ok
 test_no_checkout_and_cleanup_owned_success (test_literal.Literal) ... ok
 test_standalone_imports_no_repo (test_literal.Literal) ... ok
+test_categories_no_values (test_path_diagnostic.PathDiagnostic) ... ok
+test_origin_parent_contract_still_stops (test_path_diagnostic.PathDiagnostic) ... ok
+test_start_row_alias_contexts_and_acceptance_unchanged (test_path_diagnostic.PathDiagnostic) ... ok
 test_labels_fixed_no_external_text (test_preinstall_stat.StatReceipt) ... ok
 test_nonroot_nonwritable_still_rejected (test_preinstall_stat.StatReceipt) ... ok
 test_root_writable_stops_before_opt_or_mkdir (test_preinstall_stat.StatReceipt) ... ok
@@ -72,6 +75,6 @@ test_snapshot_cleanup_keeps_sanitized_checkpoint (test_static_diagnostic.Diagnos
 test_unknown_error_text_never_escapes (test_static_diagnostic.Diagnostic) ... ok
 
 ----------------------------------------------------------------------
-Ran 72 tests in 0.206s
+Ran 75 tests in 0.207s
 
 OK
