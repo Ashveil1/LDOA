@@ -1,0 +1,20 @@
+# PROPOSAL ONLY. No registration, activation or dispatch authorized.
+name: isolated-existing-ndk-metadata
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  metadata:
+    if: false
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Pure metadata tests
+        run: cd ci/handshake-fixture/producer-build && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v test_metadata
+      - name: Existing NDK metadata only
+        run: timeout --signal=TERM --kill-after=5s 150s python3 ci/handshake-fixture/producer-build/metadata_existing.py
+# No file content reads, hashing, tool subprocess, compiler, fetch, build, upload/cache or runtime.
