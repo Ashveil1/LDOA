@@ -62,6 +62,19 @@ internal object LogcatWindowChanges {
     private val APPLY = Regex("""^New reported framerate is (\d+)$""")
     private val MARKER_ID = Regex("""[0-9a-f]{16}""")
 
+    /** Compat for the observed transport (run 42034582889) that wraps the
+     *  marker body in ONE enclosing ASCII quote pair. Bare or exactly one
+     *  enclosing pair is accepted; nested, mismatched or partial quoting
+     *  never unwraps. The strict full-match grammar applies after unwrap;
+     *  no substring, prefix/suffix or trim-all-quotes matching. */
+    private fun unwrapOneQuotePair(msg: String): String {
+        if (msg.length >= 2 && msg.first() == '\'' && msg.last() == '\'') {
+            val inner = msg.substring(1, msg.length - 1)
+            return if (inner.indexOf('\'') < 0) inner else msg
+        }
+        return msg
+    }
+
     /** Exact marker body emitted through `log -t tx11-request`. */
     fun markerLine(begin: Boolean, case: String, id: String): String {
         require(case == "original" || case == "patched") { "case identity" }
@@ -115,7 +128,7 @@ internal object LogcatWindowChanges {
         for ((idx, ln) in lines.withIndex()) {
             val m = LINE.matchEntire(ln.trimEnd('\r')) ?: continue
             if (m.groupValues[1] != "tx11-request") continue
-            val mm = MARKER.matchEntire(m.groupValues[2].trim())
+            val mm = MARKER.matchEntire(unwrapOneQuotePair(m.groupValues[2].trim()))
             if (mm != null && mm.groupValues[1] == "BEGIN" && mm.groupValues[2] == case && mm.groupValues[3] == id) beginIdx = idx
         }
         if (beginIdx < 0) return Result(Status.UNAVAILABLE,
@@ -129,7 +142,7 @@ internal object LogcatWindowChanges {
         for (idx in beginIdx + 1 until lines.size) {
             val m = LINE.matchEntire(lines[idx].trimEnd('\r')) ?: continue
             if (m.groupValues[1] != "tx11-request") continue
-            val mm = MARKER.matchEntire(m.groupValues[2].trim())
+            val mm = MARKER.matchEntire(unwrapOneQuotePair(m.groupValues[2].trim()))
             if (mm != null && mm.groupValues[1] == "END" && mm.groupValues[2] == case && mm.groupValues[3] == id) { endIdx = idx; break }
         }
         if (endIdx < 0) return Result(Status.UNAVAILABLE,

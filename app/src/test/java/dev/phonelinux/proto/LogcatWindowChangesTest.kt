@@ -34,6 +34,73 @@ class LogcatWindowChangesTest {
         assertEquals(listOf(1800 to 414, 1800 to 1949, 1080 to 1949), r.events.map { it.width to it.height })
     }
 
+
+    // Actual returned lines from run 42034582889 (patched case, marker id
+    // c0f3a9725021c288): the transport wrapped markers in ONE quote pair.
+    private val runId42034582889 = "c0f3a9725021c288"
+    private val actualBegin =
+        "11-05 13:41:14.421  5990  5990 E tx11-request: 'LDOA-MANAGED-CASE MARKER BEGIN case=patched id=c0f3a9725021c288'"
+    private val actualEnd =
+        "11-05 13:41:55.975  6718  6718 E tx11-request: 'LDOA-MANAGED-CASE MARKER END case=patched id=c0f3a9725021c288'"
+    private val actualRequest =
+        "11-05 13:41:44.600  5896  5926 E tx11-request: window changed: 1080 1929 builtin"
+
+    private fun qline(markerBegin: Boolean, case: String = "patched", markerId: String = id,
+                      open: String = "'", close: String = "'") =
+        line("tx11-request", open + LogcatWindowChanges.markerLine(markerBegin, case, markerId) + close)
+
+    @Test fun quotedActualRunFixture_scopesAndClassifies() {
+        val cap = listOf(actualBegin, actualRequest, actualEnd).joinToString("\n")
+        val r = LogcatWindowChanges.parse(cap, "patched", runId42034582889, false, true, true)
+        assertEquals(LogcatWindowChanges.Status.OK, r.status)
+        assertEquals(1, r.events.size)
+        assertEquals(LogcatWindowChanges.Kind.REQUEST, r.events[0].kind)
+        assertEquals(1080, r.events[0].width); assertEquals(1929, r.events[0].height)
+    }
+
+    @Test fun bareAndQuotedMarkers_bothPass() {
+        val bare = listOf(begin(), req(1080, 1949, 2), end()).joinToString("\n")
+        assertEquals(LogcatWindowChanges.Status.OK,
+            LogcatWindowChanges.parse(bare, "patched", id, false, true, true).status)
+        val quoted = listOf(qline(true), req(1080, 1949, 2), qline(false)).joinToString("\n")
+        assertEquals(LogcatWindowChanges.Status.OK,
+            LogcatWindowChanges.parse(quoted, "patched", id, false, true, true).status)
+    }
+
+    @Test fun mismatchedQuotes_strictReject() {
+        val openOnly = listOf(qline(true, close = ""), req(1080, 1949, 2), qline(false)).joinToString("\n")
+        assertEquals(LogcatWindowChanges.Status.UNAVAILABLE,
+            LogcatWindowChanges.parse(openOnly, "patched", id, false, true, true).status)
+        val closeOnly = listOf(qline(true, open = ""), req(1080, 1949, 2), qline(false)).joinToString("\n")
+        assertEquals(LogcatWindowChanges.Status.UNAVAILABLE,
+            LogcatWindowChanges.parse(closeOnly, "patched", id, false, true, true).status)
+    }
+
+    @Test fun nestedQuotes_strictReject() {
+        val nested = listOf(qline(true, open = "''", close = "''"), req(1080, 1949, 2), qline(false)).joinToString("\n")
+        assertEquals(LogcatWindowChanges.Status.UNAVAILABLE,
+            LogcatWindowChanges.parse(nested, "patched", id, false, true, true).status)
+    }
+
+    @Test fun quotedWrongCaseOrId_strictReject() {
+        val wrongCase = listOf(qline(true, case = "original"), req(1080, 1949, 2), qline(false)).joinToString("\n")
+        assertEquals(LogcatWindowChanges.Status.UNAVAILABLE,
+            LogcatWindowChanges.parse(wrongCase, "patched", id, false, true, true).status)
+        val wrongId = listOf(qline(true, markerId = "ffffffffffffffff"), req(1080, 1949, 2), qline(false)).joinToString("\n")
+        assertEquals(LogcatWindowChanges.Status.UNAVAILABLE,
+            LogcatWindowChanges.parse(wrongId, "patched", id, false, true, true).status)
+    }
+
+    @Test fun prefixSuffixAroundQuotes_strictReject() {
+        val pre = line("tx11-request", "x'" + LogcatWindowChanges.markerLine(true, "patched", id) + "'")
+        val suf = line("tx11-request", "'" + LogcatWindowChanges.markerLine(true, "patched", id) + "'x")
+        for (bad in listOf(pre, suf)) {
+            val cap = listOf(bad, req(1080, 1949, 2), qline(false)).joinToString("\n")
+            assertEquals(LogcatWindowChanges.Status.UNAVAILABLE,
+                LogcatWindowChanges.parse(cap, "patched", id, false, true, true).status)
+        }
+    }
+
     @Test fun missingBegin_unavailable_neverInterpreted() {
         val cap = listOf(req(1080, 1949, 2), end()).joinToString("\n")
         val r = LogcatWindowChanges.parse(cap, "patched", id, false, true, true)
