@@ -3467,6 +3467,21 @@ class MobileDesktopEntryTest {
             }
             error("managed restore observation cap")
         }
+        // tx11-request diagnostic (auxiliary, never gates the case): in-buffer
+        // BEGIN/END markers with a random id scope ONE post-hoc bounded logcat
+        // dump in the finally below. The pinned server already logs every
+        // dequeued EVENT_SCREEN_SIZE request pre-configure (E/tx11-request
+        // "window changed") and every apply-path attempt (V/LorieNative
+        // "New reported framerate", NOT proof RRScreenSizeSet succeeded);
+        // this records the ordered sequence per case. Absence of a line is UNKNOWN (logd
+        // ring loss inside the window is not audited), never proof none was
+        // sent. No logcat -c, no follow mode, no product behavior change.
+        val tx11MarkerId="%016x".format(java.security.SecureRandom().nextLong())
+        var tx11BeginWallMs=-1L
+        val tx11BeginSent=runCatching {
+            device.executeShellCommand("log -p e -t tx11-request '"+LogcatWindowChanges.markerLine(true,case,tx11MarkerId)+"'")
+            tx11BeginWallMs=System.currentTimeMillis()
+        }.isSuccess
         var primary:Throwable?=null
         var mismatches=0
         val observed=mutableListOf<Pair<Int,Int>>()
@@ -3610,6 +3625,28 @@ class MobileDesktopEntryTest {
             raw.appendText("CASE geometry observations complete; original_mismatches=$mismatches; pixels/input manual review required\n")
         } catch(t:Throwable){primary=t;throw t}
         finally {
+            // Auxiliary ordered-request evidence: emit END marker, then ONE
+            // bounded dump of the existing emission. Post-hoc read only;
+            // capture problems NEVER mask the primary failure or gate the
+            // case. END precedes `wm size reset` so reset requests fall
+            // outside the scoped window.
+            try {
+                val tx11EndSent=runCatching {
+                    device.executeShellCommand("log -p e -t tx11-request '"+LogcatWindowChanges.markerLine(false,case,tx11MarkerId)+"'")
+                }.isSuccess
+                val tx11EndWallMs=System.currentTimeMillis()
+                val tx11Dump=XdiagAbortEvidence.bounded(8_000){device.executeShellCommand("logcat -d -v threadtime -s tx11-request:V LorieNative:V")}
+                val tx11Capped=tx11Dump?.let{LogcatWindowChanges.cap(it)}
+                val tx11Result=LogcatWindowChanges.parse(tx11Capped?.first,case,tx11MarkerId,tx11Capped?.second?:false,tx11BeginSent,tx11EndSent)
+                val tx11Body=LogcatWindowChanges.render(tx11Result,case,tx11MarkerId,tx11BeginWallMs,tx11EndWallMs,tx11Capped?.first)
+                // Inlined into the ALREADY-EXPORTED managed-comparison.txt:
+                // the persistent transport whitelist is cross-run byte-pinned
+                // (test_workflow_wire_contract_transport_no_new_files), so a
+                // new file would silently drop at export. check_case.py
+                // tolerates extra lines (prefix/substring/regex gates only).
+                runCatching{raw.appendText("LOGCAT_TX11_BEGIN\n"+tx11Body+"LOGCAT_TX11_END\n")}
+                    .onFailure{runCatching{raw.appendText("LOGCAT_TX11 inline append FAILED "+it.javaClass.simpleName+"\n")}}
+            } catch(t:Throwable){runCatching{raw.appendText("LOGCAT_TX11 capture path FAILED "+t.javaClass.simpleName+"\n")}}
             try {
                 lifecycle.finish(primary) {
                     if(guestAborted)error("managed restore forbidden after unresolved helper cleanup")
