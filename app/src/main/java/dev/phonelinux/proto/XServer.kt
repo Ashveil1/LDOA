@@ -554,15 +554,29 @@ object XServer {
         // banner, client context created/disconnect) are a separate path:
         // stdout MAY buffer (block-buffered under the file redirect;
         // vtest_server installs no SIGTERM handler, so default-disposition
-        // teardown would terminate without a stdio flush). VREND_DEBUG is
-        // bounded to feat (once-per-context caps negotiation); obj and
-        // the per-command cmd stream are deliberately excluded (volume is
-        // object/submission-count-bound, not a fixed small size).
+        // teardown would terminate without a stdio flush). VREND_DEBUG
+        // set (pinned 1.3.0 src/vrend/vrend_debug.c:150-169 - verified
+        // against the tagged source, not assumed): feat (once-per-context
+        // caps negotiation), caller (one line per context creation:
+        // attributes each vtest context to its guest process), cmd
+        // (per-command line: the log tail names the command being
+        // processed when a forked worker dies - the causal capture for
+        // the observed 'lost connection to rendering server' shell
+        // aborts in run 42350473043), gles + khr (GLES-host specific
+        // debug + KHR_debug callbacks: the host translator's own error
+        // output), glsl (created-shader dumps: mutter/cogl compile a
+        // small fixed shader set, so volume is bounded by shader count,
+        // not frame count). Volume note: cmd is submission-count-bound,
+        // but the observed failure window is ~60-75s of session life, so
+        // the log stays artifact-harvestable (tens of MB worst case);
+        // obj/tex/blit/query stay excluded (per-op spam, off-failure-
+        // class). This expanded set is diagnostic-only, flag-gated, and
+        // never a default.
         val virglDebugOptIn = ldoaDebugFlagOn(ctx, ".ldoa-virgl-debug")
         val virglSocket = if (reuseLikely) null else startVirglServerOptIn(ctx,
             extraEnv = if (virglDebugOptIn) mapOf(
                 "VIRGL_LOG_LEVEL" to "debug",
-                "VREND_DEBUG" to "feat") else emptyMap(),
+                "VREND_DEBUG" to "feat,caller,cmd,gles,glsl,khr") else emptyMap(),
             extraArgs = if (vtestMcOptIn) listOf("--no-fork", "--multi-clients") else emptyList())
         // A server started speculatively for a launch that turns out to be
         // a reuse (or fails) dies AFTER the ownership lock is released:

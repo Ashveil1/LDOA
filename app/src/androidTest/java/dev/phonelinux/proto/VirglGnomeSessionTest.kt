@@ -635,7 +635,7 @@ class VirglGnomeSessionTest {
         // VIRGL DEBUG LOGGING OPT-IN (explicit -e ldoaVirglDebug 1 ONLY;
         // default OFF = byte-identical launch env on both sides). One flag
         // file gates BOTH the server traces (XServer: VIRGL_LOG_LEVEL +
-        // VREND_DEBUG=feat extraEnv) and the guest init-time GL logs
+        // VREND_DEBUG=feat,caller,cmd,gles,glsl,khr extraEnv) and the guest init-time GL logs
         // (GuestUbuntu: LIBGL_DEBUG=verbose + EGL_LOG_LEVEL=debug;
         // MUTTER_DEBUG defaults are NOT modified). Strict lifecycle via
         // LdoaFlagLifecycle (JVM-fixture-covered), NOT the Files.exists
@@ -763,7 +763,9 @@ class VirglGnomeSessionTest {
                 } // else: pre-existing regular flag left UNCHANGED (no rewrite,
                   // no owned mutation; restore will touch nothing)
                 out.append("virgl-debug logging mode: ON (explicit instrumentation arg\n")
-                    .append("  ldoaVirglDebug=1; MINIMAL INIT-ONLY set: server VREND_DEBUG=feat +\n")
+                    .append("  ldoaVirglDebug=1; CAUSAL-CAPTURE set: server VREND_DEBUG=feat,\n")
+                    .append("  caller,cmd,gles,glsl,khr (pinned-1.3.0-verified flags; per-command\n")
+                    .append("  stream bounded by the ~60-75s observed failure window) +\n")
                     .append("  VIRGL_LOG_LEVEL=debug (stderr, flushed per message), guest\n")
                     .append("  LIBGL_DEBUG=verbose + EGL_LOG_LEVEL=debug (init-time driver-load\n")
                     .append("  lines only; MUTTER_DEBUG defaults UNCHANGED - no per-frame topics;\n")
