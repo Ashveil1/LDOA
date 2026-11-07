@@ -103,6 +103,25 @@ jobs:
           readelf -V ci/virgl/eglprobe-x86_64 | grep -o "GLIBC_[0-9.]*" | sort -Vu | tail -2
           readelf -V ci/virgl/eglprobe-aarch64 | grep -o "GLIBC_[0-9.]*" | sort -Vu | tail -2
           sha256sum ci/virgl/eglprobe-x86_64 ci/virgl/eglprobe-aarch64 app/src/main/jniLibs/x86_64/libhostprobe.so app/src/main/jniLibs/arm64-v8a/libhostprobe.so
+      - name: Build guest xpresentprobe (session lane only)
+        if: github.event.inputs.lane == 'session'
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu binutils
+          # Same glibc version contract as the eglprobe build above:
+          # the runner MUST be noble (24.04) so the guest probe's glibc
+          # symbol versions never exceed the rootfs' 2.39.
+          test "$(lsb_release -cs)" = "noble" || { echo "RUNNER-NOT-NOBLE: $(lsb_release -ds) - probe glibc contract unverified"; exit 1; }
+          gcc -O2 -Wall -o ci/virgl/xpresentprobe-x86_64 ci/virgl/xpresentprobe.c -ldl
+          aarch64-linux-gnu-gcc -O2 -Wall -o ci/virgl/xpresentprobe-aarch64 ci/virgl/xpresentprobe.c -ldl
+          for f in ci/virgl/xpresentprobe-x86_64 ci/virgl/xpresentprobe-aarch64; do
+            readelf -h "$f" | grep -E "Class|Machine|Type" || { echo "READELF-FAILED $f"; exit 1; }
+          done
+          echo "max GLIBC symbol versions required by the guest probes (must be <= 2.39 = noble):"
+          readelf -V ci/virgl/xpresentprobe-x86_64 | grep -o "GLIBC_[0-9.]*" | sort -Vu | tail -2
+          readelf -V ci/virgl/xpresentprobe-aarch64 | grep -o "GLIBC_[0-9.]*" | sort -Vu | tail -2
+          sha256sum ci/virgl/xpresentprobe-x86_64 ci/virgl/xpresentprobe-aarch64
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -191,6 +210,9 @@ jobs:
             virgl-session-xcontent.partial
             virgl-session-xmap.ppm
             virgl-session-xov.ppm
+            virgl-session-xcontrol.img
+            virgl-session-xpresent-llvmpipe.img
+            virgl-session-xpresent-virpipe.img
             virgl-session-root.xwd
             xcontrol-check-drawing.txt
             /tmp/instr-xcontrol.log

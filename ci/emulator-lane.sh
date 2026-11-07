@@ -282,6 +282,15 @@ if [ "$LANE" = full ] || [ "$LANE" = session ]; then
     echo "XMAP-OVERLAY-BUILD FAILED - test will record overlay-pixels NO-RECORD (arm continues)"
   fi
 fi
+# Guest presentation-probe push for the SESSION lane (the virgl
+# black-frame attribution discriminator): xpresentprobe runs INSIDE
+# proot from the app-writable rootfs like eglprobe, so the lane-built
+# binaries are staged to the device files dir and the instrument copies
+# the arch-matching one in. Fail-hard like the virgl-only probe push:
+# a missing probe silently wastes the whole lane's discriminator.
+if [ "$LANE" = session ]; then
+  adb -s "$SERIAL" shell mkdir -p /sdcard/Android/data/dev.phonelinux.proto/files && adb -s "$SERIAL" push ci/virgl/xpresentprobe-x86_64 ci/virgl/xpresentprobe-aarch64 /sdcard/Android/data/dev.phonelinux.proto/files/ || { echo "XPRESENT-PROBE-PUSH-FAILED - instruments NOT run"; exit 1; }
+fi
 date -u +"VIRGL-SESSION start %H:%M:%S (lane=$LANE e1=$E1 vtestmc=$VTESTMC)"
 if [ "$LANE" = full ] || [ "$LANE" = session ]; then
   timeout -s KILL 1500 adb -s "$SERIAL" shell am instrument -w $E1ARG $VTESTMCARG $VIRGLDEBUGARG -e class dev.phonelinux.proto.VirglGnomeSessionTest,dev.phonelinux.proto.GnomeSessionScriptSafetyTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl-session.log | tail -15 || echo "VIRGL-SESSION-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"
@@ -295,7 +304,7 @@ if [ "$LANE" = full ] || [ "$LANE" = session ]; then grep -q "OK (" /tmp/instr-v
 # payload REMOVES the target: a harvested file is intact device content or
 # ABSENT, never a masquerading partial/error payload.
 if [ "$LANE" = full ] || [ "$LANE" = session ]; then
-  for f in virgl-session.txt virgl-session-xcontent.img virgl-session-xcontent.partial virgl-session-xmap.ppm virgl-session-xov.ppm virgl-server.log; do
+  for f in virgl-session.txt virgl-session-xcontent.img virgl-session-xcontent.partial virgl-session-xmap.ppm virgl-session-xov.ppm virgl-session-xcontrol.img virgl-session-xpresent-llvmpipe.img virgl-session-xpresent-virpipe.img virgl-server.log; do
     pull_or_absent "$f" "$f" 60 "VIRGL-SESSION-HARVEST"
   done
 fi

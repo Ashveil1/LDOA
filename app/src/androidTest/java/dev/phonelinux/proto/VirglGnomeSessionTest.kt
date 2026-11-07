@@ -87,6 +87,16 @@ class VirglGnomeSessionTest {
      *  because comm may contain spaces/parens; null when unreadable. A
      *  bare /proc/PID directory does not exclude PID reuse - starttime
      *  revalidation does. */
+    /** ELF e_machine of a host-visible file (same contract as
+     *  VirglProbeTest's private helper; duplicated so this test stays
+     *  self-contained). */
+    private fun xpElfMachine(f: File): Int {
+        val b = ByteArray(20)
+        java.io.FileInputStream(f).use { if (it.read(b) < 20) return -1 }
+        if (b[0] != 0x7f.toByte() || b[1] != 'E'.code.toByte()) return -1
+        return (b[18].toInt() and 0xff) or ((b[19].toInt() and 0xff) shl 8)
+    }
+
     private fun procStartTick(pid: Int): String? {
         return try {
             File("/proc/" + pid + "/stat").readText().substringAfterLast(") ").split(" ")[19]
@@ -1725,6 +1735,167 @@ class VirglGnomeSessionTest {
                 } finally {
                     out.append("guest xmap script removal: ")
                         .append(removeOwnedGuestFile(rootfs, "tmp/" + xmapScript)).append('\n')
+                }
+            }
+
+            // GUEST PRESENTATION PROBE (xcontrol + xpresent): the
+            // black-frame attribution discriminator, designed from the
+            // run-41441550074 evidence (compositor runs on virpipe and
+            // submits GL, yet root/overlay/window captures are 100%
+            // black). ARM control paints the ROOT a known solid color
+            // via xsetroot (no GL anywhere) and re-captures: a visible
+            // control proves THIS capture path can see known color, so
+            // a black virpipe capture cannot be blamed on the capture
+            // path. ARMS llvmpipe/virpipe run ci/virgl/xpresentprobe.c
+            // - an EGL-on-X11 window surface, the mutter-x11 mechanism
+            // in miniature - under each gallium driver with distinct
+            // known colors (green / blue), then xwd -root. GLX is
+            // deliberately NOT probed: lorie's GLX is indirect-only on
+            // this lane, so a GLX client renders in the X server and
+            // could present color while virpipe is broken (false pass;
+            // see ci/virgl/eglprobe.c header). Every outcome is
+            // RECORDED as a verdict, never asserted: a black virpipe
+            // capture is the expected failure mode under attribution,
+            // not a test defect. The probe binary is pushed by the
+            // lane (session lane only); lanes without the push record
+            // probe-absent instead of failing. Same staleness gate as
+            // the xcontent capture; identity revalidated after, and a
+            // change DISCARDS the artifacts.
+            val xpGate: String? = when {
+                XServer.currentLaunchIdForTest() != launchId ->
+                    "generation changed before presentation probe"
+                !gsStartMatches(gsPid, gsStartTick) ->
+                    "session process generation changed before presentation probe"
+                else -> null
+            }
+            if (xpGate != null) {
+                out.append("VERDICT xcontrol-root: SKIPPED fail-closed: ").append(xpGate).append('\n')
+                out.append("VERDICT xpresent-llvmpipe: SKIPPED fail-closed (same stale-owner gate)\n")
+                out.append("VERDICT xpresent-virpipe: SKIPPED fail-closed (same stale-owner gate)\n")
+            } else {
+                // Fixture: xsetroot from x11-xserver-utils, same
+                // fake-root apt pattern as the xcontent fixture;
+                // recorded, never a gate - the control arm degrades to
+                // tool-absent on failure.
+                try {
+                    val fxPre = Proot.runGuest(ctx, rootfs,
+                        listOf("which", "xsetroot"), timeoutMs = 20_000)
+                    if (!(fxPre.exitCode == 0 && fxPre.stdout.trim().isNotEmpty())) {
+                        val fxApt = Proot.runGuest(ctx, rootfs,
+                            listOf("/bin/sh", "-c",
+                                "export DEBIAN_FRONTEND=noninteractive; timeout -k 5 570 apt-get install -y --no-install-recommends x11-xserver-utils"),
+                            fakeRoot = true, timeoutMs = 600_000)
+                        out.append("xpresent fixture: apt-get install x11-xserver-utils exit=")
+                            .append(fxApt.exitCode)
+                            .append(" stderr-tail=").append(fxApt.stderr.takeLast(160).replace('\n', ' '))
+                            .append('\n')
+                    }
+                } catch (t: Throwable) {
+                    out.append("xpresent fixture: provisioning threw ")
+                        .append(t.message ?: t.javaClass.simpleName)
+                        .append(" - recorded, control arm degrades\n")
+                }
+
+                // Stage the lane-built probe, arch-selected by the
+                // PROVISIONED ROOTFS' ELF header (never by assumption),
+                // same contract as VirglProbeTest.stageProbe - except
+                // ABSENCE IS RECORDED, not asserted: the full lane does
+                // not push this probe.
+                var xpProbeGuest: String? = null
+                run {
+                    val extDir = ctx.getExternalFilesDir(null)
+                    val rootSh = VirglTestCommon.resolveGuest(rootfs, File(rootfs, "bin/sh"))
+                    val guestMach = xpElfMachine(rootSh)
+                    val guestArch = when (guestMach) {
+                        0x3E -> "x86_64"
+                        0xB7 -> "aarch64"
+                        else -> null
+                    }
+                    val ext = if (guestArch != null) File(extDir, "xpresentprobe-" + guestArch) else null
+                    if (guestArch == null || ext == null || !ext.isFile) {
+                        out.append("xpresent fixture: probe binary not staged (arch=")
+                            .append(guestArch ?: "unreadable").append(" pushed=")
+                            .append(ext?.isFile ?: false)
+                            .append(") - probe arms NO-RECORD (control arm unaffected)\n")
+                    } else if (xpElfMachine(ext) != guestMach) {
+                        out.append("xpresent fixture: probe ELF machine mismatch vs rootfs - probe arms NO-RECORD\n")
+                    } else {
+                        val dst = File(rootfs, "tmp/xpresentprobe-" + launchId)
+                        dst.delete()
+                        dst.writeBytes(ext.readBytes())
+                        android.system.Os.chmod(dst.absolutePath, 493) // 0755
+                        xpProbeGuest = "/tmp/xpresentprobe-" + launchId
+                    }
+                }
+
+                val xpScript = "ldoa-guest-xpresent-" + launchId + ".sh"
+                val xpBase = "/tmp/ldoa-xpres-" + launchId
+                File(rootfs, "tmp/" + xpScript).writeText(
+                    InstrumentationRegistry.getInstrumentation().context.assets
+                        .open("ldoa-guest-xpresent.sh").bufferedReader().readText())
+                val xpBinds = mutableListOf<Pair<String, String>>(
+                    XServer.socketDir(ctx).absolutePath to "/tmp/.X11-unix")
+                if (sock != null && sock.exists())
+                    xpBinds.add(sock.absolutePath to "/tmp/.virgl_test")
+                val xpInvokeAt = System.currentTimeMillis()
+                try {
+                    val xp = Proot.runGuest(ctx, rootfs,
+                        listOf("/bin/sh", "/tmp/" + xpScript, xpBase, xpProbeGuest ?: "NONE"),
+                        extraBinds = xpBinds,
+                        extraEnv = mapOf("DISPLAY" to ":0"), timeoutMs = 180_000)
+                    out.append("xpresent probe transcript (RAW, bounded): ")
+                        .append(xp.stdout.trim().replace('\n', ' ').take(1200)).append('\n')
+                    // Bind arm captures with the same bounded discipline
+                    // as the xcontent artifact.
+                    val armFiles = listOf(
+                        Triple("control", "xcontrol-root", "virgl-session-xcontrol.img"),
+                        Triple("llvmpipe", "xpresent-llvmpipe", "virgl-session-xpresent-llvmpipe.img"),
+                        Triple("virpipe", "xpresent-virpipe", "virgl-session-xpresent-virpipe.img"))
+                    for ((arm, verdictName, artifact) in armFiles) {
+                        val armResult = xp.stdout.lineSequence()
+                            .lastOrNull { it.startsWith("XP_ARM arm=" + arm + " ") } ?: ""
+                        val capSrc = File(rootfs, "tmp/ldoa-xpres-" + launchId + "-" + arm + ".xwd")
+                        val bindFailure: String? = when {
+                            !capSrc.isFile -> "capture missing or not a regular file"
+                            capSrc.length() <= 1000 -> "capture trivial (" + capSrc.length() + " bytes)"
+                            capSrc.length() > 67_108_864 -> "capture over the 64MiB bound"
+                            capSrc.lastModified() < xpInvokeAt - 5_000 ->
+                                "capture predates this invocation (stale bound as fresh)"
+                            capSrc.length() * 2 > ctx.filesDir.usableSpace ->
+                                "insufficient filesDir free space for a bounded copy"
+                            else -> null
+                        }
+                        val verdict: String = if (bindFailure != null) {
+                            "NOT-CAPTURED (" + bindFailure + "); arm-result=[" + armResult.take(240) + "]"
+                        } else {
+                            val capDst = File(ctx.filesDir, artifact)
+                            capDst.delete(); capSrc.copyTo(capDst, overwrite = true)
+                            "CAPTURED bytes=" + capDst.length() + "; artifact " + artifact +
+                                " REQUIRES reviewer pixel inspection - a nonblank capture is not" +
+                                " automatically the probed color; arm-result=[" + armResult.take(240) + "]"
+                        }
+                        out.append("VERDICT ").append(verdictName).append(": ").append(verdict).append('\n')
+                    }
+                    // POST-probe identity revalidation: a generation or
+                    // session change during the probe voids the binding.
+                    if (XServer.currentLaunchIdForTest() != launchId || !gsStartMatches(gsPid, gsStartTick)) {
+                        for (t in armFiles) File(ctx.filesDir, t.third).delete()
+                        out.append("xpresent: IDENTITY-LOST-DURING-PROBE - artifacts DISCARDED, never bound to this launch\n")
+                    }
+                } finally {
+                    try {
+                        Proot.runGuest(ctx, rootfs,
+                            listOf("/bin/sh", "/tmp/" + xpScript, "CLEANUP", xpBase),
+                            extraBinds = xpBinds,
+                            extraEnv = mapOf("DISPLAY" to ":0"), timeoutMs = 30_000)
+                    } catch (t: Throwable) {
+                        out.append("xpresent cleanup attempt FAILED (auxiliary): ")
+                            .append(t.message ?: t.javaClass.simpleName).append('\n')
+                    }
+                    out.append("guest xpresent script removal: ")
+                        .append(removeOwnedGuestFile(rootfs, "tmp/" + xpScript)).append('\n')
+                    out.append("guest xpresent probe removal: ")
+                        .append(removeOwnedGuestFile(rootfs, "tmp/xpresentprobe-" + launchId)).append('\n')
                 }
             }
 

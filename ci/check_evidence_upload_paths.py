@@ -47,6 +47,9 @@ CLAIM_RULES = [
     (re.compile(r"VERDICT window-pixels: SAMPLED"), "virgl-session-xmap.ppm"),
     (re.compile(r"VERDICT overlay-pixels: SAMPLED"), "virgl-session-xov.ppm"),
     (re.compile(r"VERDICT guest-xcontent: CAPTURED"), "virgl-session-xcontent.img"),
+    (re.compile(r"VERDICT xcontrol-root: CAPTURED"), "virgl-session-xcontrol.img"),
+    (re.compile(r"VERDICT xpresent-llvmpipe: CAPTURED"), "virgl-session-xpresent-llvmpipe.img"),
+    (re.compile(r"VERDICT xpresent-virpipe: CAPTURED"), "virgl-session-xpresent-virpipe.img"),
 ]
 
 # Workspace-root diagnostic files the lane produces OUTSIDE pull_or_absent
@@ -59,6 +62,9 @@ SAMPLE_REPORT = """\
 VERDICT window-pixels: SAMPLED (5 of 5 patches; fixture sample)
 VERDICT overlay-pixels: SAMPLED (5 of 5 patches; fixture sample)
 VERDICT guest-xcontent: CAPTURED tool=xwd (fixture sample)
+VERDICT xcontrol-root: CAPTURED (fixture sample)
+VERDICT xpresent-llvmpipe: CAPTURED (fixture sample)
+VERDICT xpresent-virpipe: CAPTURED (fixture sample)
 """
 
 
