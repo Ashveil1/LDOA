@@ -268,7 +268,8 @@ object XServer {
      *  Socket-ready is NOT GL-context-ready: the guest-side glxinfo
      *  renderer string is the only accepted proof of the virgl route. */
     private fun startVirglServerOptIn(ctx: Context, extraEnv: Map<String, String> = emptyMap(),
-                                      extraArgs: List<String> = emptyList()): File? {
+                                      extraArgs: List<String> = emptyList(),
+                                      prootDeathCapture: Boolean = false): File? {
         if (!virglOptedIn(ctx)) return null
         val nd = ctx.applicationInfo.nativeLibraryDir
         val bin = File(nd, "libvirgl_test_server.so")
@@ -286,14 +287,53 @@ object XServer {
         val sock = File(dir, "virgl_test_" + System.nanoTime() + ".sock")
         try { sock.delete() } catch (t: Throwable) { } // clean ONLY our own socket path
         val log = File(ctx.filesDir, "virgl-server.log")
+        // DEBUG-ONLY worker death capture (flag-gated at the call site,
+        // same .ldoa-virgl-debug flag as VREND_DEBUG): fork-mode vtest
+        // workers die SILENTLY - run 42786043315 lost a worker mid-session
+        // (guest read ECONNRESET, then Mesa virgl_vtest_socket.c abort)
+        // with no tombstone (SIGKILL produces no debuggerd event), no
+        // phantom Killing line, no lmkd line, and no stdout flush. The
+        // only observer that ALWAYS sees a child's death reason is a
+        // ptracer. The APK already ships the Termux proot; wrapping the
+        // server in it with PROOT_VERBOSE=1 logs every child exit-status
+        // and terminating signal - SIGKILL included, the tracer gets the
+        // death notification regardless. Verified against termux/proot
+        // src/tracee/event.c: WIFEXITED -> VERBOSE(level 1) "exited with
+        // status %d"; WIFSIGNALED -> VERBOSE(level vpid!=1) "terminated
+        // with signal %d". Level 1 is the MINIMAL verbosity for death
+        // events: it adds only one-time/rare notices (ptrace accel,
+        // seccomp SIGSYS handling, broken-POKEDATA workaround); per-
+        // syscall logging lives at level 4+. --kill-on-exit (PTRACE_O_
+        // EXITKILL) keeps stop containment: when the tracer dies the
+        // kernel SIGKILLs every tracee, so no worker outlives the stop
+        // path. RISK (accepted, one run): proot mediates every server
+        // syscall; if the server cannot start under it, the existing
+        // fail-closed path logs the death and falls back to SOFTWARE -
+        // loud, never silent.
+        val prootBin = File(nd, "libproot.so")
+        val prootWrap = prootDeathCapture && prootBin.canExecute()
+        if (prootDeathCapture && !prootWrap) Log.w(TAG,
+            "proot death-capture requested but libproot.so not executable - UNWRAPPED launch (capture OFF)")
         val proc = try {
-            val args = mutableListOf(bin.absolutePath,
-                "--use-egl-surfaceless", "--use-gles", "--socket-path", sock.absolutePath)
+            val args = mutableListOf<String>()
+            if (prootWrap) { args.add(prootBin.absolutePath); args.add("--kill-on-exit") }
+            args.add(bin.absolutePath)
+            args.add("--use-egl-surfaceless")
+            args.add("--use-gles")
+            args.add("--socket-path")
+            args.add(sock.absolutePath)
             // Test-only extras (diagnostics): the session launch at the
             // call site above passes neither - product default unchanged.
             args.addAll(extraArgs)
             val pb = ProcessBuilder(args)
             pb.environment()["LD_LIBRARY_PATH"] = nd
+            if (prootWrap) {
+                pb.environment()["PROOT_LOADER"] = File(nd, "libproot_loader.so").absolutePath
+                pb.environment()["PROOT_LOADER_32"] = File(nd, "libproot_loader32.so").absolutePath
+                pb.environment()["PROOT_TMP_DIR"] = Proot.prootTmpDir(ctx).absolutePath
+                pb.environment()["PROOT_VERBOSE"] = "1"
+                Log.i(TAG, "virgl server launching UNDER PROOT death-capture (PROOT_VERBOSE=1, --kill-on-exit) - diagnostic mode")
+            }
             pb.environment().putAll(extraEnv)
             pb.redirectErrorStream(true)
             pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))
@@ -575,7 +615,11 @@ object XServer {
             extraEnv = if (virglDebugOptIn) mapOf(
                 "VIRGL_LOG_LEVEL" to "debug",
                 "VREND_DEBUG" to "feat,caller,khr") else emptyMap(),
-            extraArgs = if (vtestMcOptIn) listOf("--no-fork", "--multi-clients") else emptyList())
+            extraArgs = if (vtestMcOptIn) listOf("--no-fork", "--multi-clients") else emptyList(),
+            // Same debug flag also wraps the server in proot for worker
+            // death-event capture (rationale + proot-level verification at
+            // the launch site above). Diagnostic-only, never a default.
+            prootDeathCapture = virglDebugOptIn)
         // A server started speculatively for a launch that turns out to be
         // a reuse (or fails) dies AFTER the ownership lock is released:
         // its bounded stop wait must never extend a lock hold that UI Stop
