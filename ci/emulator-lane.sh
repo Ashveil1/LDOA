@@ -293,7 +293,20 @@ if [ "$LANE" = session ]; then
 fi
 date -u +"VIRGL-SESSION start %H:%M:%S (lane=$LANE e1=$E1 vtestmc=$VTESTMC)"
 if [ "$LANE" = full ] || [ "$LANE" = session ]; then
+  # Periodic runner-side copy of the growing server log DURING the session
+  # (harvest hygiene after run 42780133847: the emulator died mid-session
+  # and the unharvested virgl-server.log died with it). One small cat every
+  # 20s - trivial load next to the lean debug set - atomically replacing the
+  # last good copy so a mid-pull device loss never leaves a masquerading
+  # partial. Best-effort: a dead device just stops refreshing the copy.
+  echo "virgl-server-periodic.log: latest successful runner-side copy of the device virgl-server.log during VIRGL-SESSION (header only = no copy ever succeeded)" > /tmp/virgl-server-periodic.log
+  ( for _i in $(seq 1 75); do
+      adb -s "$SERIAL" exec-out run-as dev.phonelinux.proto cat files/virgl-server.log > /tmp/virgl-server-periodic.partial 2>/dev/null && mv /tmp/virgl-server-periodic.partial /tmp/virgl-server-periodic.log
+      sleep 20
+    done ) &
+  _VS_PULL_PID=$!
   timeout -s KILL 1500 adb -s "$SERIAL" shell am instrument -w $E1ARG $VTESTMCARG $VIRGLDEBUGARG -e class dev.phonelinux.proto.VirglGnomeSessionTest,dev.phonelinux.proto.GnomeSessionScriptSafetyTest dev.phonelinux.proto.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee /tmp/instr-virgl-session.log | tail -15 || echo "VIRGL-SESSION-INSTR-TIMEOUT: outer 1500s bound hit - instrument never returned"
+  kill "$_VS_PULL_PID" 2>/dev/null || true
 else
   echo "virgl-session SKIPPED (lane=$LANE)" > /tmp/instr-virgl-session.log
 fi

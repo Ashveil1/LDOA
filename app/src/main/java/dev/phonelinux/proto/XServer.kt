@@ -556,27 +556,25 @@ object XServer {
         // vtest_server installs no SIGTERM handler, so default-disposition
         // teardown would terminate without a stdio flush). VREND_DEBUG
         // set (pinned 1.3.0 src/vrend/vrend_debug.c:150-169 - verified
-        // against the tagged source, not assumed): feat (once-per-context
-        // caps negotiation), caller (one line per context creation:
-        // attributes each vtest context to its guest process), cmd
-        // (per-command line: the log tail names the command being
-        // processed when a forked worker dies - the causal capture for
-        // the observed 'lost connection to rendering server' shell
-        // aborts in run 42350473043), gles + khr (GLES-host specific
-        // debug + KHR_debug callbacks: the host translator's own error
-        // output), glsl (created-shader dumps: mutter/cogl compile a
-        // small fixed shader set, so volume is bounded by shader count,
-        // not frame count). Volume note: cmd is submission-count-bound,
-        // but the observed failure window is ~60-75s of session life, so
-        // the log stays artifact-harvestable (tens of MB worst case);
-        // obj/tex/blit/query stay excluded (per-op spam, off-failure-
-        // class). This expanded set is diagnostic-only, flag-gated, and
-        // never a default.
+        // against the tagged source, not assumed): LEAN set feat,caller,khr
+        // - feat (once-per-context caps negotiation), caller (one line per
+        // context creation: attributes each vtest context to its guest
+        // process - the attribution core of the causal capture), khr
+        // (KHR_debug callbacks: the host translator's own error output).
+        // cmd + glsl are DELIBERATELY DROPPED: run 42780133847 (the first
+        // debug-capable prebuilt) emitted the full set and the session
+        // died under the logging I/O weight - launcher ANR dialog during
+        // the session, then the emulator went offline ~1 min in and took
+        // the unharvested server log with it. caller+khr keep the causal
+        // value (who connected, which context, what GL error) at a volume
+        // the device survives. obj/tex/blit/query stay excluded (per-op
+        // spam, off-failure-class). Diagnostic-only, flag-gated, never a
+        // default.
         val virglDebugOptIn = ldoaDebugFlagOn(ctx, ".ldoa-virgl-debug")
         val virglSocket = if (reuseLikely) null else startVirglServerOptIn(ctx,
             extraEnv = if (virglDebugOptIn) mapOf(
                 "VIRGL_LOG_LEVEL" to "debug",
-                "VREND_DEBUG" to "feat,caller,cmd,gles,glsl,khr") else emptyMap(),
+                "VREND_DEBUG" to "feat,caller,khr") else emptyMap(),
             extraArgs = if (vtestMcOptIn) listOf("--no-fork", "--multi-clients") else emptyList())
         // A server started speculatively for a launch that turns out to be
         // a reuse (or fails) dies AFTER the ownership lock is released:

@@ -763,9 +763,9 @@ class VirglGnomeSessionTest {
                 } // else: pre-existing regular flag left UNCHANGED (no rewrite,
                   // no owned mutation; restore will touch nothing)
                 out.append("virgl-debug logging mode: ON (explicit instrumentation arg\n")
-                    .append("  ldoaVirglDebug=1; CAUSAL-CAPTURE set: server VREND_DEBUG=feat,\n")
-                    .append("  caller,cmd,gles,glsl,khr (pinned-1.3.0-verified flags; per-command\n")
-                    .append("  stream bounded by the ~60-75s observed failure window) +\n")
+                    .append("  ldoaVirglDebug=1; CAUSAL-CAPTURE lean set: server VREND_DEBUG=\n")
+                    .append("  feat,caller,khr (pinned-1.3.0-verified flags; cmd+glsl dropped after\n")
+                    .append("  run 42780133847 died under their logging I/O weight) +\n")
                     .append("  VIRGL_LOG_LEVEL=debug (stderr, flushed per message), guest\n")
                     .append("  LIBGL_DEBUG=verbose + EGL_LOG_LEVEL=debug (init-time driver-load\n")
                     .append("  lines only; MUTTER_DEBUG defaults UNCHANGED - no per-frame topics;\n")
