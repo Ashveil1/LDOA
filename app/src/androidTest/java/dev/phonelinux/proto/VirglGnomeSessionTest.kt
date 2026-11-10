@@ -897,13 +897,25 @@ class VirglGnomeSessionTest {
                 val uidNow = try { android.system.Os.stat("/proc/" + srvPid).st_uid } catch (t: Throwable) { -1 }
                 val identOk = startBefore != null && startBefore == srvIdent!!.start &&
                     startAfter == startBefore && uidNow == srvIdent.uid
-                val isServerBin = cmdArgs.isNotEmpty() && cmdArgs[0].endsWith("libvirgl_test_server.so")
-                val effNoFork = cmdArgs.contains("--no-fork")
-                val effMulti = cmdArgs.contains("--multi-clients")
+                // PROOT DEATH-CAPTURE WRAP (.ldoa-virgl-debug): the
+                // OWNED, identity-verified pid is proot itself and its
+                // argv is [libproot.so, --kill-on-exit, <server>, <args>]
+                // - the server invocation sits one level down in the
+                // SAME owned pid's live cmdline. Attribution unchanged:
+                // identity still re-verifies on the owned pid; only the
+                // argv prefix differs. (Run 42791179652 failed closed
+                // here before this awareness existed.)
+                val prootWrapped = cmdArgs.size >= 3 &&
+                    cmdArgs[0].endsWith("libproot.so") && cmdArgs[1] == "--kill-on-exit"
+                val serverArgs = if (prootWrapped) cmdArgs.drop(2) else cmdArgs
+                val isServerBin = serverArgs.isNotEmpty() && serverArgs[0].endsWith("libvirgl_test_server.so")
+                val effNoFork = serverArgs.contains("--no-fork")
+                val effMulti = serverArgs.contains("--multi-clients")
                 out.append("== VTEST-MC effective-mode: requested=")
                     .append(if (vtestMcRequested) "ON" else "OFF")
+                    .append(" proot-wrap=").append(if (prootWrapped) "ON" else "off")
                     .append(" effective-args=")
-                    .append(if (cmdArgs.isEmpty()) "UNREADABLE" else cmdArgs.drop(1).joinToString(" "))
+                    .append(if (serverArgs.isEmpty()) "UNREADABLE" else serverArgs.drop(1).joinToString(" "))
                     .append(" identity=").append(if (identOk) "REVERIFIED-LIVE" else "MISMATCH-OR-GONE")
                     .append(" server-binary=").append(if (isServerBin) "CONFIRMED" else "UNCONFIRMED")
                     .append('\n')
@@ -912,7 +924,7 @@ class VirglGnomeSessionTest {
                     "binary - cannot prove which mode the running server is in (fail closed)",
                     identOk && isServerBin)
                 assertTrue("vtest-mc mode mismatch: requested=" + (if (vtestMcRequested) "ON" else "OFF") +
-                    " but the RUNNING server's effective args are [" + cmdArgs.drop(1).joinToString(" ") +
+                    " but the RUNNING server's effective args are [" + serverArgs.drop(1).joinToString(" ") +
                     "] - a silently-ignored opt-in or stale mode must never masquerade as the requested mode",
                     if (vtestMcRequested) effNoFork && effMulti else !effNoFork && !effMulti)
                 // OWNED roster: actual children of the server (ppid
@@ -921,14 +933,19 @@ class VirglGnomeSessionTest {
                 // contradicts the fork path (vtest_server.c:548) being
                 // disabled. A partial scan = UNKNOWN, never zero.
                 val roster = scanOwnUidProcs()
-                val workers = roster.first.filter { it.second == srvPid }
+                // Under the proot wrap the server is proot's single
+                // direct child (vpid 1); fork-mode workers are then
+                // GRANDchildren of the owned pid - descend one level.
+                val serverChildPid = if (prootWrapped)
+                    roster.first.firstOrNull { it.second == srvPid }?.first ?: -1 else srvPid
+                val workers = roster.first.filter { it.second == serverChildPid }
                 out.append("== VTEST-MC roster: server=1 workers=")
                     .append(if (roster.second) "UNKNOWN(own-uid scan partial - completeness not established)"
                         else workers.size.toString())
                     .append('\n')
                 if (!roster.second) {
                     assertTrue("vtest-mc --no-fork roster violation: " + workers.size +
-                        " child process(es) parented by server pid " + srvPid +
+                        " child process(es) parented by server pid " + serverChildPid +
                         " - the fork-per-client path is active despite --no-fork, so the " +
                         "effective mode is not what the args claim",
                         !vtestMcRequested || workers.isEmpty())
