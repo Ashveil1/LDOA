@@ -159,8 +159,21 @@ XEOF
 
   echo "== $ABI: virglrenderer (static into the server, EGL platform, GL-only)"
   # venus=false: bounded GL spike, no Vulkan loader/header dependency.
+  # DIAGNOSTIC BUILD (vtest connection-drop causal capture): upstream 1.3.0
+  # defaults buildtype=release + b_ndebug=if-release (meson.build:29), so
+  # NDEBUG is defined and every VREND_DEBUG macro body compiles OUT
+  # (vrend_debug.h:75-79; init call guarded at vrend_renderer.c:7606-7608).
+  # Proven against the shipped release binaries: dbg_caller/dbg_cmd format
+  # strings absent, and run 42352320637 captured zero debug lines despite
+  # VREND_DEBUG set. -Db_ndebug=false keeps NDEBUG undefined so the
+  # feat/caller/cmd/gles/glsl/khr channel physically exists in the binary.
+  # Accepted diagnostic side effects: assert()s go live (an abort is
+  # signal, not silence) and timing shifts vs release. Any production or
+  # smoothness claim stays on release builds; this binary serves the
+  # bounded causal run only.
   meson setup "$WORK/vr-build-$ABI" "virglrenderer-virglrenderer-$VR_VERSION" \
     --cross-file "$CROSS" --prefix="$PREFIX" --libdir=lib \
+    -Dbuildtype=debugoptimized -Db_ndebug=false \
     -Ddefault_library=static -Dplatforms=egl -Dvenus=false -Dtests=false
   ninja -C "$WORK/vr-build-$ABI" install
 

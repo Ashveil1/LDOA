@@ -33,7 +33,7 @@ on:
         type: choice
         options: ['off', 'on']
       virgldebug:
-        description: 'VIRGL DEBUG LOGGING experiment: on = pass -e ldoaVirglDebug 1 to VirglGnomeSessionTest only (MINIMAL init-time set for THAT launch: server VREND_DEBUG=feat + VIRGL_LOG_LEVEL=debug, guest LIBGL_DEBUG=verbose + EGL_LOG_LEVEL=debug; MUTTER_DEBUG defaults unmodified; flags restored after); off (DEFAULT) = every lane keeps the stock launch env. Regression/full runs must keep this off.'
+        description: 'VIRGL DEBUG LOGGING experiment: on = pass -e ldoaVirglDebug 1 to VirglGnomeSessionTest only (CAUSAL-CAPTURE set for THAT launch: server VREND_DEBUG=feat,caller,cmd,gles,glsl,khr - requires the debug-capable prebuilt built with -Db_ndebug=false, release prebuilts compile all VREND_DEBUG output out - + VIRGL_LOG_LEVEL=debug, guest LIBGL_DEBUG=verbose + EGL_LOG_LEVEL=debug; MUTTER_DEBUG defaults unmodified; flags restored after); off (DEFAULT) = every lane keeps the stock launch env. Regression/full runs must keep this off.'
         default: 'off'
         type: choice
         options: ['off', 'on']
